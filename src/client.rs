@@ -1,4 +1,6 @@
+use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use futures::stream::{Stream, StreamExt};
 
@@ -6,14 +8,22 @@ use crate::agentic::{AgenticEvent, AgenticLoop, AgenticLoopOptions};
 use crate::api::client::AnthropicClient;
 use crate::api::streaming::StreamUpdate;
 use crate::api::types::{ApiMessage, ContentBlock, SystemBlock};
-use crate::errors::{ClaudeSDKError, Result};
-use crate::tools::framework::{ToolContext, ToolExecutor, ToolRegistry};
+use crate::errors::Result;
+use crate::tools::framework::{ToolContext, ToolExecutor, ToolPermissionRequest, ToolRegistry};
 use crate::tools::permission::PermissionRules;
 use crate::types::PermissionMode;
 
 // ---------------------------------------------------------------------------
 // SDK client options
 // ---------------------------------------------------------------------------
+
+/// Callback type for permission prompts.
+/// Receives a ToolPermissionRequest, returns true to allow, false to deny.
+pub type PermissionCallbackFn = Arc<
+    dyn Fn(ToolPermissionRequest) -> Pin<Box<dyn Future<Output = bool> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// Options for configuring the SDK client.
 pub struct ClaudeSDKClientOptions {
@@ -39,6 +49,9 @@ pub struct ClaudeSDKClientOptions {
     pub permission_rules: Option<PermissionRules>,
     /// Temperature for API calls.
     pub temperature: Option<f64>,
+    /// Callback for tool permission prompts.
+    /// Called when permission_mode is not BypassPermissions and no explicit allow/deny rule matches.
+    pub permission_callback: Option<PermissionCallbackFn>,
 }
 
 impl Default for ClaudeSDKClientOptions {
@@ -55,6 +68,7 @@ impl Default for ClaudeSDKClientOptions {
             tool_registry: None,
             permission_rules: None,
             temperature: None,
+            permission_callback: None,
         }
     }
 }
@@ -101,6 +115,7 @@ struct ToolExecutorFactory {
     cwd: std::path::PathBuf,
     permission_mode: PermissionMode,
     permission_rules: PermissionRules,
+    permission_callback: Option<PermissionCallbackFn>,
     custom_registry: Option<fn() -> ToolRegistry>,
     use_defaults: bool,
 }
@@ -123,7 +138,7 @@ impl ToolExecutorFactory {
         let context = ToolContext {
             working_directory: self.cwd.clone(),
             permission_mode: self.permission_mode.clone(),
-            permission_callback: None,
+            permission_callback: self.permission_callback.clone(),
         };
 
         ToolExecutor::new(registry, context)
@@ -194,6 +209,7 @@ impl ClaudeSDKClient {
                 cwd,
                 permission_mode,
                 permission_rules,
+                permission_callback: options.permission_callback,
                 custom_registry: None,
                 use_defaults: !has_custom,
             },
