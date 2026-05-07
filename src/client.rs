@@ -200,6 +200,8 @@ impl ClaudeSDKClient {
             cache_last_n_messages: 2,
             context_window_tokens: 200_000,
             include_stream_events: true,
+            abort: None,
+            fallback_model: None,
         };
 
         Self {

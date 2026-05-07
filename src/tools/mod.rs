@@ -1,5 +1,6 @@
 pub mod framework;
 pub mod permission;
+pub mod streaming_executor;
 
 // Built-in tools
 pub mod bash;
