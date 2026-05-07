@@ -4,6 +4,13 @@ pub mod internal;
 pub mod query;
 pub mod client;
 
+// New modules — native API transport (no CLI subprocess needed)
+pub mod api;
+pub mod tools;
+pub mod compact;
+pub mod messages;
+pub mod agentic;
+
 // Re-exports for convenience
 pub use errors::ClaudeSDKError;
 pub use types::*;
