@@ -64,6 +64,9 @@ pub struct ClaudeSDKClientOptions {
     /// MCP servers to connect to. Keys are server names, values are configs.
     /// Tools from these servers are registered as `mcp__{server}__{tool}`.
     pub mcp_servers: HashMap<String, McpServerConfig>,
+    /// Resume a previous session by ID. Loads messages from the session
+    /// JSONL file and continues the conversation.
+    pub resume_session_id: Option<String>,
 }
 
 impl Default for ClaudeSDKClientOptions {
@@ -84,6 +87,7 @@ impl Default for ClaudeSDKClientOptions {
             permission_callback: None,
             stop_hook: None,
             mcp_servers: HashMap::new(),
+            resume_session_id: None,
         }
     }
 }
@@ -123,6 +127,7 @@ pub struct ClaudeSDKClient {
     options: AgenticLoopOptions,
     tool_executor_factory: ToolExecutorFactory,
     messages: Vec<ApiMessage>,
+    session_storage: Option<crate::session::SessionStorage>,
 }
 
 /// Factory to create fresh ToolExecutors (since they're consumed by AgenticLoop).
@@ -233,6 +238,19 @@ impl ClaudeSDKClient {
             stop_hook: options.stop_hook,
         };
 
+        // Set up session storage and load resume messages
+        let cwd_str = cwd.to_string_lossy().to_string();
+        let session_storage = crate::session::SessionStorage::for_cwd(&cwd_str).await.ok();
+
+        let mut initial_messages = Vec::new();
+        if let Some(ref resume_id) = options.resume_session_id {
+            if let Some(ref storage) = session_storage {
+                if let Ok(msgs) = storage.load(resume_id).await {
+                    initial_messages = msgs;
+                }
+            }
+        }
+
         Self {
             anthropic_client,
             options: loop_options,
@@ -244,7 +262,8 @@ impl ClaudeSDKClient {
                 custom_tools: all_custom_tools,
                 use_defaults: options.use_default_tools,
             },
-            messages: Vec::new(),
+            messages: initial_messages,
+            session_storage,
         }
     }
 
@@ -288,18 +307,59 @@ impl ClaudeSDKClient {
     }
 
     /// Send a message and return a stream of agentic events.
+    /// Persists messages to session JSONL file (same format as Claude CLI)
+    /// so conversations can be resumed later.
+    ///
+    /// Port of QueryEngine.submitMessage L281-360 from QueryEngine.js:
+    /// each assistant/user message from query() is pushed to messages[]
+    /// and recorded via recordTranscript().
     pub fn send_message_stream(
         &self,
         prompt: &str,
     ) -> Pin<Box<dyn Stream<Item = Result<AgenticEvent>> + Send>> {
         let mut opts = self.options.clone();
         opts.initial_messages = self.messages.clone();
-        opts.initial_messages
-            .push(ApiMessage::user(vec![ContentBlock::text(prompt)]));
+        let prompt_msg = ApiMessage::user(vec![ContentBlock::text(prompt)]);
+        opts.initial_messages.push(prompt_msg.clone());
 
         let executor = self.tool_executor_factory.create();
         let agentic_loop = AgenticLoop::new(self.anthropic_client.clone(), executor, opts);
-        agentic_loop.stream()
+        let session_id = agentic_loop.session_id().to_string();
+        let inner = agentic_loop.stream();
+        let session_storage = self.session_storage.clone();
+
+        Box::pin(async_stream::stream! {
+            // Port L152-158: persist user prompt before query
+            if let Some(ref storage) = session_storage {
+                let _ = storage.append_user(&session_id, &prompt_msg.content).await;
+            }
+
+            tokio::pin!(inner);
+            while let Some(event) = inner.next().await {
+                match &event {
+                    // Port L293-306: persist assistant and user messages
+                    Ok(AgenticEvent::Assistant { ref content, ref model, ref stop_reason, .. }) => {
+                        if let Some(ref storage) = session_storage {
+                            // Port L303-304: assistant → recordTranscript (fire-and-forget)
+                            let _ = storage.append_assistant(
+                                &session_id,
+                                content,
+                                model,
+                                stop_reason.as_deref(),
+                            ).await;
+                        }
+                    }
+                    Ok(AgenticEvent::User { ref message, .. }) => {
+                        if let Some(ref storage) = session_storage {
+                            // Port L305-306: user → await recordTranscript
+                            let _ = storage.append_user(&session_id, &message.content).await;
+                        }
+                    }
+                    _ => {}
+                }
+                yield event;
+            }
+        })
     }
 
     /// Send a message and stream only text deltas (for simple output).
@@ -333,6 +393,17 @@ impl ClaudeSDKClient {
     /// Get accumulated messages from previous turns.
     pub fn messages(&self) -> &[ApiMessage] {
         &self.messages
+    }
+
+    /// Set messages for session resume. Pass messages from a previous session
+    /// to continue the conversation from where it left off.
+    pub fn set_messages(&mut self, messages: Vec<ApiMessage>) {
+        self.messages = messages;
+    }
+
+    /// Append messages (e.g. after collecting events from a stream).
+    pub fn append_messages(&mut self, messages: Vec<ApiMessage>) {
+        self.messages.extend(messages);
     }
 }
 
