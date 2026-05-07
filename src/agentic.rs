@@ -989,6 +989,36 @@ impl AgenticLoop {
                         });
                     }
 
+                    // ─── API error message check ─────────────────────
+                    // Port: if (lastMessage?.isApiErrorMessage) return { reason: "completed" }
+                    // If the assistant message is itself an API error (e.g. from a non-streaming
+                    // fallback that surfaced an error as text), skip stop hooks and return.
+                    {
+                        let text_lower = assistant_msg.text().to_lowercase();
+                        let is_api_error_msg = text_lower.contains("api error")
+                            || text_lower.contains("rate limit")
+                            || text_lower.contains("invalid request")
+                            || text_lower.contains("internal server error");
+                        if is_api_error_msg {
+                            let last_text = assistant_msg.text();
+                            yield Ok(AgenticEvent::Result {
+                                subtype: "success".to_string(),
+                                duration_ms: start_time.elapsed().as_millis() as u64,
+                                duration_api_ms: state.api_duration_ms,
+                                is_error: false,
+                                num_turns: state.turn_count,
+                                result: Some(last_text),
+                                stop_reason: state.last_stop_reason.clone(),
+                                total_cost_usd: state.total_cost_usd,
+                                usage: state.total_usage.clone(),
+                                errors: Vec::new(),
+                                session_id: sid.clone(),
+                                uuid: new_uuid(),
+                            });
+                            break;
+                        }
+                    }
+
                     // ─── Stop hook ────────────────────────────────────
                     // Port: handleStopHooks() — run user-provided callback
                     // before declaring the turn completed.
