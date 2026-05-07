@@ -146,16 +146,23 @@ pub trait Tool: Send + Sync {
 /// Registry that holds all available tools.
 pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
+    shared_tools: Vec<Arc<dyn Tool>>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        Self { tools: Vec::new() }
+        Self { tools: Vec::new(), shared_tools: Vec::new() }
     }
 
-    /// Register a tool.
+    /// Register a tool (owned).
     pub fn register(&mut self, tool: Box<dyn Tool>) {
         self.tools.push(tool);
+    }
+
+    /// Register a shared tool (Arc). Useful for tools that need to be
+    /// cloned across multiple registries.
+    pub fn register_shared(&mut self, tool: Arc<dyn Tool>) {
+        self.shared_tools.push(tool);
     }
 
     /// Register all default built-in tools.
@@ -179,32 +186,38 @@ impl ToolRegistry {
         self.register(Box::new(tasks::TaskOutputTool));
     }
 
+    /// Iterator over all tools (owned + shared).
+    fn all_tools(&self) -> impl Iterator<Item = &dyn Tool> {
+        self.tools.iter().map(|t| t.as_ref())
+            .chain(self.shared_tools.iter().map(|t| t.as_ref()))
+    }
+
     /// Find a tool by name.
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
-        self.tools.iter().find(|t| t.name() == name).map(|t| t.as_ref())
+        self.all_tools().find(|t| t.name() == name)
     }
 
     /// Get all tool names.
     pub fn names(&self) -> Vec<&str> {
-        self.tools.iter().map(|t| t.name()).collect()
+        self.all_tools().map(|t| t.name()).collect()
     }
 
     /// Number of registered tools.
     pub fn len(&self) -> usize {
-        self.tools.len()
+        self.tools.len() + self.shared_tools.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tools.is_empty()
+        self.tools.is_empty() && self.shared_tools.is_empty()
     }
 
     /// Generate API tool definitions for all registered tools.
     /// Only the last tool gets cache_control to stay within the API limit
     /// of 4 cache_control blocks per request.
     pub fn api_definitions(&self) -> Vec<ToolDefinition> {
-        let len = self.tools.len();
-        self.tools
-            .iter()
+        let all: Vec<&dyn Tool> = self.all_tools().collect();
+        let len = all.len();
+        all.into_iter()
             .enumerate()
             .map(|(i, tool)| ToolDefinition {
                 name: tool.name().to_string(),

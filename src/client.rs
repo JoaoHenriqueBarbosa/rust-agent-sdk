@@ -9,7 +9,7 @@ use crate::api::client::AnthropicClient;
 use crate::api::streaming::StreamUpdate;
 use crate::api::types::{ApiMessage, ContentBlock, SystemBlock};
 use crate::errors::Result;
-use crate::tools::framework::{ToolContext, ToolExecutor, ToolPermissionRequest, ToolRegistry};
+use crate::tools::framework::{Tool, ToolContext, ToolExecutor, ToolPermissionRequest, ToolRegistry};
 use crate::tools::permission::PermissionRules;
 use crate::types::PermissionMode;
 
@@ -43,8 +43,11 @@ pub struct ClaudeSDKClientOptions {
     pub cwd: Option<std::path::PathBuf>,
     /// Permission mode for tool execution.
     pub permission_mode: Option<PermissionMode>,
-    /// Custom tool registry. If None, defaults are registered.
-    pub tool_registry: Option<ToolRegistry>,
+    /// Custom tools to register alongside the built-in ones.
+    /// Each tool is wrapped in Arc so it can be shared across loop iterations.
+    pub custom_tools: Vec<Arc<dyn Tool>>,
+    /// Whether to register the default built-in tools (default: true).
+    pub use_default_tools: bool,
     /// Permission rules for tools.
     pub permission_rules: Option<PermissionRules>,
     /// Temperature for API calls.
@@ -65,7 +68,8 @@ impl Default for ClaudeSDKClientOptions {
             system_prompt: None,
             cwd: None,
             permission_mode: None,
-            tool_registry: None,
+            custom_tools: Vec::new(),
+            use_default_tools: true,
             permission_rules: None,
             temperature: None,
             permission_callback: None,
@@ -116,23 +120,20 @@ struct ToolExecutorFactory {
     permission_mode: PermissionMode,
     permission_rules: PermissionRules,
     permission_callback: Option<PermissionCallbackFn>,
-    custom_registry: Option<fn() -> ToolRegistry>,
+    custom_tools: Vec<Arc<dyn Tool>>,
     use_defaults: bool,
 }
 
 impl ToolExecutorFactory {
     fn create(&self) -> ToolExecutor {
-        let mut registry = if self.use_defaults {
-            let mut r = ToolRegistry::new();
-            r.register_defaults();
-            r
-        } else {
-            ToolRegistry::new()
-        };
+        let mut registry = ToolRegistry::new();
 
-        // If there's a custom registry builder, use it instead
-        if let Some(builder) = self.custom_registry {
-            registry = builder();
+        if self.use_defaults {
+            registry.register_defaults();
+        }
+
+        for tool in &self.custom_tools {
+            registry.register_shared(tool.clone());
         }
 
         let context = ToolContext {
@@ -200,8 +201,6 @@ impl ClaudeSDKClient {
             context_window_tokens: 200_000,
         };
 
-        let has_custom = options.tool_registry.is_some();
-
         Self {
             anthropic_client,
             options: loop_options,
@@ -210,8 +209,8 @@ impl ClaudeSDKClient {
                 permission_mode,
                 permission_rules,
                 permission_callback: options.permission_callback,
-                custom_registry: None,
-                use_defaults: !has_custom,
+                custom_tools: options.custom_tools,
+                use_defaults: options.use_default_tools,
             },
             messages: Vec::new(),
         }
