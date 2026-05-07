@@ -313,7 +313,9 @@ impl ToolExecutor {
                     if !allowed {
                         return ToolExecutionResult {
                             tool_use_id: tool_use.id,
-                            result: ToolResult::error("User denied permission"),
+                            result: ToolResult::error(
+                                "The user denied permission for this tool call.".to_string()
+                            ),
                         };
                     }
                     // Callback approved — proceed to execution
