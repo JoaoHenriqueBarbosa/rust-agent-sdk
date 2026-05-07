@@ -3,6 +3,7 @@
 // taskSummaryModule, jobClassifier) are all `= false` in the external build
 // and are omitted entirely.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -82,17 +83,12 @@ impl QueryUsage {
 pub enum AgenticEvent {
     #[serde(rename = "assistant")]
     Assistant {
-        /// Content blocks (text, tool_use, thinking, etc.)
-        content: Vec<ContentBlock>,
-        model: String,
-        stop_reason: Option<String>,
+        /// Nested message object matching TS SDK shape:
+        /// { id, role, model, content, stop_reason, usage, type: "message" }
+        message: serde_json::Value,
         parent_tool_use_id: Option<String>,
         uuid: String,
         session_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        message_id: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        usage: Option<Usage>,
     },
 
     #[serde(rename = "user")]
@@ -114,6 +110,7 @@ pub enum AgenticEvent {
     #[serde(rename = "system")]
     System {
         subtype: String,
+        #[serde(flatten)]
         data: serde_json::Value,
         uuid: String,
         session_id: String,
@@ -131,6 +128,10 @@ pub enum AgenticEvent {
         stop_reason: Option<String>,
         total_cost_usd: f64,
         usage: QueryUsage,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model_usage: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        permission_denials: Vec<serde_json::Value>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         errors: Vec<String>,
         session_id: String,
@@ -161,6 +162,9 @@ pub struct AgenticLoopOptions {
     pub fallback_model: Option<String>,
     /// Optional stop hook — called when the assistant ends a turn with no tool use.
     pub stop_hook: Option<StopHookCallback>,
+    /// Optional session ID — when set, reuses the given ID instead of
+    /// generating a new one (e.g. for session resume).
+    pub session_id: Option<String>,
 }
 
 impl std::fmt::Debug for AgenticLoopOptions {
@@ -192,6 +196,7 @@ impl Default for AgenticLoopOptions {
             abort: None,
             fallback_model: None,
             stop_hook: None,
+            session_id: None,
         }
     }
 }
@@ -224,6 +229,8 @@ struct LoopState {
     total_cost_usd: f64,
     api_duration_ms: u64,
     auto_compact_tracking: AutoCompactTracking,
+    model_usage: HashMap<String, QueryUsage>,
+    permission_denials: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -304,18 +311,32 @@ fn new_uuid() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Build an AgenticEvent::Assistant from an AssistantMessage with flat fields
-/// matching the TS SDK output format.
+/// Serialize per-model usage map to a JSON Value, or None if empty.
+fn serialize_model_usage(model_usage: &HashMap<String, QueryUsage>) -> Option<serde_json::Value> {
+    if model_usage.is_empty() {
+        return None;
+    }
+    serde_json::to_value(model_usage).ok()
+}
+
+/// Build an AgenticEvent::Assistant from an AssistantMessage with a nested
+/// `message` field matching the TS SDK output format:
+/// { id, role: "assistant", model, content, stop_reason, usage, type: "message" }
 fn assistant_event(msg: &AssistantMessage, session_id: &str) -> AgenticEvent {
+    let message = serde_json::json!({
+        "id": msg.id,
+        "role": "assistant",
+        "model": msg.model,
+        "content": serde_json::to_value(&msg.content).unwrap_or_default(),
+        "stop_reason": stop_reason_str(&msg.stop_reason),
+        "usage": serde_json::to_value(&msg.usage).unwrap_or_default(),
+        "type": "message",
+    });
     AgenticEvent::Assistant {
-        content: msg.content.clone(),
-        model: msg.model.clone(),
-        stop_reason: stop_reason_str(&msg.stop_reason),
+        message,
         parent_tool_use_id: None,
         uuid: new_uuid(),
         session_id: session_id.to_string(),
-        message_id: Some(msg.id.clone()),
-        usage: Some(msg.usage.clone()),
     }
 }
 
@@ -377,7 +398,7 @@ impl AgenticLoop {
     ) -> Self {
         let auto_compact = AutoCompactConfig::new(options.context_window_tokens);
         let compaction_engine = CompactionEngine::new(client.clone());
-        let session_id = new_uuid();
+        let session_id = options.session_id.clone().unwrap_or_else(new_uuid);
         let abort = options.abort.clone().unwrap_or_default();
 
         Self {
@@ -458,6 +479,8 @@ impl AgenticLoop {
                 total_cost_usd: 0.0,
                 api_duration_ms: 0,
                 auto_compact_tracking: AutoCompactTracking::default(),
+                model_usage: HashMap::new(),
+                permission_denials: Vec::new(),
             };
 
             // Yield system init
@@ -490,6 +513,8 @@ impl AgenticLoop {
                         stop_reason: state.last_stop_reason.clone(),
                         total_cost_usd: state.total_cost_usd,
                         usage: state.total_usage.clone(),
+                        model_usage: serialize_model_usage(&state.model_usage),
+                        permission_denials: state.permission_denials.clone(),
                         errors: vec!["Interrupted by user".to_string()],
                         session_id: sid.clone(),
                         uuid: new_uuid(),
@@ -600,6 +625,8 @@ impl AgenticLoop {
                             stop_reason: state.last_stop_reason.clone(),
                             total_cost_usd: state.total_cost_usd,
                             usage: state.total_usage.clone(),
+                            model_usage: serialize_model_usage(&state.model_usage),
+                            permission_denials: state.permission_denials.clone(),
                             errors: vec!["Prompt is too long".to_string()],
                             session_id: sid.clone(),
                             uuid: new_uuid(),
@@ -820,6 +847,8 @@ impl AgenticLoop {
                         stop_reason: state.last_stop_reason.clone(),
                         total_cost_usd: state.total_cost_usd,
                         usage: state.total_usage.clone(),
+                        model_usage: serialize_model_usage(&state.model_usage),
+                        permission_denials: state.permission_denials.clone(),
                         errors: vec![err_str.clone()],
                         session_id: sid.clone(),
                         uuid: new_uuid(),
@@ -851,6 +880,8 @@ impl AgenticLoop {
                         stop_reason: state.last_stop_reason.clone(),
                         total_cost_usd: state.total_cost_usd,
                         usage: state.total_usage.clone(),
+                        model_usage: serialize_model_usage(&state.model_usage),
+                        permission_denials: state.permission_denials.clone(),
                         errors: vec!["Interrupted by user".to_string()],
                         session_id: sid.clone(),
                         uuid: new_uuid(),
@@ -872,6 +903,8 @@ impl AgenticLoop {
                             stop_reason: state.last_stop_reason.clone(),
                             total_cost_usd: state.total_cost_usd,
                             usage: state.total_usage.clone(),
+                            model_usage: serialize_model_usage(&state.model_usage),
+                            permission_denials: state.permission_denials.clone(),
                             errors: vec!["Stream ended without message_stop".to_string()],
                             session_id: sid.clone(),
                             uuid: new_uuid(),
@@ -883,6 +916,12 @@ impl AgenticLoop {
                 // Accumulate usage and cost
                 state.total_usage.accumulate(&assistant_msg.usage);
                 state.total_cost_usd += calculate_cost(&current_model, &assistant_msg.usage);
+
+                // Accumulate per-model usage
+                state.model_usage
+                    .entry(current_model.clone())
+                    .or_insert_with(QueryUsage::default)
+                    .accumulate(&assistant_msg.usage);
 
                 // Capture stop_reason
                 state.last_stop_reason = stop_reason_str(&assistant_msg.stop_reason);
@@ -952,6 +991,8 @@ impl AgenticLoop {
                             stop_reason: Some("prompt_too_long".to_string()),
                             total_cost_usd: state.total_cost_usd,
                             usage: state.total_usage.clone(),
+                            model_usage: serialize_model_usage(&state.model_usage),
+                            permission_denials: state.permission_denials.clone(),
                             errors: vec!["Prompt is too long".to_string()],
                             session_id: sid.clone(),
                             uuid: new_uuid(),
@@ -1012,6 +1053,8 @@ impl AgenticLoop {
                                 stop_reason: state.last_stop_reason.clone(),
                                 total_cost_usd: state.total_cost_usd,
                                 usage: state.total_usage.clone(),
+                                model_usage: serialize_model_usage(&state.model_usage),
+                                permission_denials: state.permission_denials.clone(),
                                 errors: Vec::new(),
                                 session_id: sid.clone(),
                                 uuid: new_uuid(),
@@ -1045,6 +1088,8 @@ impl AgenticLoop {
                                 stop_reason: Some("stop_hook_prevented".to_string()),
                                 total_cost_usd: state.total_cost_usd,
                                 usage: state.total_usage.clone(),
+                                model_usage: serialize_model_usage(&state.model_usage),
+                                permission_denials: state.permission_denials.clone(),
                                 errors: Vec::new(),
                                 session_id: sid.clone(),
                                 uuid: new_uuid(),
@@ -1086,6 +1131,8 @@ impl AgenticLoop {
                         stop_reason: state.last_stop_reason.clone(),
                         total_cost_usd: state.total_cost_usd,
                         usage: state.total_usage.clone(),
+                        model_usage: serialize_model_usage(&state.model_usage),
+                        permission_denials: state.permission_denials.clone(),
                         errors: Vec::new(),
                         session_id: sid.clone(),
                         uuid: new_uuid(),
@@ -1113,6 +1160,23 @@ impl AgenticLoop {
                             session_id: sid.clone(),
                         });
                         all_execution_results.push(exec_result);
+                    }
+                }
+
+                // Detect permission denials from tool execution results
+                for (exec_result, tu) in all_execution_results.iter().zip(tool_use_blocks.iter()) {
+                    if exec_result.result.is_error {
+                        let error_text = exec_result.result.content.iter().any(|c| {
+                            matches!(c, crate::tools::framework::ToolResultContent::Text(t)
+                                if t.contains("denied") || t.contains("Permission denied"))
+                        });
+                        if error_text {
+                            state.permission_denials.push(serde_json::json!({
+                                "tool_name": tu.name,
+                                "tool_use_id": tu.id,
+                                "tool_input": tu.input,
+                            }));
+                        }
                     }
                 }
 
@@ -1144,6 +1208,8 @@ impl AgenticLoop {
                         stop_reason: state.last_stop_reason.clone(),
                         total_cost_usd: state.total_cost_usd,
                         usage: state.total_usage.clone(),
+                        model_usage: serialize_model_usage(&state.model_usage),
+                        permission_denials: state.permission_denials.clone(),
                         errors: vec!["Interrupted by user".to_string()],
                         session_id: sid.clone(),
                         uuid: new_uuid(),
@@ -1173,6 +1239,8 @@ impl AgenticLoop {
                             stop_reason: state.last_stop_reason.clone(),
                             total_cost_usd: state.total_cost_usd,
                             usage: state.total_usage.clone(),
+                            model_usage: serialize_model_usage(&state.model_usage),
+                            permission_denials: state.permission_denials.clone(),
                             errors: vec![format!("Reached maximum number of turns ({max})")],
                             session_id: sid.clone(),
                             uuid: new_uuid(),
@@ -1282,6 +1350,8 @@ mod tests {
             stop_reason: Some("end_turn".to_string()),
             total_cost_usd: 0.01,
             usage: QueryUsage::default(),
+            model_usage: None,
+            permission_denials: Vec::new(),
             errors: Vec::new(),
             session_id: "sess-123".to_string(),
             uuid: "uuid-456".to_string(),

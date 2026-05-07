@@ -236,6 +236,7 @@ impl ClaudeSDKClient {
             abort: None,
             fallback_model: None,
             stop_hook: options.stop_hook,
+            session_id: options.resume_session_id.clone(),
         };
 
         // Set up session storage and load resume messages
@@ -274,19 +275,24 @@ impl ClaudeSDKClient {
 
         let mut text = String::new();
         for event in events {
-            if let AgenticEvent::Assistant { ref content, .. } = event {
-                let message_text: String = content.iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::Text { text, .. } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("");
-                if !message_text.is_empty() {
-                    if !text.is_empty() {
-                        text.push('\n');
+            if let AgenticEvent::Assistant { ref message, .. } = event {
+                if let Some(content) = message.get("content").and_then(|c| c.as_array()) {
+                    let message_text: String = content.iter()
+                        .filter_map(|b| {
+                            if b.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                b.get("text").and_then(|t| t.as_str())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    if !message_text.is_empty() {
+                        if !text.is_empty() {
+                            text.push('\n');
+                        }
+                        text.push_str(&message_text);
                     }
-                    text.push_str(&message_text);
                 }
             }
         }
@@ -323,36 +329,66 @@ impl ClaudeSDKClient {
         opts.initial_messages.push(prompt_msg.clone());
 
         let executor = self.tool_executor_factory.create();
+        let cwd_str = self.tool_executor_factory.cwd.to_string_lossy().to_string();
         let agentic_loop = AgenticLoop::new(self.anthropic_client.clone(), executor, opts);
         let session_id = agentic_loop.session_id().to_string();
         let inner = agentic_loop.stream();
         let session_storage = self.session_storage.clone();
 
         Box::pin(async_stream::stream! {
+            let mut parent_uuid: Option<String> = None;
+
             // Port L152-158: persist user prompt before query
             if let Some(ref storage) = session_storage {
-                let _ = storage.append_user(&session_id, &prompt_msg.content).await;
+                if let Ok(uuid) = storage.append_user(
+                    &session_id,
+                    &prompt_msg.content,
+                    parent_uuid.as_deref(),
+                    &cwd_str,
+                ).await {
+                    parent_uuid = Some(uuid);
+                }
             }
 
             tokio::pin!(inner);
             while let Some(event) = inner.next().await {
                 match &event {
                     // Port L293-306: persist assistant and user messages
-                    Ok(AgenticEvent::Assistant { ref content, ref model, ref stop_reason, .. }) => {
+                    Ok(AgenticEvent::Assistant { ref message, .. }) => {
                         if let Some(ref storage) = session_storage {
+                            // Extract content, model, stop_reason from the nested message Value
+                            let content: Vec<ContentBlock> = message.get("content")
+                                .and_then(|c| serde_json::from_value(c.clone()).ok())
+                                .unwrap_or_default();
+                            let model = message.get("model")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or_default();
+                            let stop_reason = message.get("stop_reason")
+                                .and_then(|s| s.as_str());
                             // Port L303-304: assistant → recordTranscript (fire-and-forget)
-                            let _ = storage.append_assistant(
+                            if let Ok(uuid) = storage.append_assistant(
                                 &session_id,
-                                content,
+                                &content,
                                 model,
-                                stop_reason.as_deref(),
-                            ).await;
+                                stop_reason,
+                                parent_uuid.as_deref(),
+                                &cwd_str,
+                            ).await {
+                                parent_uuid = Some(uuid);
+                            }
                         }
                     }
                     Ok(AgenticEvent::User { ref message, .. }) => {
                         if let Some(ref storage) = session_storage {
                             // Port L305-306: user → await recordTranscript
-                            let _ = storage.append_user(&session_id, &message.content).await;
+                            if let Ok(uuid) = storage.append_user(
+                                &session_id,
+                                &message.content,
+                                parent_uuid.as_deref(),
+                                &cwd_str,
+                            ).await {
+                                parent_uuid = Some(uuid);
+                            }
                         }
                     }
                     _ => {}

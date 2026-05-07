@@ -149,6 +149,11 @@ impl McpClient {
         Ok(result)
     }
 
+    /// Drain and return any `__table_event__` lines captured from stderr.
+    pub async fn take_stderr_events(&self) -> Vec<String> {
+        self.transport.take_stderr_events().await
+    }
+
     /// Convert discovered MCP tools into `Arc<dyn Tool>` instances that can be
     /// registered in the SDK's ToolRegistry.
     ///

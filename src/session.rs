@@ -95,18 +95,28 @@ impl SessionStorage {
 
     /// Append an assistant message to the session JSONL file in the
     /// Claude Code transcript format.
+    /// Returns the uuid of the written entry so the caller can chain parentUuid.
     pub async fn append_assistant(
         &self,
         session_id: &str,
         content: &[ContentBlock],
         model: &str,
         stop_reason: Option<&str>,
-    ) -> Result<()> {
+        parent_uuid: Option<&str>,
+        cwd: &str,
+    ) -> Result<String> {
         let uuid = uuid::Uuid::new_v4().to_string();
+        let timestamp = chrono::Utc::now().to_rfc3339();
         let entry = serde_json::json!({
             "type": "assistant",
             "uuid": uuid,
+            "parentUuid": parent_uuid,
             "sessionId": session_id,
+            "timestamp": timestamp,
+            "cwd": cwd,
+            "version": "0.1.0",
+            "entrypoint": "sdk",
+            "userType": "external",
             "message": {
                 "id": uuid::Uuid::new_v4().to_string(),
                 "role": "assistant",
@@ -116,26 +126,38 @@ impl SessionStorage {
                 "type": "message",
             }
         });
-        self.append_entry(session_id, &entry).await
+        self.append_entry(session_id, &entry).await?;
+        Ok(uuid)
     }
 
     /// Append a user message to the session JSONL file.
+    /// Returns the uuid of the written entry so the caller can chain parentUuid.
     pub async fn append_user(
         &self,
         session_id: &str,
         content: &[ContentBlock],
-    ) -> Result<()> {
+        parent_uuid: Option<&str>,
+        cwd: &str,
+    ) -> Result<String> {
         let uuid = uuid::Uuid::new_v4().to_string();
+        let timestamp = chrono::Utc::now().to_rfc3339();
         let entry = serde_json::json!({
             "type": "user",
             "uuid": uuid,
+            "parentUuid": parent_uuid,
             "sessionId": session_id,
+            "timestamp": timestamp,
+            "cwd": cwd,
+            "version": "0.1.0",
+            "entrypoint": "sdk",
+            "userType": "external",
             "message": {
                 "role": "user",
                 "content": content,
             }
         });
-        self.append_entry(session_id, &entry).await
+        self.append_entry(session_id, &entry).await?;
+        Ok(uuid)
     }
 
     /// Append a raw JSON entry to the session file.

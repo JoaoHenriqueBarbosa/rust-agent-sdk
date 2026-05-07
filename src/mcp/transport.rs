@@ -51,6 +51,7 @@ pub struct StdioTransport {
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
     next_id: AtomicU64,
     _child: Arc<Mutex<Child>>,
+    stderr_events: Arc<Mutex<Vec<String>>>,
 }
 
 impl StdioTransport {
@@ -64,7 +65,7 @@ impl StdioTransport {
         cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
 
         if let Some(env_map) = env {
             for (k, v) in env_map {
@@ -85,6 +86,32 @@ impl StdioTransport {
         let stdout = child.stdout.take().ok_or_else(|| {
             ClaudeSDKError::sdk("Failed to get stdout of MCP server process")
         })?;
+
+        let stderr = child.stderr.take().ok_or_else(|| {
+            ClaudeSDKError::sdk("Failed to get stderr of MCP server process")
+        })?;
+
+        let stderr_events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // Spawn stderr reader task that captures __table_event__ lines
+        let stderr_events_clone = stderr_events.clone();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+                let trimmed = line.trim();
+                if trimmed.contains("__table_event__") {
+                    let mut events = stderr_events_clone.lock().await;
+                    events.push(trimmed.to_string());
+                }
+            }
+        });
 
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -130,7 +157,14 @@ impl StdioTransport {
             pending,
             next_id: AtomicU64::new(1),
             _child: Arc::new(Mutex::new(child)),
+            stderr_events,
         })
+    }
+
+    /// Drain and return any `__table_event__` lines captured from stderr.
+    pub async fn take_stderr_events(&self) -> Vec<String> {
+        let mut events = self.stderr_events.lock().await;
+        std::mem::take(&mut *events)
     }
 
     /// Send a JSON-RPC request and wait for the response.
