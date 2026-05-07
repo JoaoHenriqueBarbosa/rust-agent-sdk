@@ -29,6 +29,11 @@ pub enum ClaudeSDKError {
         message: String,
         data: Option<serde_json::Value>,
     },
+
+    #[error("Model overloaded after {consecutive_529s} consecutive 529 errors — fallback available")]
+    OverloadedFallback {
+        consecutive_529s: u32,
+    },
 }
 
 fn format_process_error(message: &str, exit_code: &Option<i32>, stderr: &Option<String>) -> String {
@@ -82,6 +87,10 @@ impl ClaudeSDKError {
             message: message.into(),
             data,
         }
+    }
+
+    pub fn overloaded_fallback(consecutive_529s: u32) -> Self {
+        Self::OverloadedFallback { consecutive_529s }
     }
 }
 

@@ -4,6 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::stream::Stream;
 
 use crate::api::types::{CacheControl, ContentBlock, ToolDefinition, ToolResultContent as ApiToolResultContent};
 use crate::tools::permission::{PermissionDecision, PermissionRules};
@@ -301,6 +302,55 @@ impl ToolExecutor {
         results
     }
 
+    /// Execute multiple tool_use blocks, yielding results incrementally as each
+    /// tool completes. Concurrency-safe tools run in parallel (results arrive in
+    /// completion order); sequential tools run one-by-one in order.
+    pub fn execute_all_stream(
+        &self,
+        tool_uses: Vec<crate::api::streaming::ToolUseBlock>,
+    ) -> Pin<Box<dyn Stream<Item = ToolExecutionResult> + Send + '_>> {
+        Box::pin(async_stream::stream! {
+            let (safe, unsafe_): (Vec<_>, Vec<_>) = tool_uses
+                .into_iter()
+                .partition(|tu| {
+                    self.registry
+                        .get(&tu.name)
+                        .map(|t| t.is_concurrency_safe())
+                        .unwrap_or(false)
+                });
+
+            // Execute concurrency-safe tools in parallel, yielding as each completes
+            if !safe.is_empty() {
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<ToolExecutionResult>(safe.len());
+                for tu in safe {
+                    let tx = tx.clone();
+                    // SAFETY: We need 'static futures for tokio::spawn, but execute_one
+                    // borrows &self. Use a channel to bridge the gap — each task runs
+                    // execute_one through a shared reference.
+                    //
+                    // We transmute the lifetime to 'static. This is sound because we
+                    // consume all results from rx before this function returns, ensuring
+                    // &self outlives all spawned tasks.
+                    let this: &ToolExecutor = self;
+                    let this: &'static ToolExecutor = unsafe { std::mem::transmute(this) };
+                    tokio::spawn(async move {
+                        let result = this.execute_one(tu).await;
+                        let _ = tx.send(result).await;
+                    });
+                }
+                drop(tx);
+                while let Some(result) = rx.recv().await {
+                    yield result;
+                }
+            }
+
+            // Execute non-safe tools sequentially, yielding after each completes
+            for tu in unsafe_ {
+                yield self.execute_one(tu).await;
+            }
+        })
+    }
+
     /// Execute a single tool_use block.
     async fn execute_one(
         &self,
@@ -354,6 +404,18 @@ impl ToolExecutor {
             }
         };
 
+        // Validate input against schema before execution
+        let schema = tool.input_schema();
+        if let Err(validation_error) = validate_tool_input(&tool_use.input, &schema) {
+            return ToolExecutionResult {
+                tool_use_id: tool_use.id,
+                result: ToolResult::error(format!(
+                    "Input validation error for {}: {}",
+                    tool_use.name, validation_error
+                )),
+            };
+        }
+
         let result = tool.execute(tool_use.input, &self.context).await;
 
         // Truncate large results
@@ -377,6 +439,7 @@ impl ToolExecutor {
                     tool_use_id: r.tool_use_id,
                     content: Some(r.result.to_api_content()),
                     is_error: if r.result.is_error { Some(true) } else { None },
+                    cache_control: None,
                 }
             })
             .collect();
@@ -390,6 +453,52 @@ impl ToolExecutor {
 pub struct ToolExecutionResult {
     pub tool_use_id: String,
     pub result: ToolResult,
+}
+
+/// Validate tool input against the tool's input_schema.
+///
+/// Performs basic JSON schema validation:
+/// - If schema expects `"type": "object"`, input must be an object.
+/// - If schema has `"required"` array, all listed fields must be present in input.
+///
+/// Returns `Ok(())` on success, or `Err(message)` describing the validation failure.
+fn validate_tool_input(input: &serde_json::Value, schema: &serde_json::Value) -> std::result::Result<(), String> {
+    // Check type: object
+    if let Some(schema_type) = schema.get("type").and_then(|t| t.as_str()) {
+        if schema_type == "object" && !input.is_object() {
+            return Err(format!(
+                "Expected input to be an object, got {}",
+                match input {
+                    serde_json::Value::Null => "null",
+                    serde_json::Value::Bool(_) => "boolean",
+                    serde_json::Value::Number(_) => "number",
+                    serde_json::Value::String(_) => "string",
+                    serde_json::Value::Array(_) => "array",
+                    serde_json::Value::Object(_) => unreachable!(),
+                }
+            ));
+        }
+    }
+
+    // Check required fields
+    if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+        if let Some(obj) = input.as_object() {
+            let missing: Vec<&str> = required
+                .iter()
+                .filter_map(|r| r.as_str())
+                .filter(|field| !obj.contains_key(*field))
+                .collect();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "Missing required field{}: {}",
+                    if missing.len() > 1 { "s" } else { "" },
+                    missing.join(", ")
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Truncate text results that exceed MAX_RESULT_SIZE.
@@ -534,5 +643,109 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert!(results[0].result.is_error);
+    }
+
+    #[test]
+    fn test_validate_tool_input_valid_object() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "command": { "type": "string" } },
+            "required": ["command"]
+        });
+        let input = serde_json::json!({ "command": "ls" });
+        assert!(validate_tool_input(&input, &schema).is_ok());
+    }
+
+    #[test]
+    fn test_validate_tool_input_not_object() {
+        let schema = serde_json::json!({ "type": "object" });
+        let input = serde_json::json!("a string");
+        let err = validate_tool_input(&input, &schema).unwrap_err();
+        assert!(err.contains("Expected input to be an object"));
+        assert!(err.contains("string"));
+    }
+
+    #[test]
+    fn test_validate_tool_input_missing_required() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": { "type": "string" },
+                "timeout": { "type": "number" }
+            },
+            "required": ["command", "timeout"]
+        });
+        let input = serde_json::json!({ "command": "ls" });
+        let err = validate_tool_input(&input, &schema).unwrap_err();
+        assert!(err.contains("Missing required field"));
+        assert!(err.contains("timeout"));
+    }
+
+    #[test]
+    fn test_validate_tool_input_no_required() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "command": { "type": "string" } }
+        });
+        let input = serde_json::json!({});
+        assert!(validate_tool_input(&input, &schema).is_ok());
+    }
+
+    #[test]
+    fn test_validate_tool_input_null_input() {
+        let schema = serde_json::json!({ "type": "object" });
+        let input = serde_json::json!(null);
+        let err = validate_tool_input(&input, &schema).unwrap_err();
+        assert!(err.contains("null"));
+    }
+
+    #[test]
+    fn test_validate_tool_input_array_input() {
+        let schema = serde_json::json!({ "type": "object" });
+        let input = serde_json::json!([1, 2, 3]);
+        let err = validate_tool_input(&input, &schema).unwrap_err();
+        assert!(err.contains("array"));
+    }
+
+    #[tokio::test]
+    async fn test_executor_input_validation_failure() {
+        use crate::api::streaming::ToolUseBlock;
+
+        struct StrictTool;
+
+        #[async_trait]
+        impl Tool for StrictTool {
+            fn name(&self) -> &str { "strict" }
+            fn description(&self) -> &str { "A tool with required params" }
+            fn input_schema(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"]
+                })
+            }
+            async fn execute(&self, _input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+                ToolResult::text("should not reach here")
+            }
+        }
+
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(StrictTool));
+
+        let mut ctx = ToolContext::default();
+        ctx.permission_mode = PermissionMode::BypassPermissions;
+
+        let executor = ToolExecutor::new(reg, ctx);
+
+        let results = executor.execute_all(vec![
+            ToolUseBlock { id: "t1".into(), name: "strict".into(), input: serde_json::json!({}) },
+        ]).await;
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].result.is_error);
+        if let ToolResultContent::Text(ref text) = results[0].result.content[0] {
+            assert!(text.contains("Input validation error"));
+            assert!(text.contains("path"));
+        }
     }
 }

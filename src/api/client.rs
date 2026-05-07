@@ -1,4 +1,5 @@
 use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -6,8 +7,9 @@ use futures::stream::{Stream, StreamExt};
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::api::error_classifier::classify_api_error;
 use crate::api::retry::{ErrorKind, RetryConfig, get_retry_delay, should_retry};
-use crate::api::streaming::{StreamAccumulator, StreamUpdate, parse_sse_data};
+use crate::api::streaming::{AssistantMessage, StreamAccumulator, StreamUpdate, parse_sse_data};
 use crate::api::types::*;
 use crate::errors::{ClaudeSDKError, Result};
 
@@ -105,6 +107,45 @@ impl AnthropicClient {
         headers
     }
 
+    /// Generic POST request that sends a JSON body and returns the parsed JSON response.
+    /// Used for endpoints like /v1/messages/count_tokens that share auth/headers
+    /// but have different request/response shapes.
+    pub async fn post_json(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let url = format!("{}{}", self.base_url, path);
+        let headers = self.build_headers();
+        let body_str = serde_json::to_string(body)
+            .map_err(|e| ClaudeSDKError::sdk(format!("Failed to serialize request: {e}")))?;
+
+        let response = self
+            .http_client
+            .post(&url)
+            .headers(headers)
+            .body(body_str)
+            .send()
+            .await
+            .map_err(|e| ClaudeSDKError::cli_connection(format!("Connection failed: {e}")))?;
+
+        let status = response.status().as_u16();
+        let text = response
+            .text()
+            .await
+            .map_err(|e| ClaudeSDKError::cli_connection(format!("Failed to read response: {e}")))?;
+
+        if status != 200 {
+            return Err(ClaudeSDKError::process(
+                format!("API request to {path} failed with status {status}"),
+                Some(status as i32),
+                Some(text),
+            ));
+        }
+
+        serde_json::from_str(&text).map_err(|e| ClaudeSDKError::json_decode(text, e))
+    }
+
     /// Non-streaming message creation (for compaction, summarization, etc.).
     pub async fn create_message(&self, mut request: CreateMessageRequest) -> Result<ApiResponse> {
         request.stream = false;
@@ -115,7 +156,7 @@ impl AnthropicClient {
             .map_err(|e| ClaudeSDKError::sdk(format!("Failed to serialize request: {e}")))?;
 
         let mut attempt = 0u32;
-        let mut overload_retries = 0u32;
+        let mut consecutive_529s = 0u32;
 
         loop {
             let response = self
@@ -150,25 +191,39 @@ impl AnthropicClient {
                     );
 
                     if error_kind == ErrorKind::Overloaded {
-                        overload_retries += 1;
+                        consecutive_529s += 1;
+                    } else {
+                        consecutive_529s = 0;
                     }
 
-                    if should_retry(&self.retry_config, &error_kind, attempt, overload_retries) {
+                    if should_retry(&self.retry_config, &error_kind, attempt, consecutive_529s) {
                         let delay = get_retry_delay(&self.retry_config, &error_kind, attempt);
                         tokio::time::sleep(delay).await;
                         attempt += 1;
                         continue;
                     }
 
+                    // Signal fallback when consecutive 529s hit the overload limit
+                    if error_kind == ErrorKind::Overloaded
+                        && consecutive_529s >= self.retry_config.overload_max_retries
+                    {
+                        return Err(ClaudeSDKError::overloaded_fallback(consecutive_529s));
+                    }
+
+                    let classified = classify_api_error(
+                        status,
+                        response_body.as_deref().unwrap_or(""),
+                    );
                     return Err(ClaudeSDKError::process(
-                        format!("API request failed with status {status}"),
+                        classified,
                         Some(status as i32),
                         response_body,
                     ));
                 }
                 Err(e) => {
                     let error_kind = ErrorKind::ConnectionError;
-                    if should_retry(&self.retry_config, &error_kind, attempt, overload_retries) {
+                    consecutive_529s = 0;
+                    if should_retry(&self.retry_config, &error_kind, attempt, consecutive_529s) {
                         let delay = get_retry_delay(&self.retry_config, &error_kind, attempt);
                         tokio::time::sleep(delay).await;
                         attempt += 1;
@@ -202,6 +257,43 @@ impl AnthropicClient {
         Ok(Box::pin(stream))
     }
 
+    /// Wrap a non-streaming ApiResponse as a stream yielding the equivalent StreamUpdate events.
+    /// Produces a single MessageComplete event with an AssistantMessage built from the response.
+    pub fn wrap_response_as_stream(
+        response: ApiResponse,
+    ) -> Pin<Box<dyn Stream<Item = Result<StreamUpdate>> + Send>> {
+        let assistant_msg = AssistantMessage {
+            id: response.id,
+            model: response.model,
+            content: response.content,
+            stop_reason: StopReason::from(response.stop_reason.as_ref()),
+            usage: response.usage,
+        };
+        let update = StreamUpdate::MessageComplete {
+            message: assistant_msg,
+        };
+        Box::pin(futures::stream::once(async move { Ok(update) }))
+    }
+
+    /// Streaming message creation with non-streaming fallback.
+    ///
+    /// First tries `create_message_stream`. If the stream errors AFTER receiving
+    /// at least one event (partial response), falls back to `create_message`
+    /// (non-streaming) and wraps the result as a single `MessageComplete` event.
+    /// If the stream errors BEFORE any events, returns the error directly
+    /// (letting the caller's retry logic handle it).
+    pub async fn create_message_with_fallback(
+        &self,
+        request: CreateMessageRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamUpdate>> + Send>>> {
+        let fallback_request = request.clone();
+        let stream = self.create_message_stream(request).await?;
+
+        let client = self.clone();
+        let wrapper_stream = FallbackStream::new(stream, client, fallback_request);
+        Ok(Box::pin(wrapper_stream))
+    }
+
     /// Send a POST request with retry logic, returning the raw response for streaming.
     async fn send_with_retry(
         &self,
@@ -210,7 +302,7 @@ impl AnthropicClient {
         body: &str,
     ) -> Result<reqwest::Response> {
         let mut attempt = 0u32;
-        let mut overload_retries = 0u32;
+        let mut consecutive_529s = 0u32;
 
         loop {
             let response = self
@@ -240,25 +332,39 @@ impl AnthropicClient {
                     );
 
                     if error_kind == ErrorKind::Overloaded {
-                        overload_retries += 1;
+                        consecutive_529s += 1;
+                    } else {
+                        consecutive_529s = 0;
                     }
 
-                    if should_retry(&self.retry_config, &error_kind, attempt, overload_retries) {
+                    if should_retry(&self.retry_config, &error_kind, attempt, consecutive_529s) {
                         let delay = get_retry_delay(&self.retry_config, &error_kind, attempt);
                         tokio::time::sleep(delay).await;
                         attempt += 1;
                         continue;
                     }
 
+                    // Signal fallback when consecutive 529s hit the overload limit
+                    if error_kind == ErrorKind::Overloaded
+                        && consecutive_529s >= self.retry_config.overload_max_retries
+                    {
+                        return Err(ClaudeSDKError::overloaded_fallback(consecutive_529s));
+                    }
+
+                    let classified = classify_api_error(
+                        status,
+                        response_body.as_deref().unwrap_or(""),
+                    );
                     return Err(ClaudeSDKError::process(
-                        format!("API request failed with status {status}"),
+                        classified,
                         Some(status as i32),
                         response_body,
                     ));
                 }
                 Err(e) => {
                     let error_kind = ErrorKind::ConnectionError;
-                    if should_retry(&self.retry_config, &error_kind, attempt, overload_retries) {
+                    consecutive_529s = 0;
+                    if should_retry(&self.retry_config, &error_kind, attempt, consecutive_529s) {
                         let delay = get_retry_delay(&self.retry_config, &error_kind, attempt);
                         tokio::time::sleep(delay).await;
                         attempt += 1;
@@ -365,6 +471,91 @@ fn extract_sse_data(event_text: &str) -> Option<&str> {
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// FallbackStream — wraps a streaming response with non-streaming fallback
+// ---------------------------------------------------------------------------
+
+/// Stream wrapper that falls back to a non-streaming API call when the inner
+/// stream errors after having already yielded at least one event.
+struct FallbackStream {
+    inner: Pin<Box<dyn Stream<Item = Result<StreamUpdate>> + Send>>,
+}
+
+impl FallbackStream {
+    fn new(
+        inner: Pin<Box<dyn Stream<Item = Result<StreamUpdate>> + Send>>,
+        client: AnthropicClient,
+        request: CreateMessageRequest,
+    ) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<StreamUpdate>>(64);
+
+        // Spawn a task that drives the inner stream, counts events, and
+        // triggers the fallback if needed.
+        tokio::spawn(async move {
+            let mut events_received = false;
+            tokio::pin!(inner);
+
+            while let Some(item) = inner.next().await {
+                match item {
+                    Ok(update) => {
+                        events_received = true;
+                        if tx.send(Ok(update)).await.is_err() {
+                            return; // consumer dropped
+                        }
+                    }
+                    Err(e) => {
+                        if !events_received {
+                            // No events received yet — propagate error directly
+                            let _ = tx.send(Err(e)).await;
+                            return;
+                        }
+
+                        // Events were received before the error — fall back to
+                        // non-streaming API call.
+                        let _ = tx.send(Ok(StreamUpdate::TextDelta {
+                            index: 0,
+                            text: String::new(), // empty delta signals fallback transition
+                        })).await;
+
+                        match client.create_message(request).await {
+                            Ok(response) => {
+                                let assistant_msg = AssistantMessage {
+                                    id: response.id,
+                                    model: response.model,
+                                    content: response.content,
+                                    stop_reason: StopReason::from(response.stop_reason.as_ref()),
+                                    usage: response.usage,
+                                };
+                                let _ = tx
+                                    .send(Ok(StreamUpdate::MessageComplete {
+                                        message: assistant_msg,
+                                    }))
+                                    .await;
+                            }
+                            Err(fallback_err) => {
+                                let _ = tx.send(Err(fallback_err)).await;
+                            }
+                        }
+                        return;
+                    }
+                }
+            }
+        });
+
+        Self {
+            inner: Box::pin(ReceiverStream::new(rx)),
+        }
+    }
+}
+
+impl Stream for FallbackStream {
+    type Item = Result<StreamUpdate>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
 }
 
 #[cfg(test)]

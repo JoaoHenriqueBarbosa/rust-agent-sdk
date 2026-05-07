@@ -3,7 +3,9 @@
 // taskSummaryModule, jobClassifier) are all `= false` in the external build
 // and are omitted entirely.
 
+use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Instant;
 
 use futures::stream::{Stream, StreamExt};
@@ -11,15 +13,48 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::api::client::AnthropicClient;
+use crate::api::cost::calculate_cost;
 use crate::api::streaming::{AssistantMessage, StreamUpdate, ToolUseBlock};
 use crate::api::types::*;
 use crate::compact::auto_compact::AutoCompactConfig;
 use crate::compact::compact::CompactionEngine;
+use crate::compact::file_tracker::{ReadFileTracker, POST_COMPACT_MAX_LINES_PER_FILE};
 use crate::compact::token_estimation::estimate_message_tokens;
 use crate::errors::Result;
 use crate::messages::api_format::inject_cache_control;
-use crate::messages::normalize::{ensure_tool_result_pairing, normalize_messages_for_api};
+use crate::messages::normalize::{apply_tool_result_budget_default, ensure_tool_result_pairing, normalize_messages_for_api};
 use crate::tools::framework::ToolExecutor;
+
+// ---------------------------------------------------------------------------
+// Stop hook types
+// ---------------------------------------------------------------------------
+
+/// Context passed to a stop hook callback.
+#[derive(Debug, Clone)]
+pub struct StopHookContext {
+    /// Full conversation messages at the point the hook fires.
+    pub messages: Vec<ApiMessage>,
+    /// The system prompt blocks in use.
+    pub system_prompt: Vec<SystemBlock>,
+    /// How many turns have elapsed so far.
+    pub turn_count: u32,
+}
+
+/// Result returned by a stop hook callback.
+#[derive(Debug, Clone, Default)]
+pub struct StopHookResult {
+    /// If true, the loop yields a result with reason "stop_hook_prevented" and breaks.
+    pub prevent_continuation: bool,
+    /// Blocking error messages to inject into the conversation, causing a retry (StopHookBlocking).
+    pub blocking_messages: Vec<ApiMessage>,
+}
+
+/// Async callback invoked after the assistant finishes a turn with no tool use.
+pub type StopHookCallback = Arc<
+    dyn Fn(StopHookContext) -> Pin<Box<dyn Future<Output = StopHookResult> + Send>>
+        + Send
+        + Sync,
+>;
 
 // ---------------------------------------------------------------------------
 // SDK message types — mirrors TS SDKMessage union
@@ -101,7 +136,7 @@ pub enum AgenticEvent {
 // Configuration
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgenticLoopOptions {
     pub model: String,
     pub max_tokens: u32,
@@ -118,6 +153,19 @@ pub struct AgenticLoopOptions {
     pub abort: Option<CancellationToken>,
     /// Optional fallback model — switched to on API overload.
     pub fallback_model: Option<String>,
+    /// Optional stop hook — called when the assistant ends a turn with no tool use.
+    pub stop_hook: Option<StopHookCallback>,
+}
+
+impl std::fmt::Debug for AgenticLoopOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgenticLoopOptions")
+            .field("model", &self.model)
+            .field("max_tokens", &self.max_tokens)
+            .field("max_turns", &self.max_turns)
+            .field("stop_hook", &self.stop_hook.as_ref().map(|_| "..."))
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for AgenticLoopOptions {
@@ -137,6 +185,7 @@ impl Default for AgenticLoopOptions {
             include_stream_events: true,
             abort: None,
             fallback_model: None,
+            stop_hook: None,
         }
     }
 }
@@ -166,6 +215,7 @@ struct LoopState {
     transition: Option<Transition>,
     last_stop_reason: Option<String>,
     total_usage: QueryUsage,
+    total_cost_usd: f64,
     api_duration_ms: u64,
     auto_compact_tracking: AutoCompactTracking,
 }
@@ -184,6 +234,55 @@ const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT: u32 = 3;
 
 // Port: MANUAL_COMPACT_BUFFER_TOKENS = 3000 from autoCompact.ts
 const MANUAL_COMPACT_BUFFER_TOKENS: usize = 3_000;
+
+// Port: compact boundary marker — inserted as a user message after compaction
+// so that getMessagesAfterCompactBoundary can slice pre-compaction messages.
+const COMPACT_BOUNDARY_MARKER: &str = "[COMPACT_BOUNDARY]";
+
+/// Port of isPromptTooLongMessage from query.ts
+/// Checks if the assistant response text indicates a prompt-too-long error
+/// (API returned 413 as an assistant message rather than as an HTTP error).
+fn is_prompt_too_long_message(msg: &AssistantMessage) -> bool {
+    let text = msg.text().to_lowercase();
+    text.contains("prompt is too long") || text.contains("too many tokens")
+}
+
+/// Port of getMessagesAfterCompactBoundary from utils/messages/
+/// Finds the last compact boundary marker in the message list and returns
+/// only messages from that point forward. If no boundary exists, returns all.
+fn get_messages_after_compact_boundary(messages: &[ApiMessage]) -> Vec<ApiMessage> {
+    let boundary_index = find_last_compact_boundary_index(messages);
+    if boundary_index == -1 {
+        messages.to_vec()
+    } else {
+        messages[boundary_index as usize..].to_vec()
+    }
+}
+
+/// Port of findLastCompactBoundaryIndex from utils/messages/
+fn find_last_compact_boundary_index(messages: &[ApiMessage]) -> isize {
+    for i in (0..messages.len()).rev() {
+        if is_compact_boundary_message(&messages[i]) {
+            return i as isize;
+        }
+    }
+    -1
+}
+
+/// Port of isCompactBoundaryMessage from utils/messages/
+/// A compact boundary is a user message whose sole text content is COMPACT_BOUNDARY_MARKER.
+fn is_compact_boundary_message(msg: &ApiMessage) -> bool {
+    if msg.role != Role::User {
+        return false;
+    }
+    msg.content.len() == 1
+        && matches!(&msg.content[0], ContentBlock::Text { text, .. } if text == COMPACT_BOUNDARY_MARKER)
+}
+
+/// Insert a compact boundary marker as the first message in the compacted list.
+fn insert_compact_boundary(messages: &mut Vec<ApiMessage>) {
+    messages.insert(0, ApiMessage::user(vec![ContentBlock::text(COMPACT_BOUNDARY_MARKER)]));
+}
 
 fn stop_reason_str(reason: &StopReason) -> Option<String> {
     match reason {
@@ -226,6 +325,7 @@ fn yield_missing_tool_result_blocks(
                     tool_use_id: id.clone(),
                     content: Some(vec![ToolResultContent::text(error_message)]),
                     is_error: Some(true),
+                    cache_control: None,
                 }]));
             }
         }
@@ -243,6 +343,7 @@ pub struct AgenticLoop {
     options: AgenticLoopOptions,
     auto_compact: AutoCompactConfig,
     compaction_engine: CompactionEngine,
+    read_file_tracker: ReadFileTracker,
     session_id: String,
     abort: CancellationToken,
 }
@@ -263,6 +364,7 @@ impl AgenticLoop {
             tool_executor,
             auto_compact,
             compaction_engine,
+            read_file_tracker: ReadFileTracker::new(),
             session_id,
             abort,
             options,
@@ -332,6 +434,7 @@ impl AgenticLoop {
                 transition: None,
                 last_stop_reason: None,
                 total_usage: QueryUsage::default(),
+                total_cost_usd: 0.0,
                 api_duration_ms: 0,
                 auto_compact_tracking: AutoCompactTracking::default(),
             };
@@ -364,7 +467,7 @@ impl AgenticLoop {
                         num_turns: state.turn_count,
                         result: None,
                         stop_reason: state.last_stop_reason.clone(),
-                        total_cost_usd: 0.0,
+                        total_cost_usd: state.total_cost_usd,
                         usage: state.total_usage.clone(),
                         errors: vec!["Interrupted by user".to_string()],
                         session_id: sid.clone(),
@@ -375,7 +478,7 @@ impl AgenticLoop {
 
                 // ─── messagesForQuery ─────────────────────────────────
                 // Port: let messagesForQuery = [...getMessagesAfterCompactBoundary(messages)]
-                let mut messages_for_query = state.messages.clone();
+                let mut messages_for_query = get_messages_after_compact_boundary(&state.messages);
 
                 // ─── Auto-compact ─────────────────────────────────────
                 // Port: let { compactionResult, consecutiveFailures } = await deps.autocompact(...)
@@ -392,6 +495,8 @@ impl AgenticLoop {
                     match self.compaction_engine.compact(&messages_for_query, &self.sys_text()).await {
                         Ok(compacted) => {
                             messages_for_query = compacted;
+                            // Port: insert compact boundary as first message after compaction
+                            insert_compact_boundary(&mut messages_for_query);
                             self.auto_compact.record_success();
                             compaction_happened = true;
                             state.auto_compact_tracking = AutoCompactTracking {
@@ -408,6 +513,31 @@ impl AgenticLoop {
                                 uuid: new_uuid(),
                                 session_id: sid.clone(),
                             });
+
+                            // ─── Post-compact file restoration ───────────
+                            // Port of createPostCompactFileAttachments — re-attach
+                            // recently read files so the model retains file context.
+                            let recent_files = self.read_file_tracker.get_recent_files(10);
+                            for file_path in &recent_files {
+                                match tokio::fs::read_to_string(file_path).await {
+                                    Ok(content) => {
+                                        let lines: Vec<&str> = content.lines().collect();
+                                        let end = lines.len().min(POST_COMPACT_MAX_LINES_PER_FILE);
+                                        let truncated: String = lines[..end].join("\n");
+                                        let display_path = file_path.display();
+                                        let attachment_text = format!(
+                                            "[Post-compact file context: {display_path}]\n{truncated}"
+                                        );
+                                        messages_for_query.push(
+                                            ApiMessage::user(vec![ContentBlock::text(attachment_text)])
+                                        );
+                                    }
+                                    Err(_) => {
+                                        // File no longer readable — skip silently
+                                    }
+                                }
+                            }
+                            self.read_file_tracker.clear();
                         }
                         Err(_) => {
                             self.auto_compact.record_failure();
@@ -447,7 +577,7 @@ impl AgenticLoop {
                             num_turns: state.turn_count,
                             result: None,
                             stop_reason: state.last_stop_reason.clone(),
-                            total_cost_usd: 0.0,
+                            total_cost_usd: state.total_cost_usd,
                             usage: state.total_usage.clone(),
                             errors: vec!["Prompt is too long".to_string()],
                             session_id: sid.clone(),
@@ -457,13 +587,18 @@ impl AgenticLoop {
                     }
                 }
 
+                // ─── Apply tool result budget ────────────────────────
+                // Port: applyToolResultBudget from toolResultStorage.js
+                // Truncates oversized tool_result text blocks before the API call.
+                apply_tool_result_budget_default(&mut messages_for_query);
+
                 // ─── Normalize messages for API ───────────────────────
                 // Port: normalizeMessagesForAPI is called inside deps.callModel
                 messages_for_query = normalize_messages_for_api(&messages_for_query);
                 ensure_tool_result_pairing(&mut messages_for_query);
 
                 // ─── Inject cache_control ─────────────────────────────
-                inject_cache_control(&mut messages_for_query, self.options.cache_last_n_messages);
+                inject_cache_control(&mut messages_for_query, &mut self.options.system_prompt);
 
                 // ─── Per-turn tracking ────────────────────────────────
                 // Port: let assistantMessages = [], toolResults = [], toolUseBlocks = [],
@@ -492,7 +627,7 @@ impl AgenticLoop {
                     );
 
                     let api_start = Instant::now();
-                    let stream_result = self.client.create_message_stream(request).await;
+                    let stream_result = self.client.create_message_with_fallback(request).await;
 
                     let mut event_stream = match stream_result {
                         Ok(s) => s,
@@ -506,7 +641,9 @@ impl AgenticLoop {
                             if is_prompt_too_long_err && !state.has_attempted_reactive_compact {
                                 match self.compaction_engine.compact(&messages_for_query, &self.sys_text()).await {
                                     Ok(compacted) => {
-                                        state.messages = compacted;
+                                        let mut compacted_with_boundary = compacted;
+                                        insert_compact_boundary(&mut compacted_with_boundary);
+                                        state.messages = compacted_with_boundary;
                                         state.has_attempted_reactive_compact = true;
                                         state.transition = Some(Transition::ReactiveCompactRetry);
                                         yield Ok(AgenticEvent::System {
@@ -665,7 +802,7 @@ impl AgenticLoop {
                         num_turns: state.turn_count,
                         result: None,
                         stop_reason: state.last_stop_reason.clone(),
-                        total_cost_usd: 0.0,
+                        total_cost_usd: state.total_cost_usd,
                         usage: state.total_usage.clone(),
                         errors: vec![err_str.clone()],
                         session_id: sid.clone(),
@@ -696,7 +833,7 @@ impl AgenticLoop {
                         num_turns: state.turn_count,
                         result: None,
                         stop_reason: state.last_stop_reason.clone(),
-                        total_cost_usd: 0.0,
+                        total_cost_usd: state.total_cost_usd,
                         usage: state.total_usage.clone(),
                         errors: vec!["Interrupted by user".to_string()],
                         session_id: sid.clone(),
@@ -717,7 +854,7 @@ impl AgenticLoop {
                             num_turns: state.turn_count,
                             result: None,
                             stop_reason: state.last_stop_reason.clone(),
-                            total_cost_usd: 0.0,
+                            total_cost_usd: state.total_cost_usd,
                             usage: state.total_usage.clone(),
                             errors: vec!["Stream ended without message_stop".to_string()],
                             session_id: sid.clone(),
@@ -727,8 +864,9 @@ impl AgenticLoop {
                     }
                 };
 
-                // Accumulate usage
+                // Accumulate usage and cost
                 state.total_usage.accumulate(&assistant_msg.usage);
+                state.total_cost_usd += calculate_cost(&current_model, &assistant_msg.usage);
 
                 // Capture stop_reason
                 state.last_stop_reason = stop_reason_str(&assistant_msg.stop_reason);
@@ -762,6 +900,59 @@ impl AgenticLoop {
                 // Port: if (!needsFollowUp) { ... }
                 // ═══════════════════════════════════════════════════════
                 if !needs_follow_up {
+                    // ─── Withheld prompt-too-long (413) check ─────────
+                    // Port: isWithheld413 = isApiErrorMessage && isPromptTooLongMessage(lastMessage)
+                    // When the API returns a prompt-too-long error as an assistant message
+                    // (rather than as an HTTP error), attempt reactive compaction.
+                    if is_prompt_too_long_message(&assistant_msg) {
+                        if !state.has_attempted_reactive_compact {
+                            match self.compaction_engine.compact(&messages_for_query, &self.sys_text()).await {
+                                Ok(compacted) => {
+                                    let mut compacted_with_boundary = compacted;
+                                    insert_compact_boundary(&mut compacted_with_boundary);
+                                    state.messages = compacted_with_boundary;
+                                    state.has_attempted_reactive_compact = true;
+                                    state.transition = Some(Transition::ReactiveCompactRetry);
+                                    yield Ok(AgenticEvent::System {
+                                        subtype: "compact_boundary".to_string(),
+                                        data: serde_json::json!({
+                                            "compact_metadata": { "trigger": "reactive_413" }
+                                        }),
+                                        uuid: new_uuid(),
+                                        session_id: sid.clone(),
+                                    });
+                                    continue 'query_loop;
+                                }
+                                Err(_) => {
+                                    // Reactive compact failed — surface the error message and break
+                                }
+                            }
+                        }
+                        // Compact not attempted or failed — yield error and break
+                        // Port: return yield lastMessage, { reason: "prompt_too_long" }
+                        yield Ok(AgenticEvent::Assistant {
+                            message: assistant_msg.clone(),
+                            parent_tool_use_id: None,
+                            uuid: new_uuid(),
+                            session_id: sid.clone(),
+                        });
+                        yield Ok(AgenticEvent::Result {
+                            subtype: "error_during_execution".to_string(),
+                            duration_ms: start_time.elapsed().as_millis() as u64,
+                            duration_api_ms: state.api_duration_ms,
+                            is_error: true,
+                            num_turns: state.turn_count,
+                            result: None,
+                            stop_reason: Some("prompt_too_long".to_string()),
+                            total_cost_usd: state.total_cost_usd,
+                            usage: state.total_usage.clone(),
+                            errors: vec!["Prompt is too long".to_string()],
+                            session_id: sid.clone(),
+                            uuid: new_uuid(),
+                        });
+                        break;
+                    }
+
                     // ─── Max output tokens recovery ───────────────────
                     // Port: if (isWithheldMaxOutputTokens(lastMessage)) {
                     //   if (maxOutputTokensRecoveryCount < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT) {
@@ -798,6 +989,59 @@ impl AgenticLoop {
                         });
                     }
 
+                    // ─── Stop hook ────────────────────────────────────
+                    // Port: handleStopHooks() — run user-provided callback
+                    // before declaring the turn completed.
+                    if let Some(ref stop_hook) = self.options.stop_hook {
+                        let hook_ctx = StopHookContext {
+                            messages: messages_for_query.iter()
+                                .chain(std::iter::once(&assistant_msg.to_api_message()))
+                                .cloned()
+                                .collect(),
+                            system_prompt: self.options.system_prompt.clone(),
+                            turn_count: state.turn_count,
+                        };
+                        let hook_result = stop_hook(hook_ctx).await;
+
+                        if hook_result.prevent_continuation {
+                            yield Ok(AgenticEvent::Result {
+                                subtype: "success".to_string(),
+                                duration_ms: start_time.elapsed().as_millis() as u64,
+                                duration_api_ms: state.api_duration_ms,
+                                is_error: false,
+                                num_turns: state.turn_count,
+                                result: Some(assistant_msg.text()),
+                                stop_reason: Some("stop_hook_prevented".to_string()),
+                                total_cost_usd: state.total_cost_usd,
+                                usage: state.total_usage.clone(),
+                                errors: Vec::new(),
+                                session_id: sid.clone(),
+                                uuid: new_uuid(),
+                            });
+                            break;
+                        }
+
+                        if !hook_result.blocking_messages.is_empty() {
+                            let mut next_messages = messages_for_query;
+                            next_messages.push(assistant_msg.to_api_message());
+
+                            for blocking_msg in &hook_result.blocking_messages {
+                                yield Ok(AgenticEvent::User {
+                                    message: blocking_msg.clone(),
+                                    parent_tool_use_id: None,
+                                    uuid: new_uuid(),
+                                    session_id: sid.clone(),
+                                });
+                            }
+
+                            next_messages.extend(hook_result.blocking_messages);
+                            state.messages = next_messages;
+                            state.stop_hook_active = Some(true);
+                            state.transition = Some(Transition::StopHookBlocking);
+                            continue 'query_loop;
+                        }
+                    }
+
                     // ─── Completed — yield success result ─────────────
                     // Port: return { reason: "completed" }
                     let last_text = assistant_msg.text();
@@ -809,7 +1053,7 @@ impl AgenticLoop {
                         num_turns: state.turn_count,
                         result: Some(last_text),
                         stop_reason: state.last_stop_reason.clone(),
-                        total_cost_usd: 0.0,
+                        total_cost_usd: state.total_cost_usd,
                         usage: state.total_usage.clone(),
                         errors: Vec::new(),
                         session_id: sid.clone(),
@@ -823,19 +1067,36 @@ impl AgenticLoop {
                 // Port: let toolUpdates = runTools(toolUseBlocks, assistantMessages, ...)
                 // ═══════════════════════════════════════════════════════
 
-                let execution_results = self.tool_executor.execute_all(tool_use_blocks.clone()).await;
+                // Stream tool results incrementally — yield each as it completes
+                let mut all_execution_results: Vec<crate::tools::framework::ToolExecutionResult> = Vec::new();
+                {
+                    use futures::stream::StreamExt as _;
+                    let mut result_stream = self.tool_executor.execute_all_stream(tool_use_blocks.clone());
+                    while let Some(exec_result) = result_stream.next().await {
+                        // Yield an individual tool_result message for each completed tool
+                        let single_msg = self.tool_executor.build_tool_results_message(vec![exec_result.clone()]);
+                        yield Ok(AgenticEvent::User {
+                            message: single_msg,
+                            parent_tool_use_id: None,
+                            uuid: new_uuid(),
+                            session_id: sid.clone(),
+                        });
+                        all_execution_results.push(exec_result);
+                    }
+                }
 
-                // Build tool_result message and yield it
-                let tool_results_msg = self.tool_executor.build_tool_results_message(execution_results);
-
-                yield Ok(AgenticEvent::User {
-                    message: tool_results_msg.clone(),
-                    parent_tool_use_id: None,
-                    uuid: new_uuid(),
-                    session_id: sid.clone(),
-                });
-
+                // Build combined tool_results message for conversation history
+                let tool_results_msg = self.tool_executor.build_tool_results_message(all_execution_results);
                 tool_results.push(tool_results_msg.clone());
+
+                // ─── Track file reads for post-compact restoration ───
+                for tu in &tool_use_blocks {
+                    if tu.name == "Read" || tu.name == "FileRead" {
+                        if let Some(file_path) = tu.input.get("file_path").and_then(|v| v.as_str()) {
+                            self.read_file_tracker.track_read(file_path);
+                        }
+                    }
+                }
 
                 // ─── Abort check after tool execution ─────────────────
                 // Port: if (toolUseContext.abortController.signal.aborted) {
@@ -850,7 +1111,7 @@ impl AgenticLoop {
                         num_turns: state.turn_count,
                         result: None,
                         stop_reason: state.last_stop_reason.clone(),
-                        total_cost_usd: 0.0,
+                        total_cost_usd: state.total_cost_usd,
                         usage: state.total_usage.clone(),
                         errors: vec!["Interrupted by user".to_string()],
                         session_id: sid.clone(),
@@ -879,7 +1140,7 @@ impl AgenticLoop {
                             num_turns: next_turn_count,
                             result: None,
                             stop_reason: state.last_stop_reason.clone(),
-                            total_cost_usd: 0.0,
+                            total_cost_usd: state.total_cost_usd,
                             usage: state.total_usage.clone(),
                             errors: vec![format!("Reached maximum number of turns ({max})")],
                             session_id: sid.clone(),
@@ -1043,5 +1304,103 @@ mod tests {
         assert!(!is_at_blocking_limit(100_000, 200_000));
         assert!(is_at_blocking_limit(198_000, 200_000));
         assert!(is_at_blocking_limit(200_000, 200_000));
+    }
+
+    #[test]
+    fn test_is_prompt_too_long_message() {
+        let ptl_msg = AssistantMessage {
+            id: "msg_1".to_string(),
+            model: "test".to_string(),
+            content: vec![ContentBlock::text("Error: prompt is too long (200000 tokens > 128000 max)")],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        };
+        assert!(is_prompt_too_long_message(&ptl_msg));
+
+        let normal_msg = AssistantMessage {
+            id: "msg_2".to_string(),
+            model: "test".to_string(),
+            content: vec![ContentBlock::text("Hello, how can I help?")],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        };
+        assert!(!is_prompt_too_long_message(&normal_msg));
+
+        let tokens_msg = AssistantMessage {
+            id: "msg_3".to_string(),
+            model: "test".to_string(),
+            content: vec![ContentBlock::text("too many tokens in the request")],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        };
+        assert!(is_prompt_too_long_message(&tokens_msg));
+    }
+
+    #[test]
+    fn test_compact_boundary_message_detection() {
+        let boundary = ApiMessage::user(vec![ContentBlock::text(COMPACT_BOUNDARY_MARKER)]);
+        assert!(is_compact_boundary_message(&boundary));
+
+        let normal = ApiMessage::user(vec![ContentBlock::text("Hello")]);
+        assert!(!is_compact_boundary_message(&normal));
+
+        let assistant = ApiMessage::assistant(vec![ContentBlock::text(COMPACT_BOUNDARY_MARKER)]);
+        assert!(!is_compact_boundary_message(&assistant));
+
+        let multi_block = ApiMessage::user(vec![
+            ContentBlock::text(COMPACT_BOUNDARY_MARKER),
+            ContentBlock::text("extra"),
+        ]);
+        assert!(!is_compact_boundary_message(&multi_block));
+    }
+
+    #[test]
+    fn test_get_messages_after_compact_boundary() {
+        let messages = vec![
+            ApiMessage::user(vec![ContentBlock::text("old message 1")]),
+            ApiMessage::assistant(vec![ContentBlock::text("old response 1")]),
+            ApiMessage::user(vec![ContentBlock::text(COMPACT_BOUNDARY_MARKER)]),
+            ApiMessage::user(vec![ContentBlock::text("summary after compact")]),
+            ApiMessage::assistant(vec![ContentBlock::text("new response")]),
+        ];
+        let result = get_messages_after_compact_boundary(&messages);
+        assert_eq!(result.len(), 3);
+        assert!(is_compact_boundary_message(&result[0]));
+    }
+
+    #[test]
+    fn test_get_messages_after_compact_boundary_no_boundary() {
+        let messages = vec![
+            ApiMessage::user(vec![ContentBlock::text("hello")]),
+            ApiMessage::assistant(vec![ContentBlock::text("hi")]),
+        ];
+        let result = get_messages_after_compact_boundary(&messages);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_get_messages_after_compact_boundary_multiple_boundaries() {
+        let messages = vec![
+            ApiMessage::user(vec![ContentBlock::text(COMPACT_BOUNDARY_MARKER)]),
+            ApiMessage::user(vec![ContentBlock::text("first compact summary")]),
+            ApiMessage::assistant(vec![ContentBlock::text("response 1")]),
+            ApiMessage::user(vec![ContentBlock::text(COMPACT_BOUNDARY_MARKER)]),
+            ApiMessage::user(vec![ContentBlock::text("second compact summary")]),
+            ApiMessage::assistant(vec![ContentBlock::text("response 2")]),
+        ];
+        let result = get_messages_after_compact_boundary(&messages);
+        // Should slice from the LAST boundary (index 3)
+        assert_eq!(result.len(), 3);
+        assert!(is_compact_boundary_message(&result[0]));
+    }
+
+    #[test]
+    fn test_insert_compact_boundary() {
+        let mut messages = vec![
+            ApiMessage::user(vec![ContentBlock::text("summary")]),
+        ];
+        insert_compact_boundary(&mut messages);
+        assert_eq!(messages.len(), 2);
+        assert!(is_compact_boundary_message(&messages[0]));
     }
 }

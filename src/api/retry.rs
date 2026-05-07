@@ -17,12 +17,22 @@ pub struct RetryConfig {
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
-            max_retries: 5,
+            max_retries: 3,
             base_delay_ms: 500,
             max_delay_ms: 30_000,
             overload_max_retries: 3,
         }
     }
+}
+
+/// Outcome of a retry loop when retries are exhausted or a special condition is met.
+#[derive(Debug, Clone)]
+pub enum RetryOutcome {
+    /// The overload (529) retry limit was hit — if a fallback model is available,
+    /// the caller should switch to it.
+    FallbackTriggered {
+        consecutive_529s: u32,
+    },
 }
 
 /// Classification of HTTP/API errors for retry decisions.
@@ -213,8 +223,8 @@ mod tests {
         // Non-retryable error
         assert!(!should_retry(&config, &ErrorKind::ClientError(400), 0, 0));
 
-        // Max retries exceeded
-        assert!(!should_retry(&config, &ErrorKind::ServerError(500), 5, 0));
+        // Max retries exceeded (default max_retries = 3)
+        assert!(!should_retry(&config, &ErrorKind::ServerError(500), 3, 0));
 
         // Overload max exceeded
         assert!(!should_retry(&config, &ErrorKind::Overloaded, 1, 3));

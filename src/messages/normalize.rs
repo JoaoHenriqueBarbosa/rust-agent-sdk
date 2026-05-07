@@ -57,6 +57,51 @@ pub fn split_multi_block_messages(messages: &[ApiMessage]) -> Vec<ApiMessage> {
 }
 
 // ---------------------------------------------------------------------------
+// stripExcessMediaItems — Port of stripExcessMediaItems from claude-code-js
+// ---------------------------------------------------------------------------
+
+/// Default maximum number of Image blocks allowed across all messages.
+const API_MAX_MEDIA_PER_REQUEST: usize = 20;
+
+/// Remove excess Image blocks from messages when the total count exceeds
+/// `max_media`. Removes oldest images first (from earliest messages).
+pub fn strip_excess_media_items(messages: &mut Vec<ApiMessage>, max_media: usize) {
+    // Count total image blocks
+    let total_images: usize = messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter(|b| matches!(b, ContentBlock::Image { .. }))
+        .count();
+
+    if total_images <= max_media {
+        return;
+    }
+
+    let to_remove = total_images - max_media;
+    let mut removed = 0usize;
+
+    for msg in messages.iter_mut() {
+        if removed >= to_remove {
+            break;
+        }
+        let before_len = msg.content.len();
+        msg.content.retain(|block| {
+            if removed >= to_remove {
+                return true;
+            }
+            if matches!(block, ContentBlock::Image { .. }) {
+                removed += 1;
+                return false;
+            }
+            true
+        });
+        // If all content was removed from a message, keep it around — the
+        // downstream normalize step will handle empty messages.
+        let _ = before_len;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // normalizeMessagesForAPI — Port of normalizeMessagesForAPI.js
 // ---------------------------------------------------------------------------
 
@@ -174,6 +219,9 @@ pub fn normalize_messages_for_api(messages: &[ApiMessage]) -> Vec<ApiMessage> {
             }
         }
     }
+
+    // Port: stripExcessMediaItems — remove oldest images if over API limit
+    strip_excess_media_items(&mut result, API_MAX_MEDIA_PER_REQUEST);
 
     result
 }
@@ -303,6 +351,7 @@ pub fn ensure_tool_result_pairing(messages: &mut Vec<ApiMessage>) {
                     SYNTHETIC_TOOL_RESULT_PLACEHOLDER,
                 )]),
                 is_error: Some(true),
+                cache_control: None,
             })
             .collect();
 
@@ -355,6 +404,53 @@ pub fn ensure_tool_result_pairing(messages: &mut Vec<ApiMessage>) {
     }
 
     *messages = result;
+}
+
+// ---------------------------------------------------------------------------
+// applyToolResultBudget — Port of applyToolResultBudget from toolResultStorage.js
+// ---------------------------------------------------------------------------
+
+/// Default maximum characters per tool_result content block.
+const DEFAULT_MAX_TOOL_RESULT_CHARS: usize = 80_000;
+
+/// Truncate oversized tool_result text blocks in-place, keeping the first and
+/// last portions of the text (similar to `truncate_result` in framework.rs).
+///
+/// This is a simplified port of the TS `applyToolResultBudget` / `enforceToolResultBudget`.
+/// The TS version persists large results to disk and replaces them with references;
+/// here we simply truncate in-place since the Rust SDK doesn't have a persistence layer.
+pub fn apply_tool_result_budget(messages: &mut Vec<ApiMessage>, max_result_chars: usize) {
+    for message in messages.iter_mut() {
+        if message.role != Role::User {
+            continue;
+        }
+        for block in &mut message.content {
+            if let ContentBlock::ToolResult {
+                content: Some(ref mut content_blocks),
+                ..
+            } = block
+            {
+                for content in content_blocks.iter_mut() {
+                    if let ToolResultContent::Text { ref mut text } = content {
+                        let original_len = text.len();
+                        if original_len > max_result_chars {
+                            let half = max_result_chars / 2;
+                            let first = &text[..half];
+                            let last = &text[original_len.saturating_sub(half)..];
+                            *text = format!(
+                                "{first}\n\n[Result truncated from {original_len} to {max_result_chars} characters]\n\n{last}",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Convenience wrapper that uses the default budget (80KB).
+pub fn apply_tool_result_budget_default(messages: &mut Vec<ApiMessage>) {
+    apply_tool_result_budget(messages, DEFAULT_MAX_TOOL_RESULT_CHARS);
 }
 
 #[cfg(test)]
@@ -505,6 +601,7 @@ mod tests {
                 tool_use_id: "t1".to_string(),
                 content: Some(vec![ToolResultContent::text("some error")]),
                 is_error: Some(true),
+                cache_control: None,
             }]),
         ];
         let n = normalize_messages_for_api(&messages);
@@ -637,5 +734,126 @@ mod tests {
             .filter(|b| matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "t1"))
             .count();
         assert_eq!(result_count, 1);
+    }
+
+    #[test]
+    fn test_apply_tool_result_budget_no_truncation() {
+        let mut messages = vec![
+            ApiMessage::user(vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".to_string(),
+                content: Some(vec![ToolResultContent::text("short result")]),
+                is_error: None,
+                cache_control: None,
+            }]),
+        ];
+        apply_tool_result_budget(&mut messages, 80_000);
+        if let ContentBlock::ToolResult { content: Some(ref c), .. } = messages[0].content[0] {
+            if let ToolResultContent::Text { ref text } = c[0] {
+                assert_eq!(text, "short result");
+            }
+        }
+    }
+
+    #[test]
+    fn test_apply_tool_result_budget_truncates_large() {
+        let large_text = "x".repeat(100_000);
+        let mut messages = vec![
+            ApiMessage::user(vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".to_string(),
+                content: Some(vec![ToolResultContent::text(&large_text)]),
+                is_error: None,
+                cache_control: None,
+            }]),
+        ];
+        apply_tool_result_budget(&mut messages, 80_000);
+        if let ContentBlock::ToolResult { content: Some(ref c), .. } = messages[0].content[0] {
+            if let ToolResultContent::Text { ref text } = c[0] {
+                assert!(text.len() < 100_000);
+                assert!(text.contains("[Result truncated from 100000 to 80000 characters]"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_apply_tool_result_budget_skips_assistant() {
+        let mut messages = vec![
+            ApiMessage::assistant(vec![ContentBlock::text("x".repeat(100_000).as_str())]),
+        ];
+        let original_len = if let ContentBlock::Text { ref text, .. } = messages[0].content[0] {
+            text.len()
+        } else {
+            0
+        };
+        apply_tool_result_budget(&mut messages, 80_000);
+        if let ContentBlock::Text { ref text, .. } = messages[0].content[0] {
+            assert_eq!(text.len(), original_len);
+        }
+    }
+
+    fn make_image_block() -> ContentBlock {
+        ContentBlock::Image {
+            source: crate::api::types::ImageSource {
+                r#type: "base64".to_string(),
+                media_type: "image/png".to_string(),
+                data: "abc".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn test_strip_excess_media_under_limit() {
+        let mut messages = vec![
+            ApiMessage::user(vec![make_image_block(), ContentBlock::text("hi")]),
+        ];
+        strip_excess_media_items(&mut messages, 5);
+        let image_count: usize = messages
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .filter(|b| matches!(b, ContentBlock::Image { .. }))
+            .count();
+        assert_eq!(image_count, 1);
+    }
+
+    #[test]
+    fn test_strip_excess_media_over_limit() {
+        let mut messages = vec![
+            ApiMessage::user(vec![
+                make_image_block(),
+                make_image_block(),
+                make_image_block(),
+                ContentBlock::text("msg1"),
+            ]),
+            ApiMessage::user(vec![
+                make_image_block(),
+                make_image_block(),
+                ContentBlock::text("msg2"),
+            ]),
+        ];
+        // Total 5 images, limit 3 → remove 2 oldest (from first message)
+        strip_excess_media_items(&mut messages, 3);
+        let image_count: usize = messages
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .filter(|b| matches!(b, ContentBlock::Image { .. }))
+            .count();
+        assert_eq!(image_count, 3);
+        // First message should have lost 2 images, keeping 1 image + text
+        assert_eq!(messages[0].content.len(), 2);
+        // Second message untouched
+        assert_eq!(messages[1].content.len(), 3);
+    }
+
+    #[test]
+    fn test_strip_excess_media_exact_limit() {
+        let mut messages = vec![
+            ApiMessage::user(vec![make_image_block(), make_image_block()]),
+        ];
+        strip_excess_media_items(&mut messages, 2);
+        let image_count: usize = messages
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .filter(|b| matches!(b, ContentBlock::Image { .. }))
+            .count();
+        assert_eq!(image_count, 2);
     }
 }

@@ -103,6 +103,8 @@ pub enum ContentBlock {
         content: Option<Vec<ToolResultContent>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     #[serde(rename = "thinking")]
     Thinking {
@@ -137,6 +139,7 @@ impl ContentBlock {
             tool_use_id: tool_use_id.into(),
             content: if content.is_empty() { None } else { Some(content) },
             is_error: if is_error { Some(true) } else { None },
+            cache_control: None,
         }
     }
 }

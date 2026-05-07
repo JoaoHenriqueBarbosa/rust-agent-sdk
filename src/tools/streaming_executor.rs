@@ -298,6 +298,7 @@ impl StreamingToolExecutor {
                     tool_use_id: r.tool_use_id.clone(),
                     content: Some(api_content),
                     is_error: if r.result.is_error { Some(true) } else { None },
+                    cache_control: None,
                 }
             })
             .collect();

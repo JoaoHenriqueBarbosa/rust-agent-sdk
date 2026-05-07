@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use futures::stream::{Stream, StreamExt};
 
-use crate::agentic::{AgenticEvent, AgenticLoop, AgenticLoopOptions};
+use crate::agentic::{AgenticEvent, AgenticLoop, AgenticLoopOptions, StopHookCallback};
 use crate::api::client::AnthropicClient;
 use crate::api::streaming::StreamUpdate;
 use crate::api::types::{ApiMessage, ContentBlock, SystemBlock};
@@ -55,6 +55,9 @@ pub struct ClaudeSDKClientOptions {
     /// Callback for tool permission prompts.
     /// Called when permission_mode is not BypassPermissions and no explicit allow/deny rule matches.
     pub permission_callback: Option<PermissionCallbackFn>,
+    /// Optional stop hook — called when the assistant ends a turn with no tool use.
+    /// Can prevent continuation or inject blocking error messages for retry.
+    pub stop_hook: Option<StopHookCallback>,
 }
 
 impl Default for ClaudeSDKClientOptions {
@@ -73,6 +76,7 @@ impl Default for ClaudeSDKClientOptions {
             permission_rules: None,
             temperature: None,
             permission_callback: None,
+            stop_hook: None,
         }
     }
 }
@@ -202,6 +206,7 @@ impl ClaudeSDKClient {
             include_stream_events: true,
             abort: None,
             fallback_model: None,
+            stop_hook: options.stop_hook,
         };
 
         Self {

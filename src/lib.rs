@@ -16,7 +16,7 @@ pub use errors::ClaudeSDKError;
 pub use types::*;
 pub use client::{ClaudeSDKClient, ClaudeSDKClientOptions};
 pub use query::{query, query_collect, query_text, query_text_stream, QueryOptions};
-pub use agentic::{AgenticEvent, AgenticLoop, AgenticLoopOptions};
+pub use agentic::{AgenticEvent, AgenticLoop, AgenticLoopOptions, StopHookCallback, StopHookContext, StopHookResult};
 pub use api::client::AnthropicClient;
 pub use api::streaming::{AssistantMessage, StreamUpdate};
 pub use tools::framework::{Tool, ToolContext, ToolResult, ToolExecutor, ToolRegistry};

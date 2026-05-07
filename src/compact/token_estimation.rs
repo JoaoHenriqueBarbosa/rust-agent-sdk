@@ -1,4 +1,6 @@
-use crate::api::types::{ApiMessage, ContentBlock, SystemBlock};
+use crate::api::client::AnthropicClient;
+use crate::api::types::{ApiMessage, ContentBlock, SystemBlock, ToolDefinition};
+use crate::errors::Result;
 
 /// Estimate token count for a text string.
 /// Uses the ~4 chars per token heuristic (conservative estimate).
@@ -12,7 +14,7 @@ pub fn estimate_tokens(text: &str) -> usize {
 pub fn estimate_block_tokens(block: &ContentBlock) -> usize {
     match block {
         ContentBlock::Text { text, .. } => estimate_tokens(text),
-        ContentBlock::Image { .. } => 1000, // Fixed estimate for images
+        ContentBlock::Image { .. } => 2000, // Fixed estimate for images (matches TS reference)
         ContentBlock::ToolUse { input, name, .. } => {
             estimate_tokens(name) + estimate_tokens(&input.to_string())
         }
@@ -20,13 +22,54 @@ pub fn estimate_block_tokens(block: &ContentBlock) -> usize {
             content.as_ref().map_or(0, |blocks| {
                 blocks.iter().map(|c| match c {
                     crate::api::types::ToolResultContent::Text { text } => estimate_tokens(text),
-                    crate::api::types::ToolResultContent::Image { .. } => 1000,
+                    crate::api::types::ToolResultContent::Image { .. } => 2000,
                 }).sum()
             })
         }
         ContentBlock::Thinking { thinking, .. } => estimate_tokens(thinking),
         ContentBlock::RedactedThinking { .. } => 100, // Opaque, can't estimate
     }
+}
+
+/// Count tokens via the Anthropic count-tokens API endpoint.
+/// This gives an exact server-side count rather than a heuristic estimate.
+/// POST /v1/messages/count_tokens — accepts the same format as create_message
+/// minus stream/max_tokens.
+pub async fn count_tokens_via_api(
+    client: &AnthropicClient,
+    messages: &[ApiMessage],
+    system: &[SystemBlock],
+    tools: &[ToolDefinition],
+) -> Result<usize> {
+    use crate::errors::ClaudeSDKError;
+
+    let mut body = serde_json::json!({
+        "model": client.default_model,
+        "messages": messages,
+    });
+
+    if !system.is_empty() {
+        body["system"] = serde_json::to_value(system)
+            .map_err(|e| ClaudeSDKError::sdk(format!("Failed to serialize system: {e}")))?;
+    }
+
+    if !tools.is_empty() {
+        body["tools"] = serde_json::to_value(tools)
+            .map_err(|e| ClaudeSDKError::sdk(format!("Failed to serialize tools: {e}")))?;
+    }
+
+    let response = client
+        .post_json("/v1/messages/count_tokens", &body)
+        .await?;
+
+    let input_tokens = response
+        .get("input_tokens")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| {
+            ClaudeSDKError::sdk("count_tokens response missing input_tokens field")
+        })?;
+
+    Ok(input_tokens as usize)
 }
 
 /// Estimate total token count for a list of messages.
