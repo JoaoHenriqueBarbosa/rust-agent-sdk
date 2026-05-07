@@ -6,7 +6,7 @@ use crate::errors::{ClaudeSDKError, Result};
 // ---------------------------------------------------------------------------
 
 /// Events yielded from the streaming accumulator.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub enum StreamUpdate {
     /// A text delta was received.
     TextDelta { index: usize, text: String },
@@ -25,7 +25,7 @@ pub enum StreamUpdate {
 }
 
 /// A complete assistant message accumulated from streaming events.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct AssistantMessage {
     pub id: String,
     pub model: String,

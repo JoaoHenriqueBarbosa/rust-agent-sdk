@@ -199,6 +199,7 @@ impl ClaudeSDKClient {
             stop_sequences: None,
             cache_last_n_messages: 2,
             context_window_tokens: 200_000,
+            include_stream_events: true,
         };
 
         Self {
@@ -223,13 +224,13 @@ impl ClaudeSDKClient {
 
         let mut text = String::new();
         for event in events {
-            if let AgenticEvent::AssistantMessage(msg) = event {
-                let msg_text = msg.text();
-                if !msg_text.is_empty() {
+            if let AgenticEvent::Assistant { ref message, .. } = event {
+                let message_text = message.text();
+                if !message_text.is_empty() {
                     if !text.is_empty() {
                         text.push('\n');
                     }
-                    text.push_str(&msg_text);
+                    text.push_str(&message_text);
                 }
             }
         }
@@ -274,7 +275,7 @@ impl ClaudeSDKClient {
             tokio::pin!(inner);
             while let Some(event) = inner.next().await {
                 match event {
-                    Ok(AgenticEvent::Stream(StreamUpdate::TextDelta { text, .. })) => {
+                    Ok(AgenticEvent::StreamEvent { event: StreamUpdate::TextDelta { text, .. }, .. }) => {
                         yield Ok(text);
                     }
                     Err(e) => {

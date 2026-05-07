@@ -1,0 +1,292 @@
+================================================================================
+CLAUDE CODE TYPESCRIPT SOURCE ANALYSIS SUMMARY
+================================================================================
+
+PROJECT SCANNED: ~/claude-code/src
+SIZE: 1,898 TypeScript files, 35MB
+BUILD: Bun + Biome
+PURPOSE: Official Claude Code CLI tool source
+
+ANALYSIS COMPLETED: 2026-05-07
+
+================================================================================
+CRITICAL FINDINGS FOR RUST SDK PORT
+================================================================================
+
+1. MAIN ENTRY POINT
+   - src/query.ts [67KB] - THIS IS THE HOT PATH
+   - src/QueryEngine.ts [46KB] - State machine
+   - Both are MANDATORY to understand/port
+
+2. API LAYER (3 critical files)
+   - src/services/api/client.ts - Create Anthropic SDK client
+   - src/services/api/claude.ts - Stream to API, handle responses
+   - src/services/api/withRetry.ts - Retry logic + 529 handling
+
+3. MESSAGE SYSTEM
+   - src/utils/messages.ts [1000+ lines] - Message normalization
+     * normalizeMessagesForAPI() - Convert internal → API format
+     * normalizeContentFromAPI() - Convert API → internal format
+   - Message types scattered across multiple files (no single message.ts file!)
+
+4. SESSION MANAGEMENT
+   - src/utils/sessionStorage.ts - JSONL transcript read/write
+   - src/bootstrap/state.ts - Ephemeral in-memory state
+   - Session file: ~/.claude/projects/<project>/logs/<sessionId>.jsonl
+
+5. TOOL SYSTEM
+   - src/Tool.ts [29KB] - Tool interface + registry
+   - src/services/tools/StreamingToolExecutor.ts - Concurrent execution
+   - src/tools/* - Individual tool implementations
+   - Tools run concurrently as they arrive during streaming
+
+6. KEY INSIGHT: STREAMING TOOL EXECUTION
+   - Tools execute as they stream in (parallel, not sequential)
+   - StreamingToolExecutor manages:
+     * Concurrent-safe tools (web search, read) run together
+     * Non-concurrent tools (bash, file edits) run alone
+     * Bash errors abort siblings
+   - Results buffered, emitted in original order
+
+================================================================================
+DIRECTORY MAP (WITH IGNORE LIST)
+================================================================================
+
+MUST PORT:
+  ✓ src/query.ts + src/QueryEngine.ts
+  ✓ src/services/api/ (3 files)
+  ✓ src/services/tools/
+  ✓ src/Tool.ts
+  ✓ src/utils/messages.ts + sessionStorage.ts
+  ✓ src/constants/prompts.ts
+  ✓ src/bootstrap/state.ts
+
+IMPORTANT (advanced features):
+  ✓ src/services/mcp/
+  ✓ src/memdir/
+  ✓ src/services/compact/
+  ✓ src/utils/thinking.ts
+
+IGNORE (UI/CLI specific):
+  ✗ src/components/ - React/Ink UI
+  ✗ src/hooks/ - React hooks
+  ✗ src/screens/ - Terminal screens
+  ✗ src/state/ - Application state
+  ✗ src/cli/ - CLI transport
+  ✗ src/commands/ - Command implementations
+  ✗ src/ink/ - React-ink
+  ✗ src/keybindings/ - Vim keybindings
+  ✗ src/outputStyles/ - Terminal formatting
+  ✗ src/native-ts/ - Bun-specific bindings
+  ✗ src/vim/ - Vim plugin
+
+================================================================================
+THE HOT PATH (USER PROMPT → RESPONSE)
+================================================================================
+
+1. user: query("What files are here?")
+   ↓
+2. entrypoints/sdk/:query() calls src/query.ts:query()
+   ↓
+3. query() generator function:
+   - getSessionId() [from bootstrap/state.ts]
+   - loadTranscriptFile(sessionId) [JSONL read]
+   - fetchSystemPromptParts(model)
+   - createUserMessage(prompt)
+   - normalizeMessagesForAPI(messages)
+   ↓
+4. callClaude({client, messages, system, tools, ...})
+   - Create client via services/api/client.ts
+   - Stream via client.beta.messages.stream(params)
+   ↓
+5. Process streaming events:
+   - content_block_delta → yield StreamEvent (text)
+   - tool_use → StreamingToolExecutor.addTool()
+   ↓
+6. Stream ends:
+   - stream.finalMessage() → BetaMessage
+   - normalizeContentFromAPI() → AssistantMessage
+   ↓
+7. Persist + continue:
+   - appendEntry(AssistantMessage)
+   - For each tool: appendEntry(ToolResult)
+   - flushSessionStorage() → JSONL write
+   ↓
+8. On tool_use:
+   - StreamingToolExecutor.getRemainingResults()
+   - Yields progress + final tool results
+   - Next iteration sends tool_results back to API
+   ↓
+9. Repeat until stop_reason = "end_turn"
+   ↓
+10. yield AssistantMessage (final)
+
+================================================================================
+CRITICAL TYPE TRANSFORMATIONS
+================================================================================
+
+Input: "string"
+  ↓ createUserMessage()
+Internal: UserMessage {uuid, content[], parentUuid, cwd, timestamp}
+  ↓ normalizeMessagesForAPI()
+API: MessageParam[] {role: "user", content: ContentBlockParam[]}
+  ↓ client.beta.messages.stream(params)
+Stream: BetaRawMessageStreamEvent
+  ↓ stream.finalMessage()
+API: BetaMessage {content: BetaContentBlock[], stop_reason, usage}
+  ↓ normalizeContentFromAPI()
+Internal: AssistantMessage {uuid, message: BetaMessage, created_at}
+  ↓ appendEntry()
+Persistent: TranscriptMessage (JSONL line in ~/.claude/projects/...)
+
+================================================================================
+KNOWN COMPLICATIONS
+================================================================================
+
+1. STREAMING TOOL EXECUTION
+   - Not sequential! Tools start as they arrive mid-stream
+   - Concurrency control needed
+   - Results buffered, emitted in receipt order
+
+2. MESSAGE TYPE SCATTERING
+   - No single message.ts file!
+   - Types defined across:
+     * src/utils/messages.ts (main definitions)
+     * src/types/logs.ts (persistence types)
+     * src/entrypoints/sdk/coreTypes.ts (public API types)
+   - Imports reference each other circularly
+
+3. STREAMING FALLBACK
+   - If HTTP streaming fails mid-stream, switch to polling
+   - StreamingToolExecutor.discard() called
+   - Results abandoned, retry from before
+   - Tracked in src/query.ts:streamingFallbackOccured
+
+4. COMPACT BOUNDARIES
+   - Long sessions trigger message compression
+   - Affects resume + token counting
+   - Complex logic in src/services/compact/
+
+5. THINKING MODE
+   - Extended thinking creates synthetic blocks
+   - Need special handling for display
+   - Reduces output tokens available
+
+6. PERMISSION SYSTEM
+   - Tools blocked until user approves
+   - Affects retry flow and early exit
+   - Tracked in src/utils/permissions/
+
+================================================================================
+MINIMAL RUST SDK DEPENDENCIES
+================================================================================
+
+Core:
+  - tokio (async runtime)
+  - reqwest (HTTP streaming)
+  - serde/serde_json (JSON)
+  - uuid (session IDs)
+  - anyhow (error handling)
+  - futures (streams)
+
+Tools:
+  - std::process (subprocess for bash)
+  - tempfile (session storage)
+
+Optional:
+  - reqwest-websocket (MCP)
+  - tokio-process (subprocess management)
+
+================================================================================
+IMPLEMENTATION PHASES
+================================================================================
+
+PHASE 1 (MVP - 1 week):
+  ✓ HTTP client + Anthropic SDK types
+  ✓ Message normalization
+  ✓ Session storage (JSONL read/write)
+  ✓ Query loop skeleton
+  ✓ Basic tool sync execution
+
+PHASE 2 (Streaming - 1 week):
+  ✓ HTTP streaming response parsing
+  ✓ Event processing
+  ✓ Async iterator API
+  ✓ Concurrent tool execution
+
+PHASE 3 (Tools - 1 week):
+  ✓ BashTool (subprocess)
+  ✓ File tools (read, edit, write, glob, grep)
+  ✓ WebSearchTool
+  ✓ Tool permission checking
+
+PHASE 4 (Advanced - 2 weeks):
+  ✓ MCP integration (subprocess transport)
+  ✓ Memory system (auto-memories)
+  ✓ Compact/compression
+  ✓ Thinking mode
+  ✓ Prompt cache
+
+================================================================================
+TOP 14 FILES TO STUDY (IN ORDER)
+================================================================================
+
+1. src/query.ts [67KB]                        Read this 3x - CORE LOGIC
+2. src/QueryEngine.ts [46KB]                  State machine
+3. src/services/api/claude.ts                 API streaming
+4. src/services/api/client.ts                 SDK client factory
+5. src/services/api/withRetry.ts              Retry logic
+6. src/utils/messages.ts [1000+ lines]        Message normalization
+7. src/utils/sessionStorage.ts                JSONL I/O
+8. src/Tool.ts [29KB]                         Tool interface
+9. src/services/tools/StreamingToolExecutor.ts Concurrent execution
+10. src/bootstrap/state.ts                    Ephemeral state
+11. src/constants/prompts.ts                  System prompts
+12. src/entrypoints/agentSdkTypes.ts [13KB]   Public API
+13. src/utils/tokens.ts                       Token counting
+14. src/services/tools/toolExecution.ts       Single tool execution
+
+================================================================================
+OUTPUT DOCUMENTATION
+================================================================================
+
+Two documents created:
+
+1. CLAUDE_CODE_SOURCE_MAP.md (22KB, 803 lines)
+   - Comprehensive architecture mapping
+   - All file paths and purposes
+   - Type definitions and flow diagrams
+   - Implementation phases
+   - Located: /home/john/projects/rust-agent-sdk/
+
+2. CLAUDE_CODE_ANALYSIS_SUMMARY.txt (this file)
+   - Quick reference guide
+   - Critical findings
+   - Top 14 files to study
+   - Known complications
+   - Minimal dependencies
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+1. Read src/query.ts (67KB) - understand the main loop
+2. Read src/services/api/claude.ts - understand API interaction
+3. Read src/utils/messages.ts - understand message normalization
+4. Read CLAUDE_CODE_SOURCE_MAP.md - full architecture reference
+5. Start porting: HTTP client first, then message types, then query loop
+6. Test: Session storage (JSONL) should work immediately
+7. Iterate: Add tools one by one, test with manual queries
+
+================================================================================
+ESTIMATED EFFORT
+================================================================================
+
+MVP (query + basic tools): 2-3 weeks
+Full feature parity: 6-8 weeks
+Including MCP + memory + compact: 10-12 weeks
+
+Main complexity: Streaming tool execution + message normalization
+Main risk: Anthropic API changes + edge cases in compact/thinking
+
+================================================================================

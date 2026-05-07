@@ -121,13 +121,13 @@ pub async fn query_text(
 
     let mut text = String::new();
     for event in events {
-        if let AgenticEvent::AssistantMessage(msg) = event {
-            let msg_text = msg.text();
-            if !msg_text.is_empty() {
+        if let AgenticEvent::Assistant { ref message, .. } = event {
+            let message_text = message.text();
+            if !message_text.is_empty() {
                 if !text.is_empty() {
                     text.push('\n');
                 }
-                text.push_str(&msg_text);
+                text.push_str(&message_text);
             }
         }
     }
@@ -144,7 +144,7 @@ pub fn query_text_stream(
         tokio::pin!(inner);
         while let Some(event) = inner.next().await {
             match event {
-                Ok(AgenticEvent::Stream(crate::api::streaming::StreamUpdate::TextDelta { text, .. })) => {
+                Ok(AgenticEvent::StreamEvent { event: crate::api::streaming::StreamUpdate::TextDelta { text, .. }, .. }) => {
                     yield Ok(text);
                 }
                 Err(e) => {

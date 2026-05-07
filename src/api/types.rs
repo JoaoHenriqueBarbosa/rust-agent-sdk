@@ -391,12 +391,17 @@ pub struct ApiError {
 // Stop reasons
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum StopReason {
+    #[serde(rename = "end_turn")]
     EndTurn,
+    #[serde(rename = "tool_use")]
     ToolUse,
+    #[serde(rename = "max_tokens")]
     MaxTokens,
+    #[serde(rename = "stop_sequence")]
     StopSequence,
+    #[serde(untagged)]
     Unknown(String),
 }
 
