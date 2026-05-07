@@ -199,14 +199,22 @@ impl ToolRegistry {
     }
 
     /// Generate API tool definitions for all registered tools.
+    /// Only the last tool gets cache_control to stay within the API limit
+    /// of 4 cache_control blocks per request.
     pub fn api_definitions(&self) -> Vec<ToolDefinition> {
+        let len = self.tools.len();
         self.tools
             .iter()
-            .map(|tool| ToolDefinition {
+            .enumerate()
+            .map(|(i, tool)| ToolDefinition {
                 name: tool.name().to_string(),
                 description: Some(tool.description().to_string()),
                 input_schema: tool.input_schema(),
-                cache_control: Some(CacheControl::ephemeral()),
+                cache_control: if i == len - 1 {
+                    Some(CacheControl::ephemeral())
+                } else {
+                    None
+                },
             })
             .collect()
     }
@@ -434,7 +442,8 @@ mod tests {
         assert_eq!(defs.len(), 2);
         assert_eq!(defs[0].name, "bash");
         assert_eq!(defs[1].name, "read");
-        assert!(defs[0].cache_control.is_some());
+        assert!(defs[0].cache_control.is_none()); // Only last tool gets cache_control
+        assert!(defs[1].cache_control.is_some());
     }
 
     #[test]

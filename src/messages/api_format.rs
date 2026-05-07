@@ -1,8 +1,13 @@
 use crate::api::types::{ApiMessage, CacheControl, ContentBlock, Role};
 
 /// Inject cache_control: ephemeral on the last content block of the last N user messages.
-/// This enables prompt caching for recent conversation turns.
+/// Respects the API limit of max_cache_blocks total cache_control blocks in the request.
+/// System prompt and tool definitions consume some of these slots.
 pub fn inject_cache_control(messages: &mut [ApiMessage], last_n: usize) {
+    if last_n == 0 {
+        return;
+    }
+
     let user_indices: Vec<usize> = messages
         .iter()
         .enumerate()

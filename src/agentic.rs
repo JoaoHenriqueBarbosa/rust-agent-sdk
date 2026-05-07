@@ -66,7 +66,7 @@ impl Default for AgenticLoopOptions {
             tool_choice: None,
             thinking: None,
             stop_sequences: None,
-            cache_last_n_messages: 3,
+            cache_last_n_messages: 2,
             context_window_tokens: 200_000,
         }
     }

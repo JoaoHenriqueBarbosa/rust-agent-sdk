@@ -1,10 +1,10 @@
 pub mod errors;
 pub mod types;
 pub mod internal;
-pub mod query;
 pub mod client;
+pub mod query;
 
-// New modules — native API transport (no CLI subprocess needed)
+// Native API transport — no CLI subprocess needed
 pub mod api;
 pub mod tools;
 pub mod compact;
@@ -14,8 +14,15 @@ pub mod agentic;
 // Re-exports for convenience
 pub use errors::ClaudeSDKError;
 pub use types::*;
-pub use client::ClaudeSDKClient;
-pub use query::{query, query_collect};
+pub use client::{ClaudeSDKClient, ClaudeSDKClientOptions};
+pub use query::{query, query_collect, query_text, query_text_stream, QueryOptions};
+pub use agentic::{AgenticEvent, AgenticLoop, AgenticLoopOptions};
+pub use api::client::AnthropicClient;
+pub use api::streaming::{AssistantMessage, StreamUpdate};
+pub use tools::framework::{Tool, ToolContext, ToolResult, ToolExecutor, ToolRegistry};
+pub use tools::permission::{PermissionRules, PermissionDecision};
+
+// Session management (file-based, independent of transport)
 pub use internal::message_parser::parse_message;
 pub use internal::session_store::InMemorySessionStore;
 pub use internal::sessions::{
@@ -32,5 +39,4 @@ pub use internal::session_mutations::{
 };
 pub use internal::session_summary::{fold_session_summary, summary_entry_to_sdk_info};
 pub use internal::session_import::import_session_to_store;
-pub use internal::transport::{Transport, SubprocessCLITransport};
 pub use internal::task::{spawn_detached, TaskHandle};
