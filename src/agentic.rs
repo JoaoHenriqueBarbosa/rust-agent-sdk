@@ -82,10 +82,17 @@ impl QueryUsage {
 pub enum AgenticEvent {
     #[serde(rename = "assistant")]
     Assistant {
-        message: AssistantMessage,
+        /// Content blocks (text, tool_use, thinking, etc.)
+        content: Vec<ContentBlock>,
+        model: String,
+        stop_reason: Option<String>,
         parent_tool_use_id: Option<String>,
         uuid: String,
         session_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        usage: Option<Usage>,
     },
 
     #[serde(rename = "user")]
@@ -107,7 +114,6 @@ pub enum AgenticEvent {
     #[serde(rename = "system")]
     System {
         subtype: String,
-        #[serde(flatten)]
         data: serde_json::Value,
         uuid: String,
         session_id: String,
@@ -296,6 +302,21 @@ fn stop_reason_str(reason: &StopReason) -> Option<String> {
 
 fn new_uuid() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+/// Build an AgenticEvent::Assistant from an AssistantMessage with flat fields
+/// matching the TS SDK output format.
+fn assistant_event(msg: &AssistantMessage, session_id: &str) -> AgenticEvent {
+    AgenticEvent::Assistant {
+        content: msg.content.clone(),
+        model: msg.model.clone(),
+        stop_reason: stop_reason_str(&msg.stop_reason),
+        parent_tool_use_id: None,
+        uuid: new_uuid(),
+        session_id: session_id.to_string(),
+        message_id: Some(msg.id.clone()),
+        usage: Some(msg.usage.clone()),
+    }
 }
 
 /// Port of isWithheldMaxOutputTokens from query.ts
@@ -559,21 +580,16 @@ impl AgenticLoop {
                 if !compaction_happened {
                     let token_count = estimate_message_tokens(&messages_for_query);
                     if is_at_blocking_limit(token_count, self.options.context_window_tokens) {
-                        yield Ok(AgenticEvent::Assistant {
-                            message: AssistantMessage {
-                                id: new_uuid(),
-                                model: current_model.clone(),
-                                content: vec![ContentBlock::text(
-                                    "I'm sorry, but the conversation has become too long. \
-                                     Please start a new conversation or use /compact to reduce context.",
-                                )],
-                                stop_reason: StopReason::EndTurn,
-                                usage: Usage::default(),
-                            },
-                            parent_tool_use_id: None,
-                            uuid: new_uuid(),
-                            session_id: sid.clone(),
-                        });
+                        yield Ok(assistant_event(&AssistantMessage {
+                            id: new_uuid(),
+                            model: current_model.clone(),
+                            content: vec![ContentBlock::text(
+                                "I'm sorry, but the conversation has become too long. \
+                                 Please start a new conversation or use /compact to reduce context.",
+                            )],
+                            stop_reason: StopReason::EndTurn,
+                            usage: Usage::default(),
+                        }, &sid));
                         yield Ok(AgenticEvent::Result {
                             subtype: "error_during_execution".to_string(),
                             duration_ms: start_time.elapsed().as_millis() as u64,
@@ -886,12 +902,7 @@ impl AgenticLoop {
 
                 if !is_withheld {
                     // Port: if (!withheld) yield yieldMessage
-                    yield Ok(AgenticEvent::Assistant {
-                        message: assistant_msg.clone(),
-                        parent_tool_use_id: None,
-                        uuid: new_uuid(),
-                        session_id: sid.clone(),
-                    });
+                    yield Ok(assistant_event(&assistant_msg, &sid));
                 }
 
                 assistant_messages.push(assistant_msg.clone());
@@ -930,12 +941,7 @@ impl AgenticLoop {
                         }
                         // Compact not attempted or failed — yield error and break
                         // Port: return yield lastMessage, { reason: "prompt_too_long" }
-                        yield Ok(AgenticEvent::Assistant {
-                            message: assistant_msg.clone(),
-                            parent_tool_use_id: None,
-                            uuid: new_uuid(),
-                            session_id: sid.clone(),
-                        });
+                        yield Ok(assistant_event(&assistant_msg, &sid));
                         yield Ok(AgenticEvent::Result {
                             subtype: "error_during_execution".to_string(),
                             duration_ms: start_time.elapsed().as_millis() as u64,
@@ -981,12 +987,7 @@ impl AgenticLoop {
                         }
 
                         // Recovery exhausted — surface the withheld message
-                        yield Ok(AgenticEvent::Assistant {
-                            message: assistant_msg.clone(),
-                            parent_tool_use_id: None,
-                            uuid: new_uuid(),
-                            session_id: sid.clone(),
-                        });
+                        yield Ok(assistant_event(&assistant_msg, &sid));
                     }
 
                     // ─── API error message check ─────────────────────

@@ -121,8 +121,14 @@ pub async fn query_text(
 
     let mut text = String::new();
     for event in events {
-        if let AgenticEvent::Assistant { ref message, .. } = event {
-            let message_text = message.text();
+        if let AgenticEvent::Assistant { ref content, .. } = event {
+            let message_text: String = content.iter()
+                .filter_map(|b| match b {
+                    crate::api::types::ContentBlock::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("");
             if !message_text.is_empty() {
                 if !text.is_empty() {
                     text.push('\n');
