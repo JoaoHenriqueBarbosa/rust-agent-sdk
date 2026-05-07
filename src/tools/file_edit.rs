@@ -48,7 +48,7 @@ impl Tool for FileEditTool {
         })
     }
 
-    async fn execute(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+    async fn execute(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
         let input: FileEditInput = match serde_json::from_value(input) {
             Ok(i) => i,
             Err(e) => return ToolResult::error(format!("Invalid input: {e}")),
@@ -58,8 +58,13 @@ impl Tool for FileEditTool {
             return ToolResult::error("old_string and new_string must be different");
         }
 
-        let path = std::path::Path::new(&input.file_path);
-        let content = match tokio::fs::read_to_string(path).await {
+        let raw_path = std::path::Path::new(&input.file_path);
+        let path = if raw_path.is_absolute() {
+            raw_path.to_path_buf()
+        } else {
+            context.working_directory.join(raw_path)
+        };
+        let content = match tokio::fs::read_to_string(&path).await {
             Ok(c) => c,
             Err(e) => return ToolResult::error(format!("Failed to read file: {e}")),
         };
@@ -87,7 +92,7 @@ impl Tool for FileEditTool {
             content.replacen(&input.old_string, &input.new_string, 1)
         };
 
-        match tokio::fs::write(path, &new_content).await {
+        match tokio::fs::write(&path, &new_content).await {
             Ok(()) => {
                 let replaced = if input.replace_all { count } else { 1 };
                 ToolResult::text(format!(

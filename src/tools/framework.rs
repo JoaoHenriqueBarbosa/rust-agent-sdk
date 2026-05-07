@@ -316,10 +316,9 @@ impl ToolExecutor {
                             result: ToolResult::error("User denied permission"),
                         };
                     }
-                }
-                // If no callback, allow in bypass mode
-                if self.context.permission_mode != PermissionMode::BypassPermissions {
-                    // In non-bypass mode without callback, deny
+                    // Callback approved — proceed to execution
+                } else if self.context.permission_mode != PermissionMode::BypassPermissions {
+                    // No callback and not in bypass mode — deny
                     return ToolExecutionResult {
                         tool_use_id: tool_use.id,
                         result: ToolResult::error("Permission required but no callback available"),

@@ -68,6 +68,7 @@ async fn main() {
 
     let client = ClaudeSDKClient::new(ClaudeSDKClientOptions {
         max_turns: Some(5),
+        cwd: Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
         permission_mode: Some(PermissionMode::Default),
         permission_rules: Some(permission_rules),
         permission_callback: Some(make_interactive_callback()),
@@ -109,8 +110,14 @@ async fn main() {
                     std::io::stdout().flush().unwrap();
                 }
                 Ok(AgenticEvent::ToolExecutionComplete { result, .. }) => {
-                    let status = if result.is_error { "DENIED/ERROR" } else { "OK" };
-                    println!(" → {status}");
+                    let status = if result.is_error { "ERROR" } else { "OK" };
+                    let detail = result.content.first().map(|c| match c {
+                        rust_agent_sdk::tools::framework::ToolResultContent::Text(t) => {
+                            if t.len() > 100 { format!("{}...", &t[..100]) } else { t.clone() }
+                        }
+                        _ => "(non-text)".to_string(),
+                    }).unwrap_or_default();
+                    println!(" → {status}: {detail}");
                     std::io::stdout().flush().unwrap();
                 }
                 Ok(AgenticEvent::Done { turns, .. }) => {

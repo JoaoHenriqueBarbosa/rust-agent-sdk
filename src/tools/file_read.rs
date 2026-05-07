@@ -48,13 +48,19 @@ impl Tool for FileReadTool {
 
     fn is_concurrency_safe(&self) -> bool { true }
 
-    async fn execute(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+    async fn execute(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
         let input: FileReadInput = match serde_json::from_value(input) {
             Ok(i) => i,
             Err(e) => return ToolResult::error(format!("Invalid input: {e}")),
         };
 
-        let path = std::path::Path::new(&input.file_path);
+        let raw_path = std::path::Path::new(&input.file_path);
+        let path = if raw_path.is_absolute() {
+            raw_path.to_path_buf()
+        } else {
+            context.working_directory.join(raw_path)
+        };
+        let path = path.as_path();
 
         // Check for image files — return as base64
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
