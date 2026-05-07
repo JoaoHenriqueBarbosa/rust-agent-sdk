@@ -480,6 +480,11 @@ impl AgenticLoop {
                 // Port: let messagesForQuery = [...getMessagesAfterCompactBoundary(messages)]
                 let mut messages_for_query = get_messages_after_compact_boundary(&state.messages);
 
+                // ─── Apply tool result budget (BEFORE autocompact) ────
+                // Port: messagesForQuery = applyToolResultBudget(messagesForQuery, ...)
+                // Must happen before autocompact so token counts are accurate.
+                apply_tool_result_budget_default(&mut messages_for_query);
+
                 // ─── Auto-compact ─────────────────────────────────────
                 // Port: let { compactionResult, consecutiveFailures } = await deps.autocompact(...)
                 let mut compaction_happened = false;
@@ -586,11 +591,6 @@ impl AgenticLoop {
                         break;
                     }
                 }
-
-                // ─── Apply tool result budget ────────────────────────
-                // Port: applyToolResultBudget from toolResultStorage.js
-                // Truncates oversized tool_result text blocks before the API call.
-                apply_tool_result_budget_default(&mut messages_for_query);
 
                 // ─── Normalize messages for API ───────────────────────
                 // Port: normalizeMessagesForAPI is called inside deps.callModel

@@ -303,8 +303,8 @@ impl ToolExecutor {
     }
 
     /// Execute multiple tool_use blocks, yielding results incrementally as each
-    /// tool completes. Concurrency-safe tools run in parallel (results arrive in
-    /// completion order); sequential tools run one-by-one in order.
+    /// tool completes. Concurrency-safe tools run in parallel (via join_all);
+    /// sequential tools run one-by-one in order.
     pub fn execute_all_stream(
         &self,
         tool_uses: Vec<crate::api::streaming::ToolUseBlock>,
@@ -319,27 +319,14 @@ impl ToolExecutor {
                         .unwrap_or(false)
                 });
 
-            // Execute concurrency-safe tools in parallel, yielding as each completes
+            // Execute concurrency-safe tools in parallel, then yield all results
             if !safe.is_empty() {
-                let (tx, mut rx) = tokio::sync::mpsc::channel::<ToolExecutionResult>(safe.len());
-                for tu in safe {
-                    let tx = tx.clone();
-                    // SAFETY: We need 'static futures for tokio::spawn, but execute_one
-                    // borrows &self. Use a channel to bridge the gap — each task runs
-                    // execute_one through a shared reference.
-                    //
-                    // We transmute the lifetime to 'static. This is sound because we
-                    // consume all results from rx before this function returns, ensuring
-                    // &self outlives all spawned tasks.
-                    let this: &ToolExecutor = self;
-                    let this: &'static ToolExecutor = unsafe { std::mem::transmute(this) };
-                    tokio::spawn(async move {
-                        let result = this.execute_one(tu).await;
-                        let _ = tx.send(result).await;
-                    });
-                }
-                drop(tx);
-                while let Some(result) = rx.recv().await {
+                let futures: Vec<_> = safe
+                    .into_iter()
+                    .map(|tu| self.execute_one(tu))
+                    .collect();
+                let results = futures::future::join_all(futures).await;
+                for result in results {
                     yield result;
                 }
             }
