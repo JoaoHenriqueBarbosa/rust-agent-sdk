@@ -10,6 +10,7 @@ pub mod tools;
 pub mod compact;
 pub mod messages;
 pub mod agentic;
+pub mod mcp;
 
 // Re-exports for convenience
 pub use errors::ClaudeSDKError;
@@ -21,6 +22,7 @@ pub use api::client::AnthropicClient;
 pub use api::streaming::{AssistantMessage, StreamUpdate};
 pub use tools::framework::{Tool, ToolContext, ToolResult, ToolExecutor, ToolRegistry};
 pub use tools::permission::{PermissionRules, PermissionDecision};
+pub use mcp::{McpClient, McpServerConfig, McpTool};
 
 // Session management (file-based, independent of transport)
 pub use internal::message_parser::parse_message;

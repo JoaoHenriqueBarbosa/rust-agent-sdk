@@ -4,11 +4,14 @@ use std::sync::Arc;
 
 use futures::stream::{Stream, StreamExt};
 
+use std::collections::HashMap;
+
 use crate::agentic::{AgenticEvent, AgenticLoop, AgenticLoopOptions, StopHookCallback};
 use crate::api::client::AnthropicClient;
 use crate::api::streaming::StreamUpdate;
 use crate::api::types::{ApiMessage, ContentBlock, SystemBlock};
 use crate::errors::Result;
+use crate::mcp::client::McpServerConfig;
 use crate::tools::framework::{Tool, ToolContext, ToolExecutor, ToolPermissionRequest, ToolRegistry};
 use crate::tools::permission::PermissionRules;
 use crate::types::PermissionMode;
@@ -58,6 +61,9 @@ pub struct ClaudeSDKClientOptions {
     /// Optional stop hook — called when the assistant ends a turn with no tool use.
     /// Can prevent continuation or inject blocking error messages for retry.
     pub stop_hook: Option<StopHookCallback>,
+    /// MCP servers to connect to. Keys are server names, values are configs.
+    /// Tools from these servers are registered as `mcp__{server}__{tool}`.
+    pub mcp_servers: HashMap<String, McpServerConfig>,
 }
 
 impl Default for ClaudeSDKClientOptions {
@@ -77,6 +83,7 @@ impl Default for ClaudeSDKClientOptions {
             temperature: None,
             permission_callback: None,
             stop_hook: None,
+            mcp_servers: HashMap::new(),
         }
     }
 }
@@ -107,7 +114,7 @@ impl std::fmt::Debug for ClaudeSDKClientOptions {
 ///
 /// #[tokio::main]
 /// async fn main() {
-///     let client = ClaudeSDKClient::new(ClaudeSDKClientOptions::default());
+///     let client = ClaudeSDKClient::new(ClaudeSDKClientOptions::default()).await;
 ///     let messages = client.send_message("Hello!").await.unwrap();
 /// }
 /// ```
@@ -152,8 +159,8 @@ impl ToolExecutorFactory {
 }
 
 impl ClaudeSDKClient {
-    /// Create a new SDK client.
-    pub fn new(options: ClaudeSDKClientOptions) -> Self {
+    /// Create a new SDK client. Connects to MCP servers if configured.
+    pub async fn new(options: ClaudeSDKClientOptions) -> Self {
         let api_key = options
             .api_key
             .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
@@ -191,6 +198,23 @@ impl ClaudeSDKClient {
             .cwd
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
 
+        // Connect MCP servers and collect their tools
+        let mut mcp_tools: Vec<Arc<dyn Tool>> = Vec::new();
+        if !options.mcp_servers.is_empty() {
+            match crate::mcp::client::connect_mcp_servers(&options.mcp_servers).await {
+                Ok((_clients, tools)) => {
+                    mcp_tools = tools;
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to connect MCP servers: {e}");
+                }
+            }
+        }
+
+        // Combine custom_tools + MCP tools
+        let mut all_custom_tools = options.custom_tools;
+        all_custom_tools.extend(mcp_tools);
+
         let loop_options = AgenticLoopOptions {
             model,
             max_tokens,
@@ -217,7 +241,7 @@ impl ClaudeSDKClient {
                 permission_mode,
                 permission_rules,
                 permission_callback: options.permission_callback,
-                custom_tools: options.custom_tools,
+                custom_tools: all_custom_tools,
                 use_defaults: options.use_default_tools,
             },
             messages: Vec::new(),
@@ -324,14 +348,14 @@ mod tests {
         assert!(opts.max_turns.is_none());
     }
 
-    #[test]
-    fn test_client_creation() {
+    #[tokio::test]
+    async fn test_client_creation() {
         let client = ClaudeSDKClient::new(ClaudeSDKClientOptions {
             api_key: Some("test-key".to_string()),
             model: Some("claude-haiku-3-20240307".to_string()),
             max_tokens: Some(4096),
             ..Default::default()
-        });
+        }).await;
 
         assert_eq!(client.options.model, "claude-haiku-3-20240307");
         assert_eq!(client.options.max_tokens, 4096);
