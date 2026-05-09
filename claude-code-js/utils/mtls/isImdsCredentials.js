@@ -1,0 +1,8 @@
+// var: isImdsCredentials
+var isImdsCredentials = (arg) => Boolean(arg) && typeof arg === "object" && typeof arg.AccessKeyId === "string" && typeof arg.SecretAccessKey === "string" && typeof arg.Token === "string" && typeof arg.Expiration === "string", fromImdsCredentials = (creds) => ({
+  accessKeyId: creds.AccessKeyId,
+  secretAccessKey: creds.SecretAccessKey,
+  sessionToken: creds.Token,
+  expiration: new Date(creds.Expiration),
+  ...creds.AccountId && { accountId: creds.AccountId }
+});

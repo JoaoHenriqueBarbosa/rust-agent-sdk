@@ -1,0 +1,2 @@
+// function: resetTrustDialogAcceptedCacheForTesting
+function resetTrustDialogAcceptedCacheForTesting() {}

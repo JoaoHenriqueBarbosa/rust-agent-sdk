@@ -1,0 +1,37 @@
+// var: init_processSlashCommand
+var init_processSlashCommand = __esm(() => {
+  init_state();
+  init_commands5();
+  init_state();
+  init_xml();
+  init_dumpPrompts();
+  init_compact();
+  init_microCompact();
+  init_runAgent();
+  init_UI4();
+  init_abortController();
+  init_agentContext();
+  init_attachments2();
+  init_debug();
+  init_envUtils();
+  init_errors();
+  init_file();
+  init_forkedAgent();
+  init_fsOperations();
+  init_fullscreen();
+  init_generators();
+  init_registerSkillHooks();
+  init_log3();
+  init_messageQueueManager();
+  init_messages3();
+  init_permissionSetup();
+  init_permissions2();
+  init_pluginIdentifier();
+  init_pluginOnlyPolicy();
+  init_skillUsageTracking();
+  init_events();
+  init_pluginTelemetry();
+  init_tokens();
+  init_uuid();
+  init_workloadContext();
+});

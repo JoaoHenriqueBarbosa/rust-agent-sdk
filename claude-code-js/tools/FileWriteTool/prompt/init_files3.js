@@ -1,0 +1,38 @@
+// var: init_files3
+var init_files3 = __esm(() => {
+  import_ignore = __toESM(require_ignore(), 1), EXCLUDE_PATTERNS = [
+    ".DS_Store",
+    "Thumbs.db",
+    ".gitignore",
+    ".git",
+    ".mcpbignore",
+    "*.log",
+    ".env*",
+    ".npm",
+    ".npmrc",
+    ".yarnrc",
+    ".yarn",
+    ".eslintrc",
+    ".editorconfig",
+    ".prettierrc",
+    ".prettierignore",
+    ".eslintignore",
+    ".nycrc",
+    ".babelrc",
+    ".pnp.*",
+    "node_modules/.cache",
+    "node_modules/.bin",
+    "*.map",
+    ".env.local",
+    ".env.*.local",
+    "npm-debug.log*",
+    "yarn-debug.log*",
+    "yarn-error.log*",
+    "package-lock.json",
+    "yarn.lock",
+    "*.mcpb",
+    "*.d.ts",
+    "*.tsbuildinfo",
+    "tsconfig.json"
+  ];
+});

@@ -1,0 +1,30 @@
+// var: CLONE_DEEP_FLAG
+var CLONE_DEEP_FLAG = 1, CLONE_FLAT_FLAG = 2, CLONE_SYMBOLS_FLAG = 4, argsTag4 = "[object Arguments]", arrayTag3 = "[object Array]", boolTag4 = "[object Boolean]", dateTag4 = "[object Date]", errorTag3 = "[object Error]", funcTag3 = "[object Function]", genTag2 = "[object GeneratorFunction]", mapTag6 = "[object Map]", numberTag4 = "[object Number]", objectTag4 = "[object Object]", regexpTag4 = "[object RegExp]", setTag6 = "[object Set]", stringTag4 = "[object String]", symbolTag4 = "[object Symbol]", weakMapTag3 = "[object WeakMap]", arrayBufferTag4 = "[object ArrayBuffer]", dataViewTag5 = "[object DataView]", float32Tag3 = "[object Float32Array]", float64Tag3 = "[object Float64Array]", int8Tag3 = "[object Int8Array]", int16Tag3 = "[object Int16Array]", int32Tag3 = "[object Int32Array]", uint8Tag3 = "[object Uint8Array]", uint8ClampedTag3 = "[object Uint8ClampedArray]", uint16Tag3 = "[object Uint16Array]", uint32Tag3 = "[object Uint32Array]", cloneableTags, _baseClone_default;
+var init__baseClone = __esm(() => {
+  init__Stack();
+  init__arrayEach();
+  init__assignValue();
+  init__baseAssign();
+  init__baseAssignIn();
+  init__cloneBuffer();
+  init__copyArray();
+  init__copySymbols();
+  init__copySymbolsIn();
+  init__getAllKeys();
+  init__getAllKeysIn();
+  init__getTag();
+  init__initCloneArray();
+  init__initCloneByTag();
+  init__initCloneObject();
+  init_isArray();
+  init_isBuffer();
+  init_isMap();
+  init_isObject();
+  init_isSet();
+  init_keys();
+  init_keysIn();
+  cloneableTags = {};
+  cloneableTags[argsTag4] = cloneableTags[arrayTag3] = cloneableTags[arrayBufferTag4] = cloneableTags[dataViewTag5] = cloneableTags[boolTag4] = cloneableTags[dateTag4] = cloneableTags[float32Tag3] = cloneableTags[float64Tag3] = cloneableTags[int8Tag3] = cloneableTags[int16Tag3] = cloneableTags[int32Tag3] = cloneableTags[mapTag6] = cloneableTags[numberTag4] = cloneableTags[objectTag4] = cloneableTags[regexpTag4] = cloneableTags[setTag6] = cloneableTags[stringTag4] = cloneableTags[symbolTag4] = cloneableTags[uint8Tag3] = cloneableTags[uint8ClampedTag3] = cloneableTags[uint16Tag3] = cloneableTags[uint32Tag3] = !0;
+  cloneableTags[errorTag3] = cloneableTags[funcTag3] = cloneableTags[weakMapTag3] = !1;
+  _baseClone_default = baseClone;
+});

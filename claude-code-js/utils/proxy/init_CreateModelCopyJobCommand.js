@@ -1,0 +1,11 @@
+// var: init_CreateModelCopyJobCommand
+var init_CreateModelCopyJobCommand = __esm(() => {
+  init_dist_es16();
+  init_EndpointParameters();
+  init_schemas_0();
+  import_middleware_endpoint15 = __toESM(require_dist_cjs65(), 1);
+  CreateModelCopyJobCommand = class CreateModelCopyJobCommand extends Command2.classBuilder().ep(commonParams).m(function(Command3, cs, config4, o3) {
+    return [import_middleware_endpoint15.getEndpointPlugin(config4, Command3.getEndpointParameterInstructions())];
+  }).s("AmazonBedrockControlPlaneService", "CreateModelCopyJob", {}).n("BedrockClient", "CreateModelCopyJobCommand").sc(CreateModelCopyJob$).build() {
+  };
+});

@@ -1,0 +1,2 @@
+// var: rsAstralRange2
+var rsAstralRange2 = "\\ud800-\\udfff", rsComboMarksRange2 = "\\u0300-\\u036f", reComboHalfMarksRange2 = "\\ufe20-\\ufe2f", rsComboSymbolsRange2 = "\\u20d0-\\u20ff", rsComboRange2, rsVarRange2 = "\\ufe0e\\ufe0f", rsAstral, rsCombo, rsFitz = "\\ud83c[\\udffb-\\udfff]", rsModifier, rsNonAstral, rsRegional = "(?:\\ud83c[\\udde6-\\uddff]){2}", rsSurrPair = "[\\ud800-\\udbff][\\udc00-\\udfff]", rsZWJ2 = "\\u200d", reOptMod, rsOptVar, rsOptJoin, rsSeq, rsSymbol, reUnicode, _unicodeToArray_default;

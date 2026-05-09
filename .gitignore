@@ -1,6 +1,5 @@
 target/
 Cargo.lock
-claude-code-js/
 *.txt
 *.md
 !README.md

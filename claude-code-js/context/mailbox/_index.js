@@ -1,0 +1,23 @@
+// Split from: mailbox.js
+// 19 declarations extracted
+
+// Shared: _shared.js (38 lines)
+// function MailboxProvider: MailboxProvider.js (18 lines)
+// function useMailbox: useMailbox.js (6 lines)
+// var init_mailbox2: init_mailbox2.js (4 lines)
+// function readdirp: readdirp.js (14 lines)
+// var init_esm9: init_esm9.js (147 lines)
+// function createFsWatchInstance: createFsWatchInstance.js (14 lines)
+// class NodeFsHandler: NodeFsHandler.js (195 lines)
+// var STR_DATA: STR_DATA.js (87 lines)
+// var init_handler: init_handler.js (276 lines)
+// function arrify: arrify.js (3 lines)
+// function createPattern: createPattern.js (21 lines)
+// function normalizePath: normalizePath.js (14 lines)
+// function matchPatterns: matchPatterns.js (9 lines)
+// function anymatch: anymatch.js (10 lines)
+// class DirEntry: DirEntry.js (41 lines)
+// class WatchHelper: WatchHelper.js (23 lines)
+// function watch: watch.js (4 lines)
+// var SLASH: SLASH.js (24 lines)
+// var init_esm10: init_esm10.js (325 lines)

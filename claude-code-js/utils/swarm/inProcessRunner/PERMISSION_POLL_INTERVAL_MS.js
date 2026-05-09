@@ -1,0 +1,33 @@
+// var: PERMISSION_POLL_INTERVAL_MS
+var PERMISSION_POLL_INTERVAL_MS = 500;
+var init_inProcessRunner = __esm(() => {
+  init_prompts4();
+  init_xml();
+  init_useSwarmPermissionPoller();
+  init_autoCompact();
+  init_compact();
+  init_microCompact();
+  init_InProcessTeammateTask();
+  init_LocalAgentTask();
+  init_runAgent();
+  init_bashPermissions();
+  init_messages3();
+  init_diskOutput();
+  init_framework();
+  init_tokens();
+  init_abortController();
+  init_agentContext();
+  init_debug();
+  init_fileStateCache();
+  init_messages3();
+  init_PermissionUpdate();
+  init_permissions2();
+  init_sdkEventQueue();
+  init_slowOperations();
+  init_tasks();
+  init_teammateContext();
+  init_teammateMailbox();
+  init_perfettoTracing();
+  init_toolResultStorage();
+  init_permissionSync();
+});

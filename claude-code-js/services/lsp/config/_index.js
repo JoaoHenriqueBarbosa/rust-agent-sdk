@@ -1,0 +1,22 @@
+// Split from: config.js
+// 18 declarations extracted
+
+// Shared: _shared.js (34 lines)
+// function getAllLspServers: getAllLspServers.js (27 lines)
+// var init_config10: init_config10.js (7 lines)
+// var require_is: require_is.js (32 lines)
+// var require_messages: require_messages.js (239 lines)
+// var require_linkedMap: require_linkedMap.js (269 lines)
+// var require_disposable: require_disposable.js (13 lines)
+// var require_ral: require_ral.js (18 lines)
+// var require_events: require_events.js (90 lines)
+// var require_cancellation: require_cancellation.js (72 lines)
+// var require_sharedArrayCancellation: require_sharedArrayCancellation.js (67 lines)
+// var require_semaphore: require_semaphore.js (47 lines)
+// var require_messageReader: require_messageReader.js (140 lines)
+// var require_messageWriter: require_messageWriter.js (87 lines)
+// var require_messageBuffer: require_messageBuffer.js (109 lines)
+// var require_connection: require_connection.js (896 lines)
+// var require_api: require_api.js (197 lines)
+// var require_ril: require_ril.js (141 lines)
+// var require_main: require_main.js (225 lines)

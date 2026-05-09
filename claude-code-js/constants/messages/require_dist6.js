@@ -1,0 +1,33 @@
+// var: require_dist6
+var require_dist6 = __commonJS((exports) => {
+  var composer = require_composer(), Document = require_Document(), Schema = require_Schema(), errors6 = require_errors6(), Alias = require_Alias(), identity16 = require_identity(), Pair = require_Pair(), Scalar = require_Scalar(), YAMLMap = require_YAMLMap(), YAMLSeq = require_YAMLSeq(), cst = require_cst(), lexer = require_lexer(), lineCounter = require_line_counter(), parser = require_parser(), publicApi = require_public_api(), visit2 = require_visit();
+  exports.Composer = composer.Composer;
+  exports.Document = Document.Document;
+  exports.Schema = Schema.Schema;
+  exports.YAMLError = errors6.YAMLError;
+  exports.YAMLParseError = errors6.YAMLParseError;
+  exports.YAMLWarning = errors6.YAMLWarning;
+  exports.Alias = Alias.Alias;
+  exports.isAlias = identity16.isAlias;
+  exports.isCollection = identity16.isCollection;
+  exports.isDocument = identity16.isDocument;
+  exports.isMap = identity16.isMap;
+  exports.isNode = identity16.isNode;
+  exports.isPair = identity16.isPair;
+  exports.isScalar = identity16.isScalar;
+  exports.isSeq = identity16.isSeq;
+  exports.Pair = Pair.Pair;
+  exports.Scalar = Scalar.Scalar;
+  exports.YAMLMap = YAMLMap.YAMLMap;
+  exports.YAMLSeq = YAMLSeq.YAMLSeq;
+  exports.CST = cst;
+  exports.Lexer = lexer.Lexer;
+  exports.LineCounter = lineCounter.LineCounter;
+  exports.Parser = parser.Parser;
+  exports.parse = publicApi.parse;
+  exports.parseAllDocuments = publicApi.parseAllDocuments;
+  exports.parseDocument = publicApi.parseDocument;
+  exports.stringify = publicApi.stringify;
+  exports.visit = visit2.visit;
+  exports.visitAsync = visit2.visitAsync;
+});

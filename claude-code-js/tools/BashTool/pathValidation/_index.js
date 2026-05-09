@@ -1,0 +1,20 @@
+// Split from: pathValidation.js
+// 16 declarations extracted
+
+// Shared: _shared.js (5 lines)
+// function checkDangerousRemovalPaths: checkDangerousRemovalPaths.js (22 lines)
+// function filterOutFlags: filterOutFlags.js (11 lines)
+// function parsePatternCommand: parsePatternCommand.js (26 lines)
+// function validateCommandPaths: validateCommandPaths.js (43 lines)
+// function createPathChecker: createPathChecker.js (36 lines)
+// function parseCommandArguments: parseCommandArguments.js (12 lines)
+// function validateSinglePathCommand: validateSinglePathCommand.js (16 lines)
+// function validateSinglePathCommandArgv: validateSinglePathCommandArgv.js (16 lines)
+// function validateOutputRedirections: validateOutputRedirections.js (42 lines)
+// function checkPathConstraints: checkPathConstraints.js (42 lines)
+// function astRedirectsToOutputRedirections: astRedirectsToOutputRedirections.js (25 lines)
+// function skipTimeoutFlags: skipTimeoutFlags.js (28 lines)
+// function skipStdbufFlags: skipStdbufFlags.js (17 lines)
+// function skipEnvFlags: skipEnvFlags.js (17 lines)
+// function stripWrappersFromArgv: stripWrappersFromArgv.js (30 lines)
+// var init_pathValidation2: init_pathValidation2.js (297 lines)
