@@ -11,7 +11,8 @@ use crate::types::{ForkSessionResult, SessionKey, SessionStore, SessionStoreEntr
 
 use super::sessions::{
     canonicalize_path, extract_first_prompt_from_head, extract_last_json_string_field,
-    find_project_dir, get_projects_dir, get_worktree_paths, project_key_for_directory, validate_uuid, LITE_READ_BUF_SIZE,
+    find_project_dir, get_projects_dir, get_worktree_paths, project_key_for_directory,
+    validate_uuid, LITE_READ_BUF_SIZE,
 };
 
 // ---------------------------------------------------------------------------
@@ -94,11 +95,7 @@ fn sanitize_unicode(value: &str) -> String {
 // Local file mutations
 // ---------------------------------------------------------------------------
 
-pub fn rename_session(
-    session_id: &str,
-    title: &str,
-    directory: Option<&str>,
-) -> Result<()> {
+pub fn rename_session(session_id: &str, title: &str, directory: Option<&str>) -> Result<()> {
     if validate_uuid(session_id).is_none() {
         return Err(ClaudeSDKError::sdk(format!(
             "Invalid session_id: {session_id}"
@@ -121,11 +118,7 @@ pub fn rename_session(
     append_to_session(session_id, &data, directory)
 }
 
-pub fn tag_session(
-    session_id: &str,
-    tag: Option<&str>,
-    directory: Option<&str>,
-) -> Result<()> {
+pub fn tag_session(session_id: &str, tag: Option<&str>, directory: Option<&str>) -> Result<()> {
     if validate_uuid(session_id).is_none() {
         return Err(ClaudeSDKError::sdk(format!(
             "Invalid session_id: {session_id}"
@@ -226,9 +219,8 @@ pub fn fork_session(
             }
         })?;
 
-    let content = fs::read(&file_path).map_err(|e| {
-        ClaudeSDKError::sdk(format!("Failed to read session file: {e}"))
-    })?;
+    let content = fs::read(&file_path)
+        .map_err(|e| ClaudeSDKError::sdk(format!("Failed to read session file: {e}")))?;
     if content.is_empty() {
         return Err(ClaudeSDKError::sdk(format!(
             "Session {session_id} has no messages to fork"
@@ -254,7 +246,11 @@ pub fn fork_session(
             .or_else(|| extract_last_json_string_field(&head, "aiTitle"))
             .or_else(|| {
                 let p = extract_first_prompt_from_head(&head);
-                if p.is_empty() { None } else { Some(p) }
+                if p.is_empty() {
+                    None
+                } else {
+                    Some(p)
+                }
             })
     };
 
@@ -416,9 +412,8 @@ pub async fn fork_session_via_store(
     let project_key = store_project_key(directory);
     let src_key = SessionKey::new(&project_key, session_id);
     let loaded = session_store.load(&src_key).await?;
-    let raw = loaded.ok_or_else(|| {
-        ClaudeSDKError::sdk(format!("Session {session_id} not found"))
-    })?;
+    let raw =
+        loaded.ok_or_else(|| ClaudeSDKError::sdk(format!("Session {session_id} not found")))?;
 
     // Partition into transcript and content-replacement entries
     let mut transcript: Vec<serde_json::Value> = Vec::new();
@@ -431,7 +426,10 @@ pub async fn fork_session_via_store(
             transcript.push(entry.clone());
         } else if entry_type == "content-replacement"
             && entry.get("sessionId").and_then(|v| v.as_str()) == Some(session_id)
-            && entry.get("replacements").and_then(|v| v.as_array()).is_some()
+            && entry
+                .get("replacements")
+                .and_then(|v| v.as_array())
+                .is_some()
         {
             if let Some(arr) = entry.get("replacements").and_then(|v| v.as_array()) {
                 content_replacements.extend(arr.iter().cloned());
@@ -439,9 +437,7 @@ pub async fn fork_session_via_store(
         }
     }
 
-    let derive_title = || -> Option<String> {
-        derive_title_from_entries(&raw)
-    };
+    let derive_title = || -> Option<String> { derive_title_from_entries(&raw) };
 
     let (forked_session_id, lines) = build_fork_lines(
         transcript,
@@ -575,9 +571,7 @@ fn append_to_session(session_id: &str, data: &str, directory: Option<&str>) -> R
                     Ok(true) => return Ok(()),
                     Ok(false) => {}
                     Err(e) => {
-                        return Err(ClaudeSDKError::sdk(format!(
-                            "Failed to append: {e}"
-                        )));
+                        return Err(ClaudeSDKError::sdk(format!("Failed to append: {e}")));
                     }
                 }
             }
@@ -795,11 +789,9 @@ fn build_fork_lines(
         };
 
         // Remap logicalParentUuid
-        let logical_parent = original
-            .get("logicalParentUuid")
-            .and_then(|v| v.as_str());
-        let new_logical_parent = logical_parent
-            .and_then(|lp| uuid_mapping.get(lp).map(|s| s.as_str()));
+        let logical_parent = original.get("logicalParentUuid").and_then(|v| v.as_str());
+        let new_logical_parent =
+            logical_parent.and_then(|lp| uuid_mapping.get(lp).map(|s| s.as_str()));
 
         // Build forked entry: spread original, override specific fields
         let mut forked = original.as_object().unwrap().clone();
@@ -861,7 +853,10 @@ fn build_fork_lines(
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
     let fork_title = fork_title.unwrap_or_else(|| {
-        format!("{} (fork)", derive_title().unwrap_or_else(|| "Forked session".to_string()))
+        format!(
+            "{} (fork)",
+            derive_title().unwrap_or_else(|| "Forked session".to_string())
+        )
     });
 
     lines.push(

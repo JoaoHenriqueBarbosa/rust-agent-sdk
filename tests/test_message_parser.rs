@@ -19,15 +19,13 @@ mod test_message_parser {
         });
         let msg = parse_message(&data).unwrap().unwrap();
         match msg {
-            Message::User(u) => {
-                match &u.content {
-                    MessageContent::Blocks(blocks) => {
-                        assert_eq!(blocks.len(), 1);
-                        assert!(matches!(&blocks[0], ContentBlock::Text(t) if t.text == "Hello"));
-                    }
-                    _ => panic!("expected Blocks"),
+            Message::User(u) => match &u.content {
+                MessageContent::Blocks(blocks) => {
+                    assert_eq!(blocks.len(), 1);
+                    assert!(matches!(&blocks[0], ContentBlock::Text(t) if t.text == "Hello"));
                 }
-            }
+                _ => panic!("expected Blocks"),
+            },
             _ => panic!("expected User message"),
         }
     }
@@ -70,23 +68,21 @@ mod test_message_parser {
         });
         let msg = parse_message(&data).unwrap().unwrap();
         match msg {
-            Message::User(u) => {
-                match &u.content {
-                    MessageContent::Blocks(blocks) => {
-                        assert_eq!(blocks.len(), 2);
-                        assert!(matches!(&blocks[0], ContentBlock::Text(_)));
-                        match &blocks[1] {
-                            ContentBlock::ToolUse(t) => {
-                                assert_eq!(t.id, "tool_456");
-                                assert_eq!(t.name, "Read");
-                                assert_eq!(t.input, json!({"file_path": "/example.txt"}));
-                            }
-                            _ => panic!("expected ToolUse block"),
+            Message::User(u) => match &u.content {
+                MessageContent::Blocks(blocks) => {
+                    assert_eq!(blocks.len(), 2);
+                    assert!(matches!(&blocks[0], ContentBlock::Text(_)));
+                    match &blocks[1] {
+                        ContentBlock::ToolUse(t) => {
+                            assert_eq!(t.id, "tool_456");
+                            assert_eq!(t.name, "Read");
+                            assert_eq!(t.input, json!({"file_path": "/example.txt"}));
                         }
+                        _ => panic!("expected ToolUse block"),
                     }
-                    _ => panic!("expected Blocks"),
                 }
-            }
+                _ => panic!("expected Blocks"),
+            },
             _ => panic!("expected User message"),
         }
     }
@@ -107,24 +103,22 @@ mod test_message_parser {
         });
         let msg = parse_message(&data).unwrap().unwrap();
         match msg {
-            Message::User(u) => {
-                match &u.content {
-                    MessageContent::Blocks(blocks) => {
-                        assert_eq!(blocks.len(), 1);
-                        match &blocks[0] {
-                            ContentBlock::ToolResult(t) => {
-                                assert_eq!(t.tool_use_id, "tool_789");
-                                assert_eq!(
-                                    t.content,
-                                    Some(ToolResultContent::Text("File contents here".to_string()))
-                                );
-                            }
-                            _ => panic!("expected ToolResult block"),
+            Message::User(u) => match &u.content {
+                MessageContent::Blocks(blocks) => {
+                    assert_eq!(blocks.len(), 1);
+                    match &blocks[0] {
+                        ContentBlock::ToolResult(t) => {
+                            assert_eq!(t.tool_use_id, "tool_789");
+                            assert_eq!(
+                                t.content,
+                                Some(ToolResultContent::Text("File contents here".to_string()))
+                            );
                         }
+                        _ => panic!("expected ToolResult block"),
                     }
-                    _ => panic!("expected Blocks"),
                 }
-            }
+                _ => panic!("expected Blocks"),
+            },
             _ => panic!("expected User message"),
         }
     }
@@ -146,25 +140,23 @@ mod test_message_parser {
         });
         let msg = parse_message(&data).unwrap().unwrap();
         match msg {
-            Message::User(u) => {
-                match &u.content {
-                    MessageContent::Blocks(blocks) => {
-                        assert_eq!(blocks.len(), 1);
-                        match &blocks[0] {
-                            ContentBlock::ToolResult(t) => {
-                                assert_eq!(t.tool_use_id, "tool_error");
-                                assert_eq!(
-                                    t.content,
-                                    Some(ToolResultContent::Text("File not found".to_string()))
-                                );
-                                assert_eq!(t.is_error, Some(true));
-                            }
-                            _ => panic!("expected ToolResult block"),
+            Message::User(u) => match &u.content {
+                MessageContent::Blocks(blocks) => {
+                    assert_eq!(blocks.len(), 1);
+                    match &blocks[0] {
+                        ContentBlock::ToolResult(t) => {
+                            assert_eq!(t.tool_use_id, "tool_error");
+                            assert_eq!(
+                                t.content,
+                                Some(ToolResultContent::Text("File not found".to_string()))
+                            );
+                            assert_eq!(t.is_error, Some(true));
                         }
+                        _ => panic!("expected ToolResult block"),
                     }
-                    _ => panic!("expected Blocks"),
                 }
-            }
+                _ => panic!("expected Blocks"),
+            },
             _ => panic!("expected User message"),
         }
     }
@@ -193,18 +185,16 @@ mod test_message_parser {
         });
         let msg = parse_message(&data).unwrap().unwrap();
         match msg {
-            Message::User(u) => {
-                match &u.content {
-                    MessageContent::Blocks(blocks) => {
-                        assert_eq!(blocks.len(), 4);
-                        assert!(matches!(&blocks[0], ContentBlock::Text(_)));
-                        assert!(matches!(&blocks[1], ContentBlock::ToolUse(_)));
-                        assert!(matches!(&blocks[2], ContentBlock::ToolResult(_)));
-                        assert!(matches!(&blocks[3], ContentBlock::Text(_)));
-                    }
-                    _ => panic!("expected Blocks"),
+            Message::User(u) => match &u.content {
+                MessageContent::Blocks(blocks) => {
+                    assert_eq!(blocks.len(), 4);
+                    assert!(matches!(&blocks[0], ContentBlock::Text(_)));
+                    assert!(matches!(&blocks[1], ContentBlock::ToolUse(_)));
+                    assert!(matches!(&blocks[2], ContentBlock::ToolResult(_)));
+                    assert!(matches!(&blocks[3], ContentBlock::Text(_)));
                 }
-            }
+                _ => panic!("expected Blocks"),
+            },
             _ => panic!("expected User message"),
         }
     }
@@ -276,7 +266,10 @@ mod test_message_parser {
                 assert_eq!(tur["oldString"], "old code");
                 assert_eq!(tur["newString"], "new code");
                 assert_eq!(tur["structuredPatch"][0]["oldStart"], 33);
-                assert_eq!(u.uuid.as_deref(), Some("2ace3375-1879-48a0-a421-6bce25a9295a"));
+                assert_eq!(
+                    u.uuid.as_deref(),
+                    Some("2ace3375-1879-48a0-a421-6bce25a9295a")
+                );
             }
             _ => panic!("expected User message"),
         }
@@ -293,7 +286,9 @@ mod test_message_parser {
         let msg = parse_message(&data).unwrap().unwrap();
         match msg {
             Message::User(u) => {
-                assert!(matches!(&u.content, MessageContent::Text(s) if s == "Simple string content"));
+                assert!(
+                    matches!(&u.content, MessageContent::Text(s) if s == "Simple string content")
+                );
                 assert_eq!(u.tool_use_result, Some(tool_result_data));
             }
             _ => panic!("expected User message"),
@@ -428,10 +423,13 @@ mod test_message_parser {
                 match &a.content[0] {
                     ContentBlock::ServerToolResult(r) => {
                         assert_eq!(r.tool_use_id, "srvtoolu_01ABC");
-                        assert_eq!(r.content, json!({
-                            "type": "advisor_result",
-                            "text": "Consider edge cases around empty input."
-                        }));
+                        assert_eq!(
+                            r.content,
+                            json!({
+                                "type": "advisor_result",
+                                "text": "Consider edge cases around empty input."
+                            })
+                        );
                     }
                     _ => panic!("expected ServerToolResult block"),
                 }
@@ -460,15 +458,13 @@ mod test_message_parser {
         });
         let msg = parse_message(&data).unwrap().unwrap();
         match msg {
-            Message::Assistant(a) => {
-                match &a.content[0] {
-                    ContentBlock::ServerToolResult(r) => {
-                        assert_eq!(r.content["type"], "advisor_redacted_result");
-                        assert_eq!(r.content["encrypted_content"], "EuYDCioIDhgC...");
-                    }
-                    _ => panic!("expected ServerToolResult block"),
+            Message::Assistant(a) => match &a.content[0] {
+                ContentBlock::ServerToolResult(r) => {
+                    assert_eq!(r.content["type"], "advisor_redacted_result");
+                    assert_eq!(r.content["encrypted_content"], "EuYDCioIDhgC...");
                 }
-            }
+                _ => panic!("expected ServerToolResult block"),
+            },
             _ => panic!("expected Assistant message"),
         }
     }
@@ -492,12 +488,15 @@ mod test_message_parser {
         match msg {
             Message::Assistant(a) => {
                 let usage = a.usage.unwrap();
-                assert_eq!(usage, json!({
-                    "input_tokens": 100,
-                    "output_tokens": 50,
-                    "cache_read_input_tokens": 2000,
-                    "cache_creation_input_tokens": 500
-                }));
+                assert_eq!(
+                    usage,
+                    json!({
+                        "input_tokens": 100,
+                        "output_tokens": 50,
+                        "cache_read_input_tokens": 2000,
+                        "cache_creation_input_tokens": 500
+                    })
+                );
             }
             _ => panic!("expected Assistant message"),
         }
@@ -654,7 +653,10 @@ mod test_message_parser {
         let msg = parse_message(&data).unwrap().unwrap();
         match msg {
             Message::Assistant(a) => {
-                assert_eq!(a.message_id.as_deref(), Some("msg_01HRq7YZE3apPqSHydvG77Ve"));
+                assert_eq!(
+                    a.message_id.as_deref(),
+                    Some("msg_01HRq7YZE3apPqSHydvG77Ve")
+                );
                 assert_eq!(a.stop_reason.as_deref(), Some("end_turn"));
                 assert_eq!(
                     a.session_id.as_deref(),
@@ -664,7 +666,10 @@ mod test_message_parser {
                     a.uuid.as_deref(),
                     Some("0dbd2453-1209-4fe9-bd51-4102f64e33df")
                 );
-                assert_eq!(a.usage, Some(json!({"input_tokens": 10, "output_tokens": 5})));
+                assert_eq!(
+                    a.usage,
+                    Some(json!({"input_tokens": 10, "output_tokens": 5}))
+                );
             }
             _ => panic!("expected Assistant message"),
         }
@@ -775,11 +780,14 @@ mod test_message_parser {
             Message::TaskProgress(t) => {
                 assert_eq!(t.task_id, "task-abc");
                 assert_eq!(t.description, "Halfway there");
-                assert_eq!(t.usage, json!({
-                    "total_tokens": 1234,
-                    "tool_uses": 5,
-                    "duration_ms": 9876
-                }));
+                assert_eq!(
+                    t.usage,
+                    json!({
+                        "total_tokens": 1234,
+                        "tool_uses": 5,
+                        "duration_ms": 9876
+                    })
+                );
                 assert_eq!(t.last_tool_name.as_deref(), Some("Read"));
                 assert_eq!(t.tool_use_id.as_deref(), Some("toolu_01"));
                 assert_eq!(t.uuid, "uuid-2");
@@ -814,11 +822,14 @@ mod test_message_parser {
                 assert_eq!(t.status, "completed");
                 assert_eq!(t.output_file, "/tmp/out.md");
                 assert_eq!(t.summary, "All done");
-                assert_eq!(t.usage, Some(json!({
-                    "total_tokens": 2000,
-                    "tool_uses": 7,
-                    "duration_ms": 12345
-                })));
+                assert_eq!(
+                    t.usage,
+                    Some(json!({
+                        "total_tokens": 2000,
+                        "tool_uses": 7,
+                        "duration_ms": 12345
+                    }))
+                );
                 assert_eq!(t.tool_use_id.as_deref(), Some("toolu_01"));
                 assert_eq!(t.uuid, "uuid-3");
                 assert_eq!(t.session_id, "session-1");
@@ -1035,7 +1046,10 @@ mod test_message_parser {
                 assert!(mu.get("claude-sonnet-4-5-20250929").is_some());
                 assert_eq!(mu["claude-sonnet-4-5-20250929"]["costUSD"], 0.0106);
                 assert_eq!(r.permission_denials.as_ref().unwrap().len(), 0);
-                assert_eq!(r.uuid.as_deref(), Some("d379c496-f33a-4ea4-b920-3c5483baa6f7"));
+                assert_eq!(
+                    r.uuid.as_deref(),
+                    Some("d379c496-f33a-4ea4-b920-3c5483baa6f7")
+                );
             }
             _ => panic!("expected Result message"),
         }
@@ -1141,7 +1155,10 @@ mod test_message_parser {
                 assert_eq!(r.session_id, "session_xyz");
                 assert_eq!(r.rate_limit_info.status, RateLimitStatus::AllowedWarning);
                 assert_eq!(r.rate_limit_info.resets_at, Some(1700000000));
-                assert_eq!(r.rate_limit_info.rate_limit_type, Some(RateLimitType::FiveHour));
+                assert_eq!(
+                    r.rate_limit_info.rate_limit_type,
+                    Some(RateLimitType::FiveHour)
+                );
                 assert_eq!(r.rate_limit_info.utilization, Some(0.91));
             }
             _ => panic!("expected RateLimit message"),

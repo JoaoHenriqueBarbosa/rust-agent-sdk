@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use chrono::DateTime;
 
 use crate::errors::Result;
-use crate::types::{SDKSessionInfo, SessionKey, SessionMessage, SessionMessageType, SessionStore, SessionSummaryEntry};
+use crate::types::{
+    SDKSessionInfo, SessionKey, SessionMessage, SessionMessageType, SessionStore,
+    SessionSummaryEntry,
+};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -100,10 +103,7 @@ fn unescape_json_string(raw: &str) -> String {
 }
 
 pub fn extract_json_string_field(text: &str, key: &str) -> Option<String> {
-    let patterns = [
-        format!("\"{}\":\"", key),
-        format!("\"{}\": \"", key),
-    ];
+    let patterns = [format!("\"{}\":\"", key), format!("\"{}\": \"", key)];
     for pattern in &patterns {
         if let Some(idx) = text.find(pattern) {
             let value_start = idx + pattern.len();
@@ -126,10 +126,7 @@ pub fn extract_json_string_field(text: &str, key: &str) -> Option<String> {
 }
 
 pub fn extract_last_json_string_field(text: &str, key: &str) -> Option<String> {
-    let patterns = [
-        format!("\"{}\":\"", key),
-        format!("\"{}\": \"", key),
-    ];
+    let patterns = [format!("\"{}\":\"", key), format!("\"{}\": \"", key)];
     let mut last_value: Option<String> = None;
     for pattern in &patterns {
         let mut search_from = 0;
@@ -173,7 +170,9 @@ fn get_claude_config_home_dir() -> PathBuf {
     PathBuf::from(home).join(".claude")
 }
 
-pub fn get_projects_dir(env_override: Option<&std::collections::HashMap<String, String>>) -> PathBuf {
+pub fn get_projects_dir(
+    env_override: Option<&std::collections::HashMap<String, String>>,
+) -> PathBuf {
     if let Some(env) = env_override {
         if let Some(config_dir) = env.get("CLAUDE_CONFIG_DIR") {
             if !config_dir.is_empty() {
@@ -218,7 +217,10 @@ pub(crate) fn find_project_dir(project_path: &str) -> Option<PathBuf> {
     if let Ok(entries) = fs::read_dir(&projects_dir) {
         for entry in entries.flatten() {
             if entry.path().is_dir()
-                && entry.file_name().to_string_lossy().starts_with(&format!("{}-", prefix))
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("{}-", prefix))
             {
                 return Some(entry.path());
             }
@@ -439,8 +441,8 @@ fn parse_session_info_from_lite(
         .or_else(|| extract_json_string_field(head, "gitBranch"));
     let git_branch = git_branch.filter(|s| !s.is_empty());
 
-    let session_cwd = extract_json_string_field(head, "cwd")
-        .or_else(|| project_path.map(|s| s.to_string()));
+    let session_cwd =
+        extract_json_string_field(head, "cwd").or_else(|| project_path.map(|s| s.to_string()));
     let session_cwd = session_cwd.filter(|s| !s.is_empty());
 
     // Scope tag extraction to {"type":"tag"} lines
@@ -448,14 +450,12 @@ fn parse_session_info_from_lite(
         .lines()
         .rev()
         .find(|ln| ln.starts_with("{\"type\":\"tag\""));
-    let tag = tag_line.and_then(|ln| {
-        extract_last_json_string_field(ln, "tag").filter(|s| !s.is_empty())
-    });
+    let tag =
+        tag_line.and_then(|ln| extract_last_json_string_field(ln, "tag").filter(|s| !s.is_empty()));
 
     // created_at from first ISO timestamp in head
-    let created_at = extract_json_string_field(head, "timestamp").and_then(|ts| {
-        parse_iso_timestamp_to_millis(&ts)
-    });
+    let created_at = extract_json_string_field(head, "timestamp")
+        .and_then(|ts| parse_iso_timestamp_to_millis(&ts));
 
     Some(SDKSessionInfo {
         session_id: session_id.to_string(),
@@ -513,10 +513,7 @@ pub(crate) fn get_worktree_paths(cwd: &str) -> Vec<String> {
 // Read sessions from directory
 // ---------------------------------------------------------------------------
 
-fn read_sessions_from_dir(
-    project_dir: &Path,
-    project_path: Option<&str>,
-) -> Vec<SDKSessionInfo> {
+fn read_sessions_from_dir(project_dir: &Path, project_path: Option<&str>) -> Vec<SDKSessionInfo> {
     let entries = match fs::read_dir(project_dir) {
         Ok(e) => e,
         Err(_) => return Vec::new(),
@@ -696,7 +693,12 @@ pub fn list_sessions(
     include_worktrees: bool,
 ) -> Result<Vec<SDKSessionInfo>> {
     if let Some(dir) = directory {
-        Ok(list_sessions_for_project(dir, limit, offset, include_worktrees))
+        Ok(list_sessions_for_project(
+            dir,
+            limit,
+            offset,
+            include_worktrees,
+        ))
     } else {
         Ok(list_all_sessions(limit, offset))
     }
@@ -833,7 +835,9 @@ fn parse_transcript_entries(content: &str) -> Vec<TranscriptEntry> {
             continue;
         }
         let entry_type = entry.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        if TRANSCRIPT_ENTRY_TYPES.contains(&entry_type) && entry.get("uuid").and_then(|v| v.as_str()).is_some() {
+        if TRANSCRIPT_ENTRY_TYPES.contains(&entry_type)
+            && entry.get("uuid").and_then(|v| v.as_str()).is_some()
+        {
             entries.push(entry);
         }
     }
@@ -908,9 +912,15 @@ fn build_conversation_chain(entries: &[TranscriptEntry]) -> Vec<TranscriptEntry>
     let main_leaves: Vec<&&TranscriptEntry> = leaves
         .iter()
         .filter(|leaf| {
-            let is_sidechain = leaf.get("isSidechain").and_then(|v| v.as_bool()).unwrap_or(false);
+            let is_sidechain = leaf
+                .get("isSidechain")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let has_team = leaf.get("teamName").and_then(|v| v.as_str()).is_some();
-            let is_meta = leaf.get("isMeta").and_then(|v| v.as_bool()).unwrap_or(false);
+            let is_meta = leaf
+                .get("isMeta")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             !is_sidechain && !has_team && !is_meta
         })
         .collect();
@@ -951,7 +961,11 @@ fn build_conversation_chain(entries: &[TranscriptEntry]) -> Vec<TranscriptEntry>
     let _chain_cur: Option<&TranscriptEntry> = Some(&leaf);
 
     // We need to handle the leaf specially since it's owned
-    let leaf_uuid = leaf.get("uuid").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let leaf_uuid = leaf
+        .get("uuid")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     chain_seen.insert(leaf_uuid);
     chain.push(leaf.clone());
 
@@ -979,10 +993,18 @@ fn is_visible_message(entry: &TranscriptEntry) -> bool {
     if entry_type != "user" && entry_type != "assistant" {
         return false;
     }
-    if entry.get("isMeta").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if entry
+        .get("isMeta")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return false;
     }
-    if entry.get("isSidechain").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if entry
+        .get("isSidechain")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return false;
     }
     entry.get("teamName").and_then(|v| v.as_str()).is_none()
@@ -997,9 +1019,20 @@ fn to_session_message(entry: &TranscriptEntry) -> SessionMessage {
     };
     SessionMessage {
         type_: msg_type,
-        uuid: entry.get("uuid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        session_id: entry.get("sessionId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        message: entry.get("message").cloned().unwrap_or(serde_json::Value::Null),
+        uuid: entry
+            .get("uuid")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        session_id: entry
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        message: entry
+            .get("message")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
         parent_tool_use_id: None,
     }
 }
@@ -1209,10 +1242,7 @@ fn entries_to_subagent_messages(
     messages
 }
 
-pub fn list_subagents(
-    session_id: &str,
-    directory: Option<&str>,
-) -> Result<Vec<String>> {
+pub fn list_subagents(session_id: &str, directory: Option<&str>) -> Result<Vec<String>> {
     if validate_uuid(session_id).is_none() {
         return Ok(Vec::new());
     }
@@ -1248,9 +1278,7 @@ pub fn get_subagent_messages(
     };
 
     let agent_files = collect_agent_files(&subagents_dir);
-    let match_file = agent_files
-        .iter()
-        .find(|(id, _)| id == agent_id);
+    let match_file = agent_files.iter().find(|(id, _)| id == agent_id);
 
     let file_path = match match_file {
         Some((_, path)) => path,
@@ -1335,7 +1363,11 @@ pub async fn list_sessions_from_store(
                     fresh_ids.insert(s_id.clone());
                     continue; // sidechain/empty — drop
                 }
-                slots.push(Slot { mtime: summary.mtime, session_id: None, info });
+                slots.push(Slot {
+                    mtime: summary.mtime,
+                    session_id: None,
+                    info,
+                });
                 fresh_ids.insert(s_id.clone());
             }
 
@@ -1343,7 +1375,11 @@ pub async fn list_sessions_from_store(
             if has_list_sessions {
                 for (session_id, &mtime) in &listing_map {
                     if !fresh_ids.contains(session_id) {
-                        slots.push(Slot { mtime, session_id: Some(session_id.clone()), info: None });
+                        slots.push(Slot {
+                            mtime,
+                            session_id: Some(session_id.clone()),
+                            info: None,
+                        });
                     }
                 }
             }
@@ -1351,9 +1387,28 @@ pub async fn list_sessions_from_store(
             // Paginate BEFORE gap-fill so load() count is bounded by page size
             slots.sort_by(|a, b| b.mtime.cmp(&a.mtime));
             let page: Vec<Slot> = {
-                let after_offset = if offset > 0 { &slots[offset.min(slots.len())..] } else { &slots[..] };
-                let limited = if let Some(l) = limit { if l > 0 { &after_offset[..l.min(after_offset.len())] } else { after_offset } } else { after_offset };
-                limited.iter().map(|s| Slot { mtime: s.mtime, session_id: s.session_id.clone(), info: s.info.clone() }).collect()
+                let after_offset = if offset > 0 {
+                    &slots[offset.min(slots.len())..]
+                } else {
+                    &slots[..]
+                };
+                let limited = if let Some(l) = limit {
+                    if l > 0 {
+                        &after_offset[..l.min(after_offset.len())]
+                    } else {
+                        after_offset
+                    }
+                } else {
+                    after_offset
+                };
+                limited
+                    .iter()
+                    .map(|s| Slot {
+                        mtime: s.mtime,
+                        session_id: s.session_id.clone(),
+                        info: s.info.clone(),
+                    })
+                    .collect()
             };
 
             // Gap-fill only items in the page
@@ -1363,8 +1418,14 @@ pub async fn list_sessions_from_store(
                     results.push(info);
                 } else if let Some(sid) = slot.session_id {
                     if let Some(info) = gap_fill_session(
-                        session_store, &project_key, &sid, slot.mtime, project_path_ref,
-                    ).await {
+                        session_store,
+                        &project_key,
+                        &sid,
+                        slot.mtime,
+                        project_path_ref,
+                    )
+                    .await
+                    {
                         results.push(info);
                     }
                 }
@@ -1378,7 +1439,7 @@ pub async fn list_sessions_from_store(
         return Err(crate::errors::ClaudeSDKError::sdk(
             "session_store implements neither list_session_summaries() nor \
              list_sessions() -- cannot list sessions. Provide a store with at \
-             least one of those methods."
+             least one of those methods.",
         ));
     }
 
@@ -1489,7 +1550,11 @@ pub async fn get_session_messages_from_store(
         })
         .collect();
 
-    Ok(entries_to_session_messages(&transcript_entries, limit, offset))
+    Ok(entries_to_session_messages(
+        &transcript_entries,
+        limit,
+        offset,
+    ))
 }
 
 pub async fn list_subagents_from_store(
@@ -1506,7 +1571,7 @@ pub async fn list_subagents_from_store(
     if !session_store.has_list_subkeys() {
         return Err(crate::errors::ClaudeSDKError::sdk(
             "session_store does not implement list_subkeys() -- cannot list \
-             subagents. Provide a store with a list_subkeys() method."
+             subagents. Provide a store with a list_subkeys() method.",
         ));
     }
 
@@ -1568,12 +1633,10 @@ pub async fn get_subagent_messages_from_store(
             .await
         {
             Ok(subkeys) => {
-                let found = subkeys
-                    .into_iter()
-                    .find(|sk| {
-                        let parts: Vec<&str> = sk.rsplitn(2, '/').collect();
-                        parts[0] == agent_file_suffix
-                    });
+                let found = subkeys.into_iter().find(|sk| {
+                    let parts: Vec<&str> = sk.rsplitn(2, '/').collect();
+                    parts[0] == agent_file_suffix
+                });
                 match found {
                     Some(sp) => sp,
                     None => return Ok(Vec::new()),
@@ -1598,9 +1661,7 @@ pub async fn get_subagent_messages_from_store(
     // they describe the .meta.json sidecar, not transcript lines.
     let transcript: Vec<TranscriptEntry> = entries
         .into_iter()
-        .filter(|entry| {
-            entry.get("type").and_then(|v| v.as_str()) != Some("agent_metadata")
-        })
+        .filter(|entry| entry.get("type").and_then(|v| v.as_str()) != Some("agent_metadata"))
         .collect();
     if transcript.is_empty() {
         return Ok(Vec::new());
@@ -1616,5 +1677,9 @@ pub async fn get_subagent_messages_from_store(
         })
         .collect();
 
-    Ok(entries_to_subagent_messages(&transcript_entries, limit, offset))
+    Ok(entries_to_subagent_messages(
+        &transcript_entries,
+        limit,
+        offset,
+    ))
 }

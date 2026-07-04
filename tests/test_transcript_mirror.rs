@@ -110,14 +110,9 @@ mod test_file_path_to_session_key {
 
     #[test]
     fn test_main_transcript() {
-        let result = file_path_to_session_key(
-            &p(&["-home-user-repo", "abc-123.jsonl"]),
-            &projects_dir(),
-        );
-        assert_eq!(
-            result,
-            Some(SessionKey::new("-home-user-repo", "abc-123"))
-        );
+        let result =
+            file_path_to_session_key(&p(&["-home-user-repo", "abc-123.jsonl"]), &projects_dir());
+        assert_eq!(result, Some(SessionKey::new("-home-user-repo", "abc-123")));
     }
 
     #[test]
@@ -150,10 +145,7 @@ mod test_file_path_to_session_key {
         .collect::<std::path::PathBuf>()
         .to_string_lossy()
         .to_string();
-        assert_eq!(
-            file_path_to_session_key(&elsewhere, &projects_dir()),
-            None
-        );
+        assert_eq!(file_path_to_session_key(&elsewhere, &projects_dir()), None);
     }
 
     #[test]
@@ -169,10 +161,7 @@ mod test_file_path_to_session_key {
         // <project_key>/<session_id>/<file>.jsonl is neither main (2 parts)
         // nor subagent (>=4 parts).
         assert_eq!(
-            file_path_to_session_key(
-                &p(&["proj", "sess", "weird.jsonl"]),
-                &projects_dir()
-            ),
+            file_path_to_session_key(&p(&["proj", "sess", "weird.jsonl"]), &projects_dir()),
             None
         );
     }
@@ -203,22 +192,12 @@ mod test_file_path_to_session_key {
         // not change the derived key (relpath normalizes it).
         let with_slash = format!("{}{}", projects_dir(), MAIN_SEPARATOR);
 
-        let result = file_path_to_session_key(
-            &p(&["-home-user-repo", "abc-123.jsonl"]),
-            &with_slash,
-        );
-        assert_eq!(
-            result,
-            Some(SessionKey::new("-home-user-repo", "abc-123"))
-        );
+        let result =
+            file_path_to_session_key(&p(&["-home-user-repo", "abc-123.jsonl"]), &with_slash);
+        assert_eq!(result, Some(SessionKey::new("-home-user-repo", "abc-123")));
 
         // And a subagent path still parses identically.
-        let path = p(&[
-            "-home-user-repo",
-            "abc-123",
-            "subagents",
-            "agent-xyz.jsonl",
-        ]);
+        let path = p(&["-home-user-repo", "abc-123", "subagents", "agent-xyz.jsonl"]);
         let result = file_path_to_session_key(&path, &with_slash);
         let mut expected = SessionKey::new("-home-user-repo", "abc-123");
         expected.subpath = Some("subagents/agent-xyz".to_string());
@@ -246,7 +225,10 @@ mod test_get_projects_dir_env_override {
     fn test_env_override_takes_precedence() {
         let custom = PathBuf::from("/tmp/custom");
         let mut env = HashMap::new();
-        env.insert("CLAUDE_CONFIG_DIR".to_string(), custom.to_string_lossy().to_string());
+        env.insert(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            custom.to_string_lossy().to_string(),
+        );
         // When CLAUDE_CONFIG_DIR is set in options.env, projects_dir should
         // be <custom>/projects regardless of ambient env.
         let expected = custom.join("projects");
@@ -285,7 +267,8 @@ mod test_transcript_mirror_batcher {
     #[tokio::test]
     async fn test_enqueue_then_flush_calls_store_append() {
         let (store, log) = RecordingStore::new();
-        let batcher = TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
+        let batcher =
+            TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
         batcher.enqueue(&default_main_path(), &[json!({"type": "user", "n": 1})]);
         batcher.enqueue(
             &default_main_path(),
@@ -312,7 +295,8 @@ mod test_transcript_mirror_batcher {
     #[tokio::test]
     async fn test_empty_entries_batch_skips_append() {
         let (store, log) = RecordingStore::new();
-        let batcher = TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
+        let batcher =
+            TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
         batcher.enqueue(&default_main_path(), &[]);
         batcher.flush().await.unwrap();
         // No append for empty batch — adapters must not see phantom keys.
@@ -322,7 +306,8 @@ mod test_transcript_mirror_batcher {
     #[tokio::test]
     async fn test_coalesces_per_file_path_preserving_order() {
         let (store, log) = RecordingStore::new();
-        let batcher = TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
+        let batcher =
+            TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
         batcher.enqueue(&main_path("p", "a"), &[json!({"type": "x", "n": 1})]);
         batcher.enqueue(&main_path("p", "b"), &[json!({"type": "x", "n": 2})]);
         batcher.enqueue(&main_path("p", "a"), &[json!({"type": "x", "n": 3})]);
@@ -349,10 +334,10 @@ mod test_transcript_mirror_batcher {
     #[tokio::test]
     async fn test_eager_flush_on_entry_count_threshold() {
         let (store, log) = RecordingStore::new();
-        let batcher = TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
+        let batcher =
+            TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
         // Enqueue 6 entries — exceeds a threshold of 5
-        let entries: Vec<SessionStoreEntry> =
-            (0..6).map(|_| json!({"type": "x"})).collect();
+        let entries: Vec<SessionStoreEntry> = (0..6).map(|_| json!({"type": "x"})).collect();
         batcher.enqueue(&default_main_path(), &entries);
         // Yield to let eager flush run
         tokio::task::yield_now().await;
@@ -365,12 +350,10 @@ mod test_transcript_mirror_batcher {
     #[tokio::test]
     async fn test_eager_flush_on_byte_threshold() {
         let (store, log) = RecordingStore::new();
-        let batcher = TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
+        let batcher =
+            TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
         let blob = "a".repeat(200);
-        batcher.enqueue(
-            &default_main_path(),
-            &[json!({"type": "x", "blob": blob})],
-        );
+        batcher.enqueue(&default_main_path(), &[json!({"type": "x", "blob": blob})]);
         tokio::task::yield_now().await;
         tokio::task::yield_now().await;
         let calls = log.lock().unwrap().clone();
@@ -507,7 +490,7 @@ mod test_transcript_mirror_batcher {
                 calls: calls.clone(),
             }),
             &projects_dir(),
-        noop_on_error(),
+            noop_on_error(),
         );
         batcher.enqueue(&default_main_path(), &[json!({"type": "x"})]);
         let _ = batcher.flush().await;
@@ -564,7 +547,7 @@ mod test_transcript_mirror_batcher {
                 stored: stored.clone(),
             }),
             &projects_dir(),
-        noop_on_error(),
+            noop_on_error(),
         );
         batcher.enqueue(&default_main_path(), &[json!({"type": "x"})]);
         let result = batcher.flush().await;
@@ -607,7 +590,7 @@ mod test_transcript_mirror_batcher {
                 attempts: attempts.clone(),
             }),
             &projects_dir(),
-        noop_on_error(),
+            noop_on_error(),
         );
         batcher.enqueue(&default_main_path(), &[json!({"type": "x"})]);
         let result = batcher.flush().await;
@@ -620,7 +603,8 @@ mod test_transcript_mirror_batcher {
     #[tokio::test]
     async fn test_close_flushes_pending() {
         let (store, log) = RecordingStore::new();
-        let batcher = TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
+        let batcher =
+            TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
         batcher.enqueue(&default_main_path(), &[json!({"type": "x"})]);
         batcher.close().await.unwrap();
         assert_eq!(log.lock().unwrap().len(), 1);
@@ -632,7 +616,8 @@ mod test_transcript_mirror_batcher {
         // try/except doesn't cover, _drain() must swallow it so the receive
         // loop's pre-result flush() cannot terminate the session.
         let (store, log) = RecordingStore::new();
-        let batcher = TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
+        let batcher =
+            TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
         batcher.enqueue(&default_main_path(), &[json!({"type": "x"})]);
         // flush must not panic — it should swallow internal errors
         let result = batcher.flush().await;
@@ -642,7 +627,8 @@ mod test_transcript_mirror_batcher {
     #[tokio::test]
     async fn test_unmapped_file_path_is_dropped_silently() {
         let (store, log) = RecordingStore::new();
-        let batcher = TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
+        let batcher =
+            TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
         batcher.enqueue("/elsewhere/x.jsonl", &[json!({"type": "x"})]);
         let result = batcher.flush().await;
         assert!(result.is_ok());
@@ -690,7 +676,7 @@ mod test_transcript_mirror_batcher {
                 gate: gate.clone(),
             }),
             &projects_dir(),
-        noop_on_error(),
+            noop_on_error(),
         );
 
         batcher.enqueue(&default_main_path(), &[json!({"type": "x", "n": 1})]);
@@ -744,7 +730,7 @@ mod test_transcript_mirror_batcher {
                 gate: gate.clone(),
             }),
             &projects_dir(),
-        noop_on_error(),
+            noop_on_error(),
         );
 
         batcher.enqueue(
@@ -832,10 +818,7 @@ mod test_build_mirror_batcher_flush_mode {
             noop_on_error(),
             SessionStoreFlushMode::Eager,
         );
-        batcher.enqueue(
-            &default_main_path(),
-            &[json!({"type": "user", "n": 1})],
-        );
+        batcher.enqueue(&default_main_path(), &[json!({"type": "user", "n": 1})]);
         tokio::task::yield_now().await;
         tokio::task::yield_now().await;
         assert_eq!(log.lock().unwrap().len(), 1);
@@ -908,7 +891,8 @@ mod test_receive_loop_frame_peeling {
             "entries": [{"type": "user", "uuid": "u1"}],
         });
 
-        let batcher = TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
+        let batcher =
+            TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
 
         let entries1 = mirror_frame["entries"].as_array().unwrap().clone();
         let entries2 = mirror_frame["entries"].as_array().unwrap().clone();
@@ -934,7 +918,8 @@ mod test_receive_loop_frame_peeling {
     async fn test_flush_happens_before_result_yields() {
         // Store must be up-to-date by the time the consumer sees ResultMessage.
         let (store, log) = RecordingStore::new();
-        let batcher = TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
+        let batcher =
+            TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
 
         batcher.enqueue(
             &default_main_path(),
@@ -952,7 +937,8 @@ mod test_receive_loop_frame_peeling {
         // message (late subagent writes) are still enqueued and flushed by
         // the read-loop's finally-block flush on stream end.
         let (store, log) = RecordingStore::new();
-        let batcher = TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
+        let batcher =
+            TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
 
         // Simulate: result has already been yielded, then late frame arrives
         batcher.enqueue(
@@ -975,7 +961,8 @@ mod test_receive_loop_frame_peeling {
         // is flushed as it arrives, so the store sees one append() per frame
         // rather than a single coalesced batch at result time.
         let (store, log) = RecordingStore::new();
-        let batcher = TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
+        let batcher =
+            TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
 
         // Frame 1
         batcher.enqueue(
@@ -995,10 +982,7 @@ mod test_receive_loop_frame_peeling {
 
         let calls = log.lock().unwrap().clone();
         assert_eq!(calls[0].1, vec![json!({"type": "user", "uuid": "u1"})]);
-        assert_eq!(
-            calls[1].1,
-            vec![json!({"type": "assistant", "uuid": "a1"})]
-        );
+        assert_eq!(calls[1].1, vec![json!({"type": "assistant", "uuid": "a1"})]);
     }
 
     #[tokio::test]
@@ -1006,7 +990,8 @@ mod test_receive_loop_frame_peeling {
         // Without a session_store the batcher isn't attached; frames are
         // peeled and dropped (still not yielded), normal messages flow.
         let (store, log) = RecordingStore::new();
-        let batcher = TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
+        let batcher =
+            TranscriptMirrorBatcher::new(Box::new(store), &projects_dir(), noop_on_error());
 
         // Mirror frame for a path outside projects_dir — should be dropped
         batcher.enqueue("/nonexistent/path.jsonl", &[json!({"type": "user"})]);

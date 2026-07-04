@@ -7,9 +7,7 @@ use futures::Stream;
 use crate::errors::{ClaudeSDKError, Result};
 use crate::internal::message_parser::parse_message;
 use crate::internal::query::Query;
-use crate::internal::session_resume::{
-    apply_materialized_options, materialize_resume_session,
-};
+use crate::internal::session_resume::{apply_materialized_options, materialize_resume_session};
 use crate::internal::session_store_validation::validate_session_store_options;
 use crate::internal::transport::Transport;
 use crate::types::{ClaudeAgentOptions, Message};

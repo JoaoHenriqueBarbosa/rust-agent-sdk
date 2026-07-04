@@ -3,15 +3,22 @@
 //! Ported from Python: tests/test_session_mutations.py
 //! All tests will FAIL because the underlying functions are `todo!()`.
 
-use rust_agent_sdk::{
-    delete_session, fork_session, rename_session, tag_session,
-    // Store-backed (async)
-    delete_session_via_store, fork_session_via_store,
-    rename_session_via_store, tag_session_via_store,
-    // Types
-    InMemorySessionStore, SessionKey, SessionStore,
-};
 use rust_agent_sdk::internal::sessions::sanitize_path;
+use rust_agent_sdk::{
+    delete_session,
+    // Store-backed (async)
+    delete_session_via_store,
+    fork_session,
+    fork_session_via_store,
+    rename_session,
+    rename_session_via_store,
+    tag_session,
+    tag_session_via_store,
+    // Types
+    InMemorySessionStore,
+    SessionKey,
+    SessionStore,
+};
 use serde_json::json;
 use serial_test::serial;
 use std::path::PathBuf;
@@ -139,10 +146,7 @@ fn store_entries_for_session(first_prompt: &str) -> Vec<serde_json::Value> {
     ]
 }
 
-fn store_transcript_entries(
-    sid: &str,
-    num_turns: usize,
-) -> (Vec<serde_json::Value>, Vec<String>) {
+fn store_transcript_entries(sid: &str, num_turns: usize) -> (Vec<serde_json::Value>, Vec<String>) {
     let mut entries = Vec::new();
     let mut uuids = Vec::new();
     let mut parent_uuid: Option<String> = None;
@@ -317,15 +321,24 @@ mod test_rename_session {
 
         let result = rename_session(&sid, "", Some(dir));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("title must be non-empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("title must be non-empty"));
 
         let result = rename_session(&sid, "   ", Some(dir));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("title must be non-empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("title must be non-empty"));
 
         let result = rename_session(&sid, "\n\t", Some(dir));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("title must be non-empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("title must be non-empty"));
     }
 
     #[test]
@@ -352,7 +365,10 @@ mod test_rename_session {
         let sid = uuid::Uuid::new_v4().to_string();
         let result = rename_session(&sid, "title", None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("no projects directory"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("no projects directory"));
     }
 
     #[test]
@@ -387,7 +403,12 @@ mod test_rename_session {
         let project_dir = make_project_dir(&config_dir, real_path.to_str().unwrap());
         let (sid, file_path) = make_session_file(&project_dir, None, "Hello");
 
-        rename_session(&sid, "  Trimmed Title  ", Some(project_path.to_str().unwrap())).unwrap();
+        rename_session(
+            &sid,
+            "  Trimmed Title  ",
+            Some(project_path.to_str().unwrap()),
+        )
+        .unwrap();
 
         let content = std::fs::read_to_string(&file_path).unwrap();
         let lines: Vec<&str> = content.trim().split('\n').collect();
@@ -434,8 +455,7 @@ mod test_rename_session {
             ""
         );
         // Real file has the entry
-        let real_content =
-            std::fs::read_to_string(proj_z.join(format!("{sid}.jsonl"))).unwrap();
+        let real_content = std::fs::read_to_string(proj_z.join(format!("{sid}.jsonl"))).unwrap();
         assert!(real_content.contains("\"customTitle\":\"New Title\""));
     }
 
@@ -455,9 +475,8 @@ mod test_rename_session {
         let content = std::fs::read_to_string(&file_path).unwrap();
         let lines: Vec<&str> = content.trim().split('\n').collect();
         // Compact JSON: no spaces after : or ,
-        let expected = format!(
-            r#"{{"type":"custom-title","customTitle":"Title","sessionId":"{sid}"}}"#
-        );
+        let expected =
+            format!(r#"{{"type":"custom-title","customTitle":"Title","sessionId":"{sid}"}}"#);
         assert_eq!(*lines.last().unwrap(), expected);
     }
 }
@@ -477,11 +496,17 @@ mod test_tag_session {
 
         let result = tag_session("not-a-uuid", Some("tag"), None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid session_id"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid session_id"));
 
         let result = tag_session("", Some("tag"), None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid session_id"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid session_id"));
     }
 
     #[test]
@@ -499,11 +524,17 @@ mod test_tag_session {
 
         let result = tag_session(&sid, Some(""), Some(dir));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("tag must be non-empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("tag must be non-empty"));
 
         let result = tag_session(&sid, Some("   "), Some(dir));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("tag must be non-empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("tag must be non-empty"));
     }
 
     #[test]
@@ -532,7 +563,12 @@ mod test_tag_session {
         let project_dir = make_project_dir(&config_dir, real_path.to_str().unwrap());
         let (sid, file_path) = make_session_file(&project_dir, None, "Hello");
 
-        tag_session(&sid, Some("experiment"), Some(project_path.to_str().unwrap())).unwrap();
+        tag_session(
+            &sid,
+            Some("experiment"),
+            Some(project_path.to_str().unwrap()),
+        )
+        .unwrap();
 
         let content = std::fs::read_to_string(&file_path).unwrap();
         let lines: Vec<&str> = content.trim().split('\n').collect();
@@ -553,7 +589,12 @@ mod test_tag_session {
         let project_dir = make_project_dir(&config_dir, real_path.to_str().unwrap());
         let (sid, file_path) = make_session_file(&project_dir, None, "Hello");
 
-        tag_session(&sid, Some("  my-tag  "), Some(project_path.to_str().unwrap())).unwrap();
+        tag_session(
+            &sid,
+            Some("  my-tag  "),
+            Some(project_path.to_str().unwrap()),
+        )
+        .unwrap();
 
         let content = std::fs::read_to_string(&file_path).unwrap();
         let lines: Vec<&str> = content.trim().split('\n').collect();
@@ -602,8 +643,7 @@ mod test_tag_session {
 
         let content = std::fs::read_to_string(&file_path).unwrap();
         let lines: Vec<&str> = content.trim().split('\n').collect();
-        let last_entry: serde_json::Value =
-            serde_json::from_str(lines.last().unwrap()).unwrap();
+        let last_entry: serde_json::Value = serde_json::from_str(lines.last().unwrap()).unwrap();
         assert_eq!(last_entry["tag"], "third");
 
         // All three tag entries present
@@ -611,7 +651,11 @@ mod test_tag_session {
             .iter()
             .filter_map(|line| {
                 let v: serde_json::Value = serde_json::from_str(line).ok()?;
-                if v["type"] == "tag" { Some(v) } else { None }
+                if v["type"] == "tag" {
+                    Some(v)
+                } else {
+                    None
+                }
             })
             .collect();
         assert_eq!(tag_lines.len(), 3);
@@ -674,7 +718,10 @@ mod test_tag_session {
             Some(project_path.to_str().unwrap()),
         );
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("tag must be non-empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("tag must be non-empty"));
     }
 }
 
@@ -845,7 +892,10 @@ mod test_delete_session {
 
         let result = delete_session("not-a-uuid", None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid session_id"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid session_id"));
     }
 
     #[test]
@@ -930,7 +980,10 @@ mod test_fork_session {
 
         let result = fork_session("not-a-uuid", None, None, None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid session_id"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid session_id"));
     }
 
     #[test]
@@ -954,12 +1007,10 @@ mod test_fork_session {
         let sid = uuid::Uuid::new_v4().to_string();
         let result = fork_session(&sid, None, Some("not-valid"), None);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Invalid up_to_message_id")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid up_to_message_id"));
     }
 
     #[test]
@@ -973,8 +1024,7 @@ mod test_fork_session {
         let project_dir = make_project_dir(&config_dir, real_path.to_str().unwrap());
         let (sid, _, _) = make_transcript_session(&project_dir, None, 2);
 
-        let result =
-            fork_session(&sid, Some(project_path.to_str().unwrap()), None, None).unwrap();
+        let result = fork_session(&sid, Some(project_path.to_str().unwrap()), None, None).unwrap();
         assert_ne!(result.session_id, sid);
 
         let fork_path = project_dir.join(format!("{}.jsonl", result.session_id));
@@ -992,8 +1042,7 @@ mod test_fork_session {
         let project_dir = make_project_dir(&config_dir, real_path.to_str().unwrap());
         let (sid, _, original_uuids) = make_transcript_session(&project_dir, None, 2);
 
-        let result =
-            fork_session(&sid, Some(project_path.to_str().unwrap()), None, None).unwrap();
+        let result = fork_session(&sid, Some(project_path.to_str().unwrap()), None, None).unwrap();
         let fork_path = project_dir.join(format!("{}.jsonl", result.session_id));
 
         let content = std::fs::read_to_string(&fork_path).unwrap();
@@ -1021,8 +1070,7 @@ mod test_fork_session {
         let project_dir = make_project_dir(&config_dir, real_path.to_str().unwrap());
         let (sid, original_path, _) = make_transcript_session(&project_dir, None, 3);
 
-        let result =
-            fork_session(&sid, Some(project_path.to_str().unwrap()), None, None).unwrap();
+        let result = fork_session(&sid, Some(project_path.to_str().unwrap()), None, None).unwrap();
         let fork_path = project_dir.join(format!("{}.jsonl", result.session_id));
 
         let original_content = std::fs::read_to_string(&original_path).unwrap();
@@ -1106,7 +1154,10 @@ mod test_fork_session {
             None,
         );
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found in session"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not found in session"));
     }
 
     #[test]
@@ -1136,7 +1187,11 @@ mod test_fork_session {
             .split('\n')
             .filter_map(|line| {
                 let v: serde_json::Value = serde_json::from_str(line).ok()?;
-                if v["type"] == "custom-title" { Some(v) } else { None }
+                if v["type"] == "custom-title" {
+                    Some(v)
+                } else {
+                    None
+                }
             })
             .last()
             .expect("should have a custom-title entry");
@@ -1154,8 +1209,7 @@ mod test_fork_session {
         let project_dir = make_project_dir(&config_dir, real_path.to_str().unwrap());
         let (sid, _, _) = make_transcript_session(&project_dir, None, 2);
 
-        let result =
-            fork_session(&sid, Some(project_path.to_str().unwrap()), None, None).unwrap();
+        let result = fork_session(&sid, Some(project_path.to_str().unwrap()), None, None).unwrap();
 
         let fork_path = project_dir.join(format!("{}.jsonl", result.session_id));
         let content = std::fs::read_to_string(&fork_path).unwrap();
@@ -1164,7 +1218,11 @@ mod test_fork_session {
             .split('\n')
             .filter_map(|line| {
                 let v: serde_json::Value = serde_json::from_str(line).ok()?;
-                if v["type"] == "custom-title" { Some(v) } else { None }
+                if v["type"] == "custom-title" {
+                    Some(v)
+                } else {
+                    None
+                }
             })
             .last()
             .expect("should have a custom-title entry");
@@ -1186,8 +1244,7 @@ mod test_fork_session {
         let project_dir = make_project_dir(&config_dir, real_path.to_str().unwrap());
         let (sid, _, _) = make_transcript_session(&project_dir, None, 2);
 
-        let result =
-            fork_session(&sid, Some(project_path.to_str().unwrap()), None, None).unwrap();
+        let result = fork_session(&sid, Some(project_path.to_str().unwrap()), None, None).unwrap();
         let fork_path = project_dir.join(format!("{}.jsonl", result.session_id));
 
         let content = std::fs::read_to_string(&fork_path).unwrap();
@@ -1212,8 +1269,7 @@ mod test_fork_session {
         let project_dir = make_project_dir(&config_dir, real_path.to_str().unwrap());
         let (sid, _, _) = make_transcript_session(&project_dir, None, 2);
 
-        let result =
-            fork_session(&sid, Some(project_path.to_str().unwrap()), None, None).unwrap();
+        let result = fork_session(&sid, Some(project_path.to_str().unwrap()), None, None).unwrap();
         let fork_path = project_dir.join(format!("{}.jsonl", result.session_id));
 
         let content = std::fs::read_to_string(&fork_path).unwrap();
@@ -1268,8 +1324,7 @@ mod test_fork_session {
         });
         std::fs::write(&file_path, serde_json::to_string(&entry).unwrap() + "\n").unwrap();
 
-        let result =
-            fork_session(&sid, Some(project_path.to_str().unwrap()), None, None).unwrap();
+        let result = fork_session(&sid, Some(project_path.to_str().unwrap()), None, None).unwrap();
         let fork_path = project_dir.join(format!("{}.jsonl", result.session_id));
 
         let content = std::fs::read_to_string(&fork_path).unwrap();
@@ -1297,7 +1352,10 @@ mod test_rename_session_via_store {
         let store = InMemorySessionStore::new();
         let result = rename_session_via_store(&store, "not-a-uuid", "title", None).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid session_id"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid session_id"));
     }
 
     #[tokio::test]
@@ -1305,16 +1363,28 @@ mod test_rename_session_via_store {
     async fn test_empty_title_raises() {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
-        let key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &sid);
-        store.append(&key, &store_entries_for_session("Hello")).await.unwrap();
+        let key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &sid,
+        );
+        store
+            .append(&key, &store_entries_for_session("Hello"))
+            .await
+            .unwrap();
 
         let result = rename_session_via_store(&store, &sid, "", Some("/proj")).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("title must be non-empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("title must be non-empty"));
 
         let result = rename_session_via_store(&store, &sid, "   ", Some("/proj")).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("title must be non-empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("title must be non-empty"));
     }
 
     #[tokio::test]
@@ -1322,10 +1392,18 @@ mod test_rename_session_via_store {
     async fn test_appends_custom_title_entry() {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
-        let key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &sid);
-        store.append(&key, &store_entries_for_session("Hello")).await.unwrap();
+        let key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &sid,
+        );
+        store
+            .append(&key, &store_entries_for_session("Hello"))
+            .await
+            .unwrap();
 
-        rename_session_via_store(&store, &sid, "My Title", Some("/proj")).await.unwrap();
+        rename_session_via_store(&store, &sid, "My Title", Some("/proj"))
+            .await
+            .unwrap();
 
         let entries = store.load(&key).await.unwrap().unwrap();
         let last = entries.last().unwrap();
@@ -1339,10 +1417,18 @@ mod test_rename_session_via_store {
     async fn test_title_trimmed() {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
-        let key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &sid);
-        store.append(&key, &store_entries_for_session("Hello")).await.unwrap();
+        let key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &sid,
+        );
+        store
+            .append(&key, &store_entries_for_session("Hello"))
+            .await
+            .unwrap();
 
-        rename_session_via_store(&store, &sid, "  Trimmed  ", Some("/proj")).await.unwrap();
+        rename_session_via_store(&store, &sid, "  Trimmed  ", Some("/proj"))
+            .await
+            .unwrap();
 
         let entries = store.load(&key).await.unwrap().unwrap();
         let last = entries.last().unwrap();
@@ -1354,10 +1440,18 @@ mod test_rename_session_via_store {
     async fn test_compact_json_keys() {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
-        let key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &sid);
-        store.append(&key, &store_entries_for_session("Hello")).await.unwrap();
+        let key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &sid,
+        );
+        store
+            .append(&key, &store_entries_for_session("Hello"))
+            .await
+            .unwrap();
 
-        rename_session_via_store(&store, &sid, "Title", Some("/proj")).await.unwrap();
+        rename_session_via_store(&store, &sid, "Title", Some("/proj"))
+            .await
+            .unwrap();
 
         let entries = store.load(&key).await.unwrap().unwrap();
         let last = entries.last().unwrap();
@@ -1381,7 +1475,10 @@ mod test_tag_session_via_store {
         let store = InMemorySessionStore::new();
         let result = tag_session_via_store(&store, "not-a-uuid", Some("tag"), None).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid session_id"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid session_id"));
     }
 
     #[tokio::test]
@@ -1389,16 +1486,28 @@ mod test_tag_session_via_store {
     async fn test_empty_tag_raises() {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
-        let key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &sid);
-        store.append(&key, &store_entries_for_session("Hello")).await.unwrap();
+        let key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &sid,
+        );
+        store
+            .append(&key, &store_entries_for_session("Hello"))
+            .await
+            .unwrap();
 
         let result = tag_session_via_store(&store, &sid, Some(""), Some("/proj")).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("tag must be non-empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("tag must be non-empty"));
 
         let result = tag_session_via_store(&store, &sid, Some("   "), Some("/proj")).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("tag must be non-empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("tag must be non-empty"));
     }
 
     #[tokio::test]
@@ -1406,8 +1515,14 @@ mod test_tag_session_via_store {
     async fn test_appends_tag_entry() {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
-        let key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &sid);
-        store.append(&key, &store_entries_for_session("Hello")).await.unwrap();
+        let key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &sid,
+        );
+        store
+            .append(&key, &store_entries_for_session("Hello"))
+            .await
+            .unwrap();
 
         tag_session_via_store(&store, &sid, Some("experiment"), Some("/proj"))
             .await
@@ -1425,8 +1540,14 @@ mod test_tag_session_via_store {
     async fn test_none_clears_tag() {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
-        let key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &sid);
-        store.append(&key, &store_entries_for_session("Hello")).await.unwrap();
+        let key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &sid,
+        );
+        store
+            .append(&key, &store_entries_for_session("Hello"))
+            .await
+            .unwrap();
 
         tag_session_via_store(&store, &sid, Some("original"), Some("/proj"))
             .await
@@ -1447,8 +1568,14 @@ mod test_tag_session_via_store {
     async fn test_unicode_sanitization() {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
-        let key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &sid);
-        store.append(&key, &store_entries_for_session("Hello")).await.unwrap();
+        let key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &sid,
+        );
+        store
+            .append(&key, &store_entries_for_session("Hello"))
+            .await
+            .unwrap();
 
         let dirty_tag = "clean\u{200b}tag\u{feff}";
         tag_session_via_store(&store, &sid, Some(dirty_tag), Some("/proj"))
@@ -1465,8 +1592,14 @@ mod test_tag_session_via_store {
     async fn test_sanitization_rejects_pure_invisible() {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
-        let key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &sid);
-        store.append(&key, &store_entries_for_session("Hello")).await.unwrap();
+        let key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &sid,
+        );
+        store
+            .append(&key, &store_entries_for_session("Hello"))
+            .await
+            .unwrap();
 
         let result = tag_session_via_store(
             &store,
@@ -1476,7 +1609,10 @@ mod test_tag_session_via_store {
         )
         .await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("tag must be non-empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("tag must be non-empty"));
     }
 }
 
@@ -1493,7 +1629,10 @@ mod test_delete_session_via_store {
         let store = InMemorySessionStore::new();
         let result = delete_session_via_store(&store, "not-a-uuid", None).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid session_id"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid session_id"));
     }
 
     #[tokio::test]
@@ -1501,12 +1640,20 @@ mod test_delete_session_via_store {
     async fn test_deletes_session() {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
-        let key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &sid);
-        store.append(&key, &store_entries_for_session("Hello")).await.unwrap();
+        let key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &sid,
+        );
+        store
+            .append(&key, &store_entries_for_session("Hello"))
+            .await
+            .unwrap();
 
         assert!(store.load(&key).await.unwrap().is_some());
 
-        delete_session_via_store(&store, &sid, Some("/proj")).await.unwrap();
+        delete_session_via_store(&store, &sid, Some("/proj"))
+            .await
+            .unwrap();
 
         assert!(store.load(&key).await.unwrap().is_none());
     }
@@ -1536,7 +1683,10 @@ mod test_fork_session_via_store {
         let store = InMemorySessionStore::new();
         let result = fork_session_via_store(&store, "not-a-uuid", None, None, None).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid session_id"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid session_id"));
     }
 
     #[tokio::test]
@@ -1544,15 +1694,12 @@ mod test_fork_session_via_store {
     async fn test_invalid_up_to_message_id_raises() {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
-        let result =
-            fork_session_via_store(&store, &sid, None, Some("not-valid"), None).await;
+        let result = fork_session_via_store(&store, &sid, None, Some("not-valid"), None).await;
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Invalid up_to_message_id")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid up_to_message_id"));
     }
 
     #[tokio::test]
@@ -1560,8 +1707,7 @@ mod test_fork_session_via_store {
     async fn test_session_not_found_raises() {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
-        let result =
-            fork_session_via_store(&store, &sid, Some("/proj"), None, None).await;
+        let result = fork_session_via_store(&store, &sid, Some("/proj"), None, None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
@@ -1571,17 +1717,22 @@ mod test_fork_session_via_store {
     async fn test_fork_creates_new_session() {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
-        let key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &sid);
+        let key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &sid,
+        );
         let (entries, _) = store_transcript_entries(&sid, 2);
         store.append(&key, &entries).await.unwrap();
 
-        let result =
-            fork_session_via_store(&store, &sid, Some("/proj"), None, None)
-                .await
-                .unwrap();
+        let result = fork_session_via_store(&store, &sid, Some("/proj"), None, None)
+            .await
+            .unwrap();
         assert_ne!(result.session_id, sid);
 
-        let fork_key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &result.session_id);
+        let fork_key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &result.session_id,
+        );
         let fork_entries = store.load(&fork_key).await.unwrap();
         assert!(fork_entries.is_some());
         assert!(!fork_entries.unwrap().is_empty());
@@ -1592,15 +1743,20 @@ mod test_fork_session_via_store {
     async fn test_fork_remaps_uuids() {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
-        let key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &sid);
+        let key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &sid,
+        );
         let (entries, original_uuids) = store_transcript_entries(&sid, 2);
         store.append(&key, &entries).await.unwrap();
 
-        let result =
-            fork_session_via_store(&store, &sid, Some("/proj"), None, None)
-                .await
-                .unwrap();
-        let fork_key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &result.session_id);
+        let result = fork_session_via_store(&store, &sid, Some("/proj"), None, None)
+            .await
+            .unwrap();
+        let fork_key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &result.session_id,
+        );
         let fork_entries = store.load(&fork_key).await.unwrap().unwrap();
 
         for entry in &fork_entries {
@@ -1620,7 +1776,10 @@ mod test_fork_session_via_store {
     async fn test_fork_preserves_message_count() {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
-        let key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &sid);
+        let key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &sid,
+        );
         let (entries, _) = store_transcript_entries(&sid, 3);
         let original_count = entries
             .iter()
@@ -1631,11 +1790,13 @@ mod test_fork_session_via_store {
             .count();
         store.append(&key, &entries).await.unwrap();
 
-        let result =
-            fork_session_via_store(&store, &sid, Some("/proj"), None, None)
-                .await
-                .unwrap();
-        let fork_key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &result.session_id);
+        let result = fork_session_via_store(&store, &sid, Some("/proj"), None, None)
+            .await
+            .unwrap();
+        let fork_key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &result.session_id,
+        );
         let fork_entries = store.load(&fork_key).await.unwrap().unwrap();
         let fork_count = fork_entries
             .iter()
@@ -1653,17 +1814,22 @@ mod test_fork_session_via_store {
     async fn test_fork_up_to_message_id() {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
-        let key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &sid);
+        let key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &sid,
+        );
         let (entries, uuids) = store_transcript_entries(&sid, 3);
         store.append(&key, &entries).await.unwrap();
 
         let cutoff_uuid = &uuids[1]; // first assistant
-        let result =
-            fork_session_via_store(&store, &sid, Some("/proj"), Some(cutoff_uuid), None)
-                .await
-                .unwrap();
+        let result = fork_session_via_store(&store, &sid, Some("/proj"), Some(cutoff_uuid), None)
+            .await
+            .unwrap();
 
-        let fork_key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &result.session_id);
+        let fork_key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &result.session_id,
+        );
         let fork_entries = store.load(&fork_key).await.unwrap().unwrap();
         let fork_count = fork_entries
             .iter()
@@ -1681,16 +1847,21 @@ mod test_fork_session_via_store {
     async fn test_fork_up_to_message_id_not_found() {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
-        let key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &sid);
+        let key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &sid,
+        );
         let (entries, _) = store_transcript_entries(&sid, 2);
         store.append(&key, &entries).await.unwrap();
 
         let fake_uuid = uuid::Uuid::new_v4().to_string();
         let result =
-            fork_session_via_store(&store, &sid, Some("/proj"), Some(&fake_uuid), None)
-                .await;
+            fork_session_via_store(&store, &sid, Some("/proj"), Some(&fake_uuid), None).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found in session"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not found in session"));
     }
 
     #[tokio::test]
@@ -1698,21 +1869,21 @@ mod test_fork_session_via_store {
     async fn test_fork_custom_title() {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
-        let key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &sid);
+        let key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &sid,
+        );
         let (entries, _) = store_transcript_entries(&sid, 2);
         store.append(&key, &entries).await.unwrap();
 
-        let result = fork_session_via_store(
-            &store,
-            &sid,
-            Some("/proj"),
-            None,
-            Some("My Fork"),
-        )
-        .await
-        .unwrap();
+        let result = fork_session_via_store(&store, &sid, Some("/proj"), None, Some("My Fork"))
+            .await
+            .unwrap();
 
-        let fork_key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &result.session_id);
+        let fork_key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &result.session_id,
+        );
         let fork_entries = store.load(&fork_key).await.unwrap().unwrap();
         let title_entry = fork_entries
             .iter()
@@ -1726,16 +1897,21 @@ mod test_fork_session_via_store {
     async fn test_fork_default_title_has_suffix() {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
-        let key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &sid);
+        let key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &sid,
+        );
         let (entries, _) = store_transcript_entries(&sid, 2);
         store.append(&key, &entries).await.unwrap();
 
-        let result =
-            fork_session_via_store(&store, &sid, Some("/proj"), None, None)
-                .await
-                .unwrap();
+        let result = fork_session_via_store(&store, &sid, Some("/proj"), None, None)
+            .await
+            .unwrap();
 
-        let fork_key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &result.session_id);
+        let fork_key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &result.session_id,
+        );
         let fork_entries = store.load(&fork_key).await.unwrap().unwrap();
         let title_entry = fork_entries
             .iter()
@@ -1753,16 +1929,21 @@ mod test_fork_session_via_store {
     async fn test_fork_session_id_in_entries() {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
-        let key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &sid);
+        let key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &sid,
+        );
         let (entries, _) = store_transcript_entries(&sid, 2);
         store.append(&key, &entries).await.unwrap();
 
-        let result =
-            fork_session_via_store(&store, &sid, Some("/proj"), None, None)
-                .await
-                .unwrap();
+        let result = fork_session_via_store(&store, &sid, Some("/proj"), None, None)
+            .await
+            .unwrap();
 
-        let fork_key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &result.session_id);
+        let fork_key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &result.session_id,
+        );
         let fork_entries = store.load(&fork_key).await.unwrap().unwrap();
         for entry in &fork_entries {
             assert_eq!(
@@ -1778,16 +1959,21 @@ mod test_fork_session_via_store {
     async fn test_fork_forked_from_field() {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
-        let key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &sid);
+        let key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &sid,
+        );
         let (entries, _) = store_transcript_entries(&sid, 2);
         store.append(&key, &entries).await.unwrap();
 
-        let result =
-            fork_session_via_store(&store, &sid, Some("/proj"), None, None)
-                .await
-                .unwrap();
+        let result = fork_session_via_store(&store, &sid, Some("/proj"), None, None)
+            .await
+            .unwrap();
 
-        let fork_key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &result.session_id);
+        let fork_key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &result.session_id,
+        );
         let fork_entries = store.load(&fork_key).await.unwrap().unwrap();
         for entry in &fork_entries {
             let entry_type = entry["type"].as_str().unwrap_or("");
@@ -1806,7 +1992,10 @@ mod test_fork_session_via_store {
     async fn test_fork_clears_stale_fields() {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
-        let key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &sid);
+        let key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &sid,
+        );
         let entry = json!({
             "type": "user",
             "uuid": uuid::Uuid::new_v4().to_string(),
@@ -1820,12 +2009,14 @@ mod test_fork_session_via_store {
         });
         store.append(&key, &[entry]).await.unwrap();
 
-        let result =
-            fork_session_via_store(&store, &sid, Some("/proj"), None, None)
-                .await
-                .unwrap();
+        let result = fork_session_via_store(&store, &sid, Some("/proj"), None, None)
+            .await
+            .unwrap();
 
-        let fork_key = SessionKey::new(rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(), &result.session_id);
+        let fork_key = SessionKey::new(
+            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            &result.session_id,
+        );
         let fork_entries = store.load(&fork_key).await.unwrap().unwrap();
         for e in &fork_entries {
             if e["type"] == "user" {

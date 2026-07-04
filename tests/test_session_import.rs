@@ -10,11 +10,11 @@ use serde_json::json;
 use serial_test::serial;
 use tempfile::TempDir;
 
+use rust_agent_sdk::internal::session_import::MAX_PENDING_ENTRIES;
 use rust_agent_sdk::{
     import_session_to_store, project_key_for_directory, InMemorySessionStore, SessionKey,
     SessionListSubkeysKey, SessionStore, SessionStoreEntry,
 };
-use rust_agent_sdk::internal::session_import::MAX_PENDING_ENTRIES;
 
 const SESSION_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
@@ -74,9 +74,15 @@ async fn test_imports_main_transcript() {
     write_jsonl(&project_dir.join(format!("{SESSION_ID}.jsonl")), &entries);
 
     let store = InMemorySessionStore::new();
-    import_session_to_store(SESSION_ID, &store, Some(cwd.to_str().unwrap()), true, MAX_PENDING_ENTRIES)
-        .await
-        .unwrap();
+    import_session_to_store(
+        SESSION_ID,
+        &store,
+        Some(cwd.to_str().unwrap()),
+        true,
+        MAX_PENDING_ENTRIES,
+    )
+    .await
+    .unwrap();
 
     let key = SessionKey::new(&pk, SESSION_ID);
     assert_eq!(store.get_entries(&key), entries);
@@ -113,9 +119,15 @@ async fn test_skips_blank_lines() {
     fs::write(&path, content).unwrap();
 
     let store = InMemorySessionStore::new();
-    import_session_to_store(SESSION_ID, &store, Some(cwd.to_str().unwrap()), true, MAX_PENDING_ENTRIES)
-        .await
-        .unwrap();
+    import_session_to_store(
+        SESSION_ID,
+        &store,
+        Some(cwd.to_str().unwrap()),
+        true,
+        MAX_PENDING_ENTRIES,
+    )
+    .await
+    .unwrap();
 
     let key = SessionKey::new(&pk, SESSION_ID);
     assert_eq!(store.get_entries(&key), vec![entry(0), entry(1)]);
@@ -145,7 +157,10 @@ async fn test_nonpositive_batch_size_uses_default() {
 #[serial]
 async fn test_imports_subagent_transcripts_with_subpath() {
     let (_tmp, project_dir, cwd, pk) = setup_env();
-    write_jsonl(&project_dir.join(format!("{SESSION_ID}.jsonl")), &[entry(0)]);
+    write_jsonl(
+        &project_dir.join(format!("{SESSION_ID}.jsonl")),
+        &[entry(0)],
+    );
     let sub_entries = vec![entry(10), entry(11)];
     write_jsonl(
         &project_dir
@@ -156,9 +171,15 @@ async fn test_imports_subagent_transcripts_with_subpath() {
     );
 
     let store = InMemorySessionStore::new();
-    import_session_to_store(SESSION_ID, &store, Some(cwd.to_str().unwrap()), true, MAX_PENDING_ENTRIES)
-        .await
-        .unwrap();
+    import_session_to_store(
+        SESSION_ID,
+        &store,
+        Some(cwd.to_str().unwrap()),
+        true,
+        MAX_PENDING_ENTRIES,
+    )
+    .await
+    .unwrap();
 
     let sub_key = SessionKey {
         project_key: pk.clone(),
@@ -181,7 +202,10 @@ async fn test_imports_subagent_transcripts_with_subpath() {
 #[serial]
 async fn test_imports_nested_subagent_transcripts() {
     let (_tmp, project_dir, cwd, pk) = setup_env();
-    write_jsonl(&project_dir.join(format!("{SESSION_ID}.jsonl")), &[entry(0)]);
+    write_jsonl(
+        &project_dir.join(format!("{SESSION_ID}.jsonl")),
+        &[entry(0)],
+    );
     let nested = project_dir
         .join(SESSION_ID)
         .join("subagents")
@@ -190,9 +214,15 @@ async fn test_imports_nested_subagent_transcripts() {
     write_jsonl(&nested.join("agent-def.jsonl"), &[entry(20)]);
 
     let store = InMemorySessionStore::new();
-    import_session_to_store(SESSION_ID, &store, Some(cwd.to_str().unwrap()), true, MAX_PENDING_ENTRIES)
-        .await
-        .unwrap();
+    import_session_to_store(
+        SESSION_ID,
+        &store,
+        Some(cwd.to_str().unwrap()),
+        true,
+        MAX_PENDING_ENTRIES,
+    )
+    .await
+    .unwrap();
 
     let sub_key = SessionKey {
         project_key: pk.clone(),
@@ -206,7 +236,10 @@ async fn test_imports_nested_subagent_transcripts() {
 #[serial]
 async fn test_imports_meta_json_sidecar_as_agent_metadata() {
     let (_tmp, project_dir, cwd, pk) = setup_env();
-    write_jsonl(&project_dir.join(format!("{SESSION_ID}.jsonl")), &[entry(0)]);
+    write_jsonl(
+        &project_dir.join(format!("{SESSION_ID}.jsonl")),
+        &[entry(0)],
+    );
     let sub_dir = project_dir.join(SESSION_ID).join("subagents");
     write_jsonl(&sub_dir.join("agent-abc.jsonl"), &[entry(10)]);
     fs::write(
@@ -216,9 +249,15 @@ async fn test_imports_meta_json_sidecar_as_agent_metadata() {
     .unwrap();
 
     let store = InMemorySessionStore::new();
-    import_session_to_store(SESSION_ID, &store, Some(cwd.to_str().unwrap()), true, MAX_PENDING_ENTRIES)
-        .await
-        .unwrap();
+    import_session_to_store(
+        SESSION_ID,
+        &store,
+        Some(cwd.to_str().unwrap()),
+        true,
+        MAX_PENDING_ENTRIES,
+    )
+    .await
+    .unwrap();
 
     let sub_key = SessionKey {
         project_key: pk.clone(),
@@ -241,7 +280,10 @@ async fn test_imports_meta_json_sidecar_as_agent_metadata() {
 #[serial]
 async fn test_include_subagents_false_skips_subagents() {
     let (_tmp, project_dir, cwd, pk) = setup_env();
-    write_jsonl(&project_dir.join(format!("{SESSION_ID}.jsonl")), &[entry(0)]);
+    write_jsonl(
+        &project_dir.join(format!("{SESSION_ID}.jsonl")),
+        &[entry(0)],
+    );
     write_jsonl(
         &project_dir
             .join(SESSION_ID)
@@ -251,9 +293,15 @@ async fn test_include_subagents_false_skips_subagents() {
     );
 
     let store = InMemorySessionStore::new();
-    import_session_to_store(SESSION_ID, &store, Some(cwd.to_str().unwrap()), false, MAX_PENDING_ENTRIES)
-        .await
-        .unwrap();
+    import_session_to_store(
+        SESSION_ID,
+        &store,
+        Some(cwd.to_str().unwrap()),
+        false,
+        MAX_PENDING_ENTRIES,
+    )
+    .await
+    .unwrap();
 
     let subkeys = store
         .list_subkeys(&SessionListSubkeysKey {
@@ -269,13 +317,22 @@ async fn test_include_subagents_false_skips_subagents() {
 #[serial]
 async fn test_no_subagents_dir_is_noop() {
     let (_tmp, project_dir, cwd, pk) = setup_env();
-    write_jsonl(&project_dir.join(format!("{SESSION_ID}.jsonl")), &[entry(0)]);
+    write_jsonl(
+        &project_dir.join(format!("{SESSION_ID}.jsonl")),
+        &[entry(0)],
+    );
 
     let store = InMemorySessionStore::new();
     // include_subagents defaults to True; absence of the dir must not raise.
-    import_session_to_store(SESSION_ID, &store, Some(cwd.to_str().unwrap()), true, MAX_PENDING_ENTRIES)
-        .await
-        .unwrap();
+    import_session_to_store(
+        SESSION_ID,
+        &store,
+        Some(cwd.to_str().unwrap()),
+        true,
+        MAX_PENDING_ENTRIES,
+    )
+    .await
+    .unwrap();
 
     let key = SessionKey::new(&pk, SESSION_ID);
     assert_eq!(store.get_entries(&key), vec![entry(0)]);
@@ -289,12 +346,12 @@ async fn test_no_subagents_dir_is_noop() {
 #[serial]
 async fn test_invalid_uuid_raises() {
     let store = InMemorySessionStore::new();
-    let result = import_session_to_store("../../etc/passwd", &store, None, true, MAX_PENDING_ENTRIES).await;
+    let result =
+        import_session_to_store("../../etc/passwd", &store, None, true, MAX_PENDING_ENTRIES).await;
     assert!(result.is_err());
     let err_msg = format!("{}", result.unwrap_err());
     assert!(
-        err_msg.to_lowercase().contains("invalid")
-            || err_msg.to_lowercase().contains("session_id"),
+        err_msg.to_lowercase().contains("invalid") || err_msg.to_lowercase().contains("session_id"),
         "Expected error about invalid session_id, got: {err_msg}"
     );
 }
@@ -304,8 +361,14 @@ async fn test_invalid_uuid_raises() {
 async fn test_session_not_found_raises() {
     let (_tmp, _project_dir, cwd, _pk) = setup_env();
     let store = InMemorySessionStore::new();
-    let result =
-        import_session_to_store(SESSION_ID, &store, Some(cwd.to_str().unwrap()), true, MAX_PENDING_ENTRIES).await;
+    let result = import_session_to_store(
+        SESSION_ID,
+        &store,
+        Some(cwd.to_str().unwrap()),
+        true,
+        MAX_PENDING_ENTRIES,
+    )
+    .await;
     assert!(result.is_err());
     let err_msg = format!("{}", result.unwrap_err());
     assert!(
@@ -325,7 +388,10 @@ async fn test_subpath_matches_file_path_to_session_key() {
     use rust_agent_sdk::internal::session_store::file_path_to_session_key;
 
     let (_tmp, project_dir, cwd, _pk) = setup_env();
-    write_jsonl(&project_dir.join(format!("{SESSION_ID}.jsonl")), &[entry(0)]);
+    write_jsonl(
+        &project_dir.join(format!("{SESSION_ID}.jsonl")),
+        &[entry(0)],
+    );
     let sub_file = project_dir
         .join(SESSION_ID)
         .join("subagents")
@@ -333,13 +399,22 @@ async fn test_subpath_matches_file_path_to_session_key() {
     write_jsonl(&sub_file, &[entry(1)]);
 
     let store = InMemorySessionStore::new();
-    import_session_to_store(SESSION_ID, &store, Some(cwd.to_str().unwrap()), true, MAX_PENDING_ENTRIES)
-        .await
-        .unwrap();
+    import_session_to_store(
+        SESSION_ID,
+        &store,
+        Some(cwd.to_str().unwrap()),
+        true,
+        MAX_PENDING_ENTRIES,
+    )
+    .await
+    .unwrap();
 
     let projects_dir = project_dir.parent().unwrap().to_str().unwrap();
     let expected_main = file_path_to_session_key(
-        project_dir.join(format!("{SESSION_ID}.jsonl")).to_str().unwrap(),
+        project_dir
+            .join(format!("{SESSION_ID}.jsonl"))
+            .to_str()
+            .unwrap(),
         projects_dir,
     );
     let expected_sub = file_path_to_session_key(sub_file.to_str().unwrap(), projects_dir);
@@ -354,7 +429,10 @@ async fn test_subpath_matches_file_path_to_session_key() {
 #[serial]
 async fn test_directory_none_keys_from_resolved_path_not_cwd() {
     let (_tmp, project_dir, _cwd, pk) = setup_env();
-    write_jsonl(&project_dir.join(format!("{SESSION_ID}.jsonl")), &[entry(0)]);
+    write_jsonl(
+        &project_dir.join(format!("{SESSION_ID}.jsonl")),
+        &[entry(0)],
+    );
 
     let store = InMemorySessionStore::new();
     import_session_to_store(SESSION_ID, &store, None, true, MAX_PENDING_ENTRIES)

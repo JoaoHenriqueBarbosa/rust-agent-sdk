@@ -9,8 +9,7 @@
 //! trait-level behavior.
 
 use rust_agent_sdk::{
-    InMemorySessionStore, SessionKey, SessionListSubkeysKey, SessionStore,
-    SessionStoreEntry,
+    InMemorySessionStore, SessionKey, SessionListSubkeysKey, SessionStore, SessionStoreEntry,
 };
 
 // ---------------------------------------------------------------------------
@@ -407,10 +406,7 @@ mod test_list_subkeys {
         subkeys.sort();
         assert_eq!(
             subkeys,
-            vec![
-                "subagents/a-1".to_string(),
-                "subagents/a-2".to_string(),
-            ]
+            vec!["subagents/a-1".to_string(), "subagents/a-2".to_string(),]
         );
     }
 }

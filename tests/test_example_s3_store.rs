@@ -9,8 +9,7 @@
 //! equivalent trait-level behavior.
 
 use rust_agent_sdk::{
-    InMemorySessionStore, SessionKey, SessionListSubkeysKey, SessionStore,
-    SessionStoreEntry,
+    InMemorySessionStore, SessionKey, SessionListSubkeysKey, SessionStore, SessionStoreEntry,
 };
 
 // ---------------------------------------------------------------------------
@@ -316,10 +315,7 @@ mod test_load {
         store
             .append(
                 &key,
-                &[
-                    serde_json::json!({"ok": 1}),
-                    serde_json::json!({"ok": 2}),
-                ],
+                &[serde_json::json!({"ok": 1}), serde_json::json!({"ok": 2})],
             )
             .await
             .unwrap();
@@ -343,24 +339,15 @@ mod test_list_sessions {
     async fn test_list_sessions_extracts_mtime() {
         let store = InMemorySessionStore::new();
         store
-            .append(
-                &SessionKey::new("proj", "sess-a"),
-                &[serde_json::json!({})],
-            )
+            .append(&SessionKey::new("proj", "sess-a"), &[serde_json::json!({})])
             .await
             .unwrap();
         store
-            .append(
-                &SessionKey::new("proj", "sess-a"),
-                &[serde_json::json!({})],
-            )
+            .append(&SessionKey::new("proj", "sess-a"), &[serde_json::json!({})])
             .await
             .unwrap();
         store
-            .append(
-                &SessionKey::new("proj", "sess-b"),
-                &[serde_json::json!({})],
-            )
+            .append(&SessionKey::new("proj", "sess-b"), &[serde_json::json!({})])
             .await
             .unwrap();
 
@@ -379,10 +366,7 @@ mod test_list_sessions {
     async fn test_list_sessions_ignores_subagent_parts() {
         let store = InMemorySessionStore::new();
         store
-            .append(
-                &SessionKey::new("proj", "sess-a"),
-                &[serde_json::json!({})],
-            )
+            .append(&SessionKey::new("proj", "sess-a"), &[serde_json::json!({})])
             .await
             .unwrap();
 
@@ -419,14 +403,8 @@ mod test_delete {
     async fn test_delete_batch_deletes_parts() {
         let store = InMemorySessionStore::new();
         let key = SessionKey::new("proj", "sess");
-        store
-            .append(&key, &[serde_json::json!({})])
-            .await
-            .unwrap();
-        store
-            .append(&key, &[serde_json::json!({})])
-            .await
-            .unwrap();
+        store.append(&key, &[serde_json::json!({})]).await.unwrap();
+        store.append(&key, &[serde_json::json!({})]).await.unwrap();
 
         store.delete(&key).await.unwrap();
 
@@ -520,22 +498,13 @@ mod test_list_subkeys {
 
         let mut sub1 = base.clone();
         sub1.subpath = Some("subagents/agent-1".to_string());
-        store
-            .append(&sub1, &[serde_json::json!({})])
-            .await
-            .unwrap();
+        store.append(&sub1, &[serde_json::json!({})]).await.unwrap();
         // Append again to same subpath — should still list only once.
-        store
-            .append(&sub1, &[serde_json::json!({})])
-            .await
-            .unwrap();
+        store.append(&sub1, &[serde_json::json!({})]).await.unwrap();
 
         let mut sub2 = base.clone();
         sub2.subpath = Some("subagents/agent-2".to_string());
-        store
-            .append(&sub2, &[serde_json::json!({})])
-            .await
-            .unwrap();
+        store.append(&sub2, &[serde_json::json!({})]).await.unwrap();
 
         let mut result = store
             .list_subkeys(&SessionListSubkeysKey {

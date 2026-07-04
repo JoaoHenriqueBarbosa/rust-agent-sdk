@@ -205,8 +205,7 @@ impl SubprocessCLITransport {
             }
         }
 
-        let (effective_allowed_tools, effective_setting_sources) =
-            self.apply_skills_defaults();
+        let (effective_allowed_tools, effective_setting_sources) = self.apply_skills_defaults();
 
         if !effective_allowed_tools.is_empty() {
             cmd.push("--allowedTools".into());
@@ -248,7 +247,13 @@ impl SubprocessCLITransport {
                 .options
                 .betas
                 .iter()
-                .map(|b| serde_json::to_value(b).unwrap().as_str().unwrap().to_string())
+                .map(|b| {
+                    serde_json::to_value(b)
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .to_string()
+                })
                 .collect();
             cmd.push("--betas".into());
             cmd.push(betas_str.join(","));
@@ -303,9 +308,7 @@ impl SubprocessCLITransport {
             McpServersConfig::Dict(servers) if !servers.is_empty() => {
                 let servers_for_cli: serde_json::Map<String, serde_json::Value> = servers
                     .iter()
-                    .map(|(name, config)| {
-                        (name.clone(), serde_json::to_value(config).unwrap())
-                    })
+                    .map(|(name, config)| (name.clone(), serde_json::to_value(config).unwrap()))
                     .collect();
 
                 let mcp_config = serde_json::json!({ "mcpServers": servers_for_cli });
@@ -472,7 +475,11 @@ impl SubprocessCLITransport {
     pub fn find_bundled_cli(&self) -> Option<String> {
         // Look for bundled CLI relative to the executable, matching Python's
         // Path(__file__).parent.parent.parent / "_bundled" / cli_name
-        let cli_name = if cfg!(windows) { "claude.exe" } else { "claude" };
+        let cli_name = if cfg!(windows) {
+            "claude.exe"
+        } else {
+            "claude"
+        };
 
         if let Ok(exe) = std::env::current_exe() {
             // Try a few common relative layouts
@@ -501,8 +508,7 @@ impl SubprocessCLITransport {
         }
 
         // If we have sandbox settings, we need to merge into a JSON object
-        let mut settings_obj: serde_json::Map<String, serde_json::Value> =
-            serde_json::Map::new();
+        let mut settings_obj: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
 
         if let Some(ref settings_str) = self.options.settings {
             let trimmed = settings_str.trim();
@@ -529,10 +535,7 @@ impl SubprocessCLITransport {
 
         // Merge sandbox settings
         if let Some(ref sandbox) = self.options.sandbox {
-            settings_obj.insert(
-                "sandbox".into(),
-                serde_json::to_value(sandbox).unwrap(),
-            );
+            settings_obj.insert("sandbox".into(), serde_json::to_value(sandbox).unwrap());
         }
 
         Some(serde_json::to_string(&serde_json::Value::Object(settings_obj)).unwrap())
@@ -560,9 +563,16 @@ impl SubprocessCLITransport {
             // Parse X.Y.Z
             let parts: Vec<&str> = version_str.split('.').collect();
             if parts.len() >= 3 {
-                let version: Vec<u32> = parts.iter().filter_map(|p| {
-                    p.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().ok()
-                }).collect();
+                let version: Vec<u32> = parts
+                    .iter()
+                    .filter_map(|p| {
+                        p.chars()
+                            .take_while(|c| c.is_ascii_digit())
+                            .collect::<String>()
+                            .parse()
+                            .ok()
+                    })
+                    .collect();
                 let min_parts: Vec<u32> = MINIMUM_CLAUDE_CODE_VERSION
                     .split('.')
                     .filter_map(|p| p.parse().ok())
@@ -750,7 +760,9 @@ impl Transport for SubprocessCLITransport {
         use tokio::io::AsyncWriteExt;
         let _guard = self.write_lock.lock().await;
         if !self.connected {
-            return Err(ClaudeSDKError::cli_connection("Transport is not ready for writing"));
+            return Err(ClaudeSDKError::cli_connection(
+                "Transport is not ready for writing",
+            ));
         }
         if let Some(ref mut child) = self.child {
             if let Some(ref mut stdin) = child.stdin {
@@ -783,7 +795,10 @@ impl Transport for SubprocessCLITransport {
     async fn read_message(&mut self) -> Result<Option<serde_json::Value>> {
         use tokio::io::AsyncBufReadExt;
 
-        let max_buffer_size = self.options.max_buffer_size.unwrap_or(DEFAULT_MAX_BUFFER_SIZE);
+        let max_buffer_size = self
+            .options
+            .max_buffer_size
+            .unwrap_or(DEFAULT_MAX_BUFFER_SIZE);
 
         let reader = match &mut self.stdout_reader {
             Some(r) => r,

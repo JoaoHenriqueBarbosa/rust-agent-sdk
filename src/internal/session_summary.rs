@@ -57,7 +57,10 @@ fn entry_text_blocks(entry: &serde_json::Value) -> Vec<String> {
 /// Mutates `data` in place: sets `first_prompt` + `first_prompt_locked`
 /// on a real match, or stashes a `command_fallback` for slash-command
 /// messages.
-fn fold_first_prompt(data: &mut serde_json::Map<String, serde_json::Value>, entry: &serde_json::Value) {
+fn fold_first_prompt(
+    data: &mut serde_json::Map<String, serde_json::Value>,
+    entry: &serde_json::Value,
+) {
     if data.get("first_prompt_locked").and_then(|v| v.as_bool()) == Some(true) {
         return;
     }
@@ -76,7 +79,8 @@ fn fold_first_prompt(data: &mut serde_json::Map<String, serde_json::Value>, entr
             if let Some(content) = message.get("content") {
                 if let Some(arr) = content.as_array() {
                     if arr.iter().any(|b| {
-                        b.is_object() && b.get("type").and_then(|v| v.as_str()) == Some("tool_result")
+                        b.is_object()
+                            && b.get("type").and_then(|v| v.as_str()) == Some("tool_result")
                     }) {
                         return;
                     }
@@ -125,9 +129,7 @@ pub fn fold_session_summary(
     entries: &[SessionStoreEntry],
 ) -> SessionSummaryEntry {
     let (session_id, mtime, mut data_map) = if let Some(prev) = prev {
-        let map = prev.data.as_object()
-            .cloned()
-            .unwrap_or_default();
+        let map = prev.data.as_object().cloned().unwrap_or_default();
         (prev.session_id.clone(), prev.mtime, map)
     } else {
         (key.session_id.clone(), 0, serde_json::Map::new())
@@ -136,7 +138,10 @@ pub fn fold_session_summary(
     for entry in entries {
         // is_sidechain: set-once (Python: data["is_sidechain"] = entry.get("isSidechain") is True)
         if !data_map.contains_key("is_sidechain") {
-            let val = entry.get("isSidechain").and_then(|v| v.as_bool()).unwrap_or(false);
+            let val = entry
+                .get("isSidechain")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             data_map.insert("is_sidechain".to_string(), json!(val));
         }
 
@@ -203,31 +208,67 @@ pub fn summary_entry_to_sdk_info(
         return None;
     }
 
-    let first_prompt_locked = data.get("first_prompt_locked").and_then(|v| v.as_bool()).unwrap_or(false);
+    let first_prompt_locked = data
+        .get("first_prompt_locked")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let first_prompt = if first_prompt_locked {
-        data.get("first_prompt").and_then(|v| v.as_str()).map(|s| s.to_string())
+        data.get("first_prompt")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
     } else {
-        data.get("command_fallback").and_then(|v| v.as_str()).map(|s| s.to_string())
+        data.get("command_fallback")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
     };
     // Filter out empty strings
     let first_prompt = first_prompt.filter(|s| !s.is_empty());
 
-    let custom_title_str = data.get("custom_title").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-    let ai_title_str = data.get("ai_title").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    let custom_title_str = data
+        .get("custom_title")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let ai_title_str = data
+        .get("ai_title")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
     let custom_title = custom_title_str.or(ai_title_str).map(|s| s.to_string());
 
-    let summary = custom_title.clone()
-        .or_else(|| data.get("last_prompt").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string()))
-        .or_else(|| data.get("summary_hint").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string()))
+    let summary = custom_title
+        .clone()
+        .or_else(|| {
+            data.get("last_prompt")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        })
+        .or_else(|| {
+            data.get("summary_hint")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        })
         .or_else(|| first_prompt.clone());
 
     let summary = summary?;
 
-    let cwd = data.get("cwd").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string())
+    let cwd = data
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
         .or_else(|| project_path.map(|s| s.to_string()));
 
-    let git_branch = data.get("git_branch").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
-    let tag = data.get("tag").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+    let git_branch = data
+        .get("git_branch")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let tag = data
+        .get("tag")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
     let created_at = data.get("created_at").and_then(|v| v.as_i64());
 
     Some(SDKSessionInfo {

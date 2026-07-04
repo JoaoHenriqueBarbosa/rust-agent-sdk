@@ -1,5 +1,3 @@
-
-
 use crate::errors::{ClaudeSDKError, Result};
 use crate::internal::message_parser::parse_message;
 use crate::internal::query::Query;
@@ -93,7 +91,11 @@ impl ClaudeSDKClient {
         result
     }
 
-    async fn connect_inner(&mut self, prompt: Option<&str>, materialized_options: ClaudeAgentOptions) -> Result<()> {
+    async fn connect_inner(
+        &mut self,
+        prompt: Option<&str>,
+        materialized_options: ClaudeAgentOptions,
+    ) -> Result<()> {
         // Use provided transport or create subprocess transport
         let mut transport: Box<dyn Transport> = if let Some(t) = self._custom_transport.take() {
             t
@@ -115,9 +117,10 @@ impl ClaudeSDKClient {
 
         // Extract exclude_dynamic_sections from preset system prompt
         let exclude_dynamic_sections = match &self._options.system_prompt {
-            Some(SystemPromptConfig::Structured(SystemPrompt::Preset { exclude_dynamic_sections, .. })) => {
-                *exclude_dynamic_sections
-            }
+            Some(SystemPromptConfig::Structured(SystemPrompt::Preset {
+                exclude_dynamic_sections,
+                ..
+            })) => *exclude_dynamic_sections,
             _ => None,
         };
 
@@ -125,9 +128,7 @@ impl ClaudeSDKClient {
         let agents_json = self._options.agents.as_ref().map(|agents| {
             let map: serde_json::Map<String, serde_json::Value> = agents
                 .iter()
-                .map(|(name, def)| {
-                    (name.clone(), serde_json::to_value(def).unwrap_or_default())
-                })
+                .map(|(name, def)| (name.clone(), serde_json::to_value(def).unwrap_or_default()))
                 .collect();
             serde_json::Value::Object(map)
         });
@@ -148,11 +149,16 @@ impl ClaudeSDKClient {
                 let mut internal_matchers = Vec::new();
                 for matcher in matchers {
                     let mut m = serde_json::Map::new();
-                    m.insert("matcher".to_string(), match &matcher.matcher {
-                        Some(s) => serde_json::Value::String(s.clone()),
-                        None => serde_json::Value::Null,
-                    });
-                    let hooks_arr: Vec<serde_json::Value> = matcher.hooks.iter()
+                    m.insert(
+                        "matcher".to_string(),
+                        match &matcher.matcher {
+                            Some(s) => serde_json::Value::String(s.clone()),
+                            None => serde_json::Value::Null,
+                        },
+                    );
+                    let hooks_arr: Vec<serde_json::Value> = matcher
+                        .hooks
+                        .iter()
                         .map(|_| serde_json::Value::Null)
                         .collect();
                     m.insert("hooks".to_string(), serde_json::Value::Array(hooks_arr));
@@ -163,7 +169,8 @@ impl ClaudeSDKClient {
                 }
                 internal_hooks.insert(format!("{:?}", event), internal_matchers);
             }
-            let hooks_map: std::collections::HashMap<String, Vec<serde_json::Value>> = internal_hooks;
+            let hooks_map: std::collections::HashMap<String, Vec<serde_json::Value>> =
+                internal_hooks;
             query.set_hooks(hooks_map);
         }
 
@@ -287,7 +294,9 @@ impl ClaudeSDKClient {
             serde_json::from_value(result)
                 .map_err(|e| ClaudeSDKError::sdk(format!("Failed to parse MCP status: {e}")))
         } else {
-            Err(ClaudeSDKError::cli_connection("Not connected. Call connect() first."))
+            Err(ClaudeSDKError::cli_connection(
+                "Not connected. Call connect() first.",
+            ))
         }
     }
 
@@ -297,7 +306,9 @@ impl ClaudeSDKClient {
             serde_json::from_value(result)
                 .map_err(|e| ClaudeSDKError::sdk(format!("Failed to parse context usage: {e}")))
         } else {
-            Err(ClaudeSDKError::cli_connection("Not connected. Call connect() first."))
+            Err(ClaudeSDKError::cli_connection(
+                "Not connected. Call connect() first.",
+            ))
         }
     }
 
@@ -305,7 +316,9 @@ impl ClaudeSDKClient {
         if let Some(ref mut query) = self._query {
             query.set_permission_mode(mode).await
         } else {
-            Err(ClaudeSDKError::cli_connection("Not connected. Call connect() first."))
+            Err(ClaudeSDKError::cli_connection(
+                "Not connected. Call connect() first.",
+            ))
         }
     }
 
@@ -313,7 +326,9 @@ impl ClaudeSDKClient {
         if let Some(ref mut query) = self._query {
             query.set_model(model).await
         } else {
-            Err(ClaudeSDKError::cli_connection("Not connected. Call connect() first."))
+            Err(ClaudeSDKError::cli_connection(
+                "Not connected. Call connect() first.",
+            ))
         }
     }
 
@@ -321,7 +336,9 @@ impl ClaudeSDKClient {
         if let Some(ref mut query) = self._query {
             query.rewind_files(user_message_id).await
         } else {
-            Err(ClaudeSDKError::cli_connection("Not connected. Call connect() first."))
+            Err(ClaudeSDKError::cli_connection(
+                "Not connected. Call connect() first.",
+            ))
         }
     }
 
@@ -329,19 +346,19 @@ impl ClaudeSDKClient {
         if let Some(ref mut query) = self._query {
             query.reconnect_mcp_server(server_name).await
         } else {
-            Err(ClaudeSDKError::cli_connection("Not connected. Call connect() first."))
+            Err(ClaudeSDKError::cli_connection(
+                "Not connected. Call connect() first.",
+            ))
         }
     }
 
-    pub async fn toggle_mcp_server(
-        &mut self,
-        server_name: &str,
-        enabled: bool,
-    ) -> Result<()> {
+    pub async fn toggle_mcp_server(&mut self, server_name: &str, enabled: bool) -> Result<()> {
         if let Some(ref mut query) = self._query {
             query.toggle_mcp_server(server_name, enabled).await
         } else {
-            Err(ClaudeSDKError::cli_connection("Not connected. Call connect() first."))
+            Err(ClaudeSDKError::cli_connection(
+                "Not connected. Call connect() first.",
+            ))
         }
     }
 
@@ -349,7 +366,9 @@ impl ClaudeSDKClient {
         if let Some(ref mut query) = self._query {
             query.stop_task(task_id).await
         } else {
-            Err(ClaudeSDKError::cli_connection("Not connected. Call connect() first."))
+            Err(ClaudeSDKError::cli_connection(
+                "Not connected. Call connect() first.",
+            ))
         }
     }
 }
