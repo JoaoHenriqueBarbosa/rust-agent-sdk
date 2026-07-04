@@ -3,7 +3,8 @@
 //!
 //! Ported from Python: tests/test_session_store_conformance.py (21 tests)
 //!
-//! All tests will FAIL because the underlying functions are `todo!()`.
+//! Live conformance tests for the Postgres and Redis backends live in
+//! `tests/test_stores_live.rs` (feature-gated, `#[ignore]`d).
 
 use rust_agent_sdk::{
     project_key_for_directory, ClaudeAgentOptions, ClaudeSDKError, InMemorySessionStore,
@@ -30,10 +31,7 @@ mod test_in_memory_session_store {
     async fn test_conformance_append_then_load() {
         let store = InMemorySessionStore::new();
         let key = make_key();
-        let entries = vec![
-            serde_json::json!({"n": 1}),
-            serde_json::json!({"n": 2}),
-        ];
+        let entries = vec![serde_json::json!({"n": 1}), serde_json::json!({"n": 2})];
         store.append(&key, &entries).await.unwrap();
         let loaded = store.load(&key).await.unwrap();
         assert!(loaded.is_some());
@@ -70,17 +68,11 @@ mod test_in_memory_session_store {
     async fn test_conformance_list_sessions() {
         let store = InMemorySessionStore::new();
         store
-            .append(
-                &SessionKey::new("p", "s1"),
-                &[serde_json::json!({"n": 1})],
-            )
+            .append(&SessionKey::new("p", "s1"), &[serde_json::json!({"n": 1})])
             .await
             .unwrap();
         store
-            .append(
-                &SessionKey::new("p", "s2"),
-                &[serde_json::json!({"n": 2})],
-            )
+            .append(&SessionKey::new("p", "s2"), &[serde_json::json!({"n": 2})])
             .await
             .unwrap();
 
@@ -316,17 +308,11 @@ mod test_in_memory_session_store {
         let store = InMemorySessionStore::new();
         assert_eq!(store.size(), 0);
         store
-            .append(
-                &SessionKey::new("p", "a"),
-                &[serde_json::json!({"n": 1})],
-            )
+            .append(&SessionKey::new("p", "a"), &[serde_json::json!({"n": 1})])
             .await
             .unwrap();
         store
-            .append(
-                &SessionKey::new("p", "b"),
-                &[serde_json::json!({"n": 1})],
-            )
+            .append(&SessionKey::new("p", "b"), &[serde_json::json!({"n": 1})])
             .await
             .unwrap();
         let mut sub_key = SessionKey::new("p", "a");
@@ -489,10 +475,7 @@ mod test_session_store_options_validation {
         let result = validate_session_store_options(&opts);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("enable_file_checkpointing"),
-            "got: {err}"
-        );
+        assert!(err.contains("enable_file_checkpointing"), "got: {err}");
     }
 }
 
