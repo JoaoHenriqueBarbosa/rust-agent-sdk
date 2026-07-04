@@ -42,9 +42,11 @@ surface over that protocol.
 - **Sessions, as a first-class concern.** List and inspect sessions and subagents; fork,
   rename, tag, and delete them; resume or continue a prior session; import external JSONL
   transcripts into a store; and fold an incremental per-session summary as messages arrive.
-- **Pluggable persistence via the `SessionStore` trait.** The crate ships one concrete
-  implementation, `InMemorySessionStore`; the trait is the extension point for your own
-  backend. (See [Scope & honesty](#scope--honesty) for what is *not* included.)
+- **Pluggable persistence via the `SessionStore` trait.** `InMemorySessionStore` ships by
+  default; **Postgres** (`--features postgres`) and **Redis** (`--features redis-store`)
+  backends are available behind opt-in features, each a faithful port of the Python SDK's
+  example adapters that passes the same conformance contracts. An S3 backend is on the
+  roadmap. The trait remains the extension point for your own backend.
 - **MCP configuration & runtime control.** Configure stdio / SSE / HTTP / in-SDK MCP
   servers, and at runtime reconnect a server, toggle one on/off, or query MCP status.
 - **Hooks & tool permissions.** Register hook matchers and gate tool use through a
@@ -208,11 +210,34 @@ rust-agent-sdk/
 │       ├── session_summary.rs    # incremental summary folding
 │       ├── transcript_mirror.rs  # mirror a live transcript into a store
 │       └── task.rs               # detached task helper
+├── stores/               # optional SessionStore backends (feature-gated)
+│   ├── postgres.rs           # --features postgres
+│   └── redis.rs              # --features redis-store
 └── tests/                # integration tests
 ```
 
 Only the items re-exported from `lib.rs` are the public API; the `internal` module may
 change at any time.
+
+## Development
+
+```bash
+cargo build                                   # default (no optional backends)
+cargo test                                    # unit + integration suite
+cargo build --features postgres,redis-store   # with the optional stores
+```
+
+The Postgres and Redis backends are verified against real servers. Bring them up
+(e.g. via Docker) and run the live conformance tests:
+
+```bash
+docker run -d --name pg    -e POSTGRES_PASSWORD=test -e POSTGRES_DB=sessions -p 5433:5432 postgres:16-alpine
+docker run -d --name redis -p 6380:6379 redis:7-alpine
+
+RUST_AGENT_SDK_TEST_PG=postgres://postgres:test@127.0.0.1:5433/sessions \
+RUST_AGENT_SDK_TEST_REDIS=redis://127.0.0.1:6380 \
+  cargo test --features postgres,redis-store --test test_stores_live -- --ignored
+```
 
 ## Scope & honesty
 
@@ -220,10 +245,9 @@ This is a spike, and it's worth being precise about where the edges are:
 
 - **It's an unofficial port**, not the Anthropic SDK, and not affiliated with Anthropic. It
   targets the same protocol and mirrors the Python SDK's shape.
-- **`InMemorySessionStore` is the only bundled store.** `SessionStore` is a trait so you can
-  back it with anything, but there is **no** Postgres / Redis / S3 implementation in this
-  crate — those names appear only in tests that exercise the trait against an in-memory
-  stand-in.
+- **Session stores:** `InMemorySessionStore` is always available; **Postgres** and **Redis**
+  backends ship behind the `postgres` / `redis-store` features and are verified against real
+  servers by `tests/test_stores_live.rs`. **S3 is not implemented yet** — it's on the roadmap.
 - **No ReAct loop, no bespoke HTTP/SSE client, no `#[tool]` macro.** Agent reasoning, tool
   execution, and transport to the model all live in the `claude` CLI. "SSE" here refers only
   to a variant of MCP server *configuration*, not an HTTP client this crate implements.

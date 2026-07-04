@@ -20,6 +20,18 @@ unicode-normalization = "0.1"
 libc = "0.2"
 tempfile = "3"
 
+# Optional session-store backends. Each is gated behind a feature so the
+# default build (and the published core) stays free of heavy transport deps.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "json"], optional = true }
+redis = { version = "0.27", default-features = false, features = ["tokio-comp"], optional = true }
+
+[features]
+default = []
+# Postgres-backed SessionStore (src/stores/postgres.rs).
+postgres = ["dep:sqlx"]
+# Redis-backed SessionStore (src/stores/redis.rs).
+redis-store = ["dep:redis"]
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 tempfile = "3"
