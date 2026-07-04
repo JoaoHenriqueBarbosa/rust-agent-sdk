@@ -4,8 +4,8 @@ use std::sync::Mutex;
 use crate::errors::ClaudeSDKError;
 use crate::internal::session_summary::fold_session_summary;
 use crate::types::{
-    SessionKey, SessionListSubkeysKey, SessionStore, SessionStoreEntry,
-    SessionStoreListEntry, SessionSummaryEntry,
+    SessionKey, SessionListSubkeysKey, SessionStore, SessionStoreEntry, SessionStoreListEntry,
+    SessionSummaryEntry,
 };
 
 /// In-memory reference implementation of SessionStore for testing.
@@ -55,7 +55,10 @@ impl InMemorySessionStore {
 
     /// Manually set the mtime for a `project_key/session_id` composite key.
     pub fn set_mtime(&self, composite_key: &str, mtime: i64) {
-        self.mtimes.lock().unwrap().insert(composite_key.to_string(), mtime);
+        self.mtimes
+            .lock()
+            .unwrap()
+            .insert(composite_key.to_string(), mtime);
     }
 
     fn key_to_string(key: &SessionKey) -> String {
@@ -155,10 +158,7 @@ impl SessionStore for InMemorySessionStore {
             .collect())
     }
 
-    async fn delete(
-        &self,
-        key: &SessionKey,
-    ) -> Result<(), ClaudeSDKError> {
+    async fn delete(&self, key: &SessionKey) -> Result<(), ClaudeSDKError> {
         let key_str = Self::key_to_string(key);
         let mut data = self.data.lock().unwrap();
 
@@ -197,10 +197,18 @@ impl SessionStore for InMemorySessionStore {
         Ok(result)
     }
 
-    fn has_list_sessions(&self) -> bool { true }
-    fn has_delete(&self) -> bool { true }
-    fn has_list_subkeys(&self) -> bool { true }
-    fn has_list_session_summaries(&self) -> bool { true }
+    fn has_list_sessions(&self) -> bool {
+        true
+    }
+    fn has_delete(&self) -> bool {
+        true
+    }
+    fn has_list_subkeys(&self) -> bool {
+        true
+    }
+    fn has_list_session_summaries(&self) -> bool {
+        true
+    }
 }
 
 /// Convert a file path to a SessionKey.
@@ -208,10 +216,7 @@ impl SessionStore for InMemorySessionStore {
 /// Given a path like `<projects_dir>/<project_key>/<session_id>.jsonl`
 /// or `<projects_dir>/<project_key>/<session_id>/subagents/agent-abc.jsonl`,
 /// extracts the project_key, session_id, and optional subpath.
-pub fn file_path_to_session_key(
-    file_path: &str,
-    projects_dir: &str,
-) -> Option<SessionKey> {
+pub fn file_path_to_session_key(file_path: &str, projects_dir: &str) -> Option<SessionKey> {
     use std::path::Path;
 
     let file = Path::new(file_path);

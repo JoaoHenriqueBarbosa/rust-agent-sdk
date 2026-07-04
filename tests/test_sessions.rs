@@ -176,7 +176,11 @@ fn make_transcript_entry_simple(
     )
 }
 
-fn write_transcript(project_dir: &Path, session_id: &str, entries: &[serde_json::Value]) -> PathBuf {
+fn write_transcript(
+    project_dir: &Path,
+    session_id: &str,
+    entries: &[serde_json::Value],
+) -> PathBuf {
     let file_path = project_dir.join(format!("{}.jsonl", session_id));
     let lines: Vec<String> = entries.iter().map(|e| e.to_string()).collect();
     fs::write(&file_path, lines.join("\n") + "\n").unwrap();
@@ -229,7 +233,10 @@ mod test_helpers {
     #[test]
     #[serial]
     fn test_sanitize_path_basic() {
-        assert_eq!(sanitize_path("/Users/foo/my-project"), "-Users-foo-my-project");
+        assert_eq!(
+            sanitize_path("/Users/foo/my-project"),
+            "-Users-foo-my-project"
+        );
         assert_eq!(sanitize_path("plugin:name:server"), "plugin-name-server");
     }
 
@@ -261,8 +268,14 @@ mod test_helpers {
     #[serial]
     fn test_extract_json_string_field_simple() {
         let text = r#"{"foo":"bar","baz":"qux"}"#;
-        assert_eq!(extract_json_string_field(text, "foo"), Some("bar".to_string()));
-        assert_eq!(extract_json_string_field(text, "baz"), Some("qux".to_string()));
+        assert_eq!(
+            extract_json_string_field(text, "foo"),
+            Some("bar".to_string())
+        );
+        assert_eq!(
+            extract_json_string_field(text, "baz"),
+            Some("qux".to_string())
+        );
         assert_eq!(extract_json_string_field(text, "missing"), None);
     }
 
@@ -270,7 +283,10 @@ mod test_helpers {
     #[serial]
     fn test_extract_json_string_field_with_space() {
         let text = r#"{"foo": "bar"}"#;
-        assert_eq!(extract_json_string_field(text, "foo"), Some("bar".to_string()));
+        assert_eq!(
+            extract_json_string_field(text, "foo"),
+            Some("bar".to_string())
+        );
     }
 
     #[test]
@@ -367,13 +383,11 @@ mod test_helpers {
         let project_dir = make_project_dir(&config_dir, "/test/prompt-content-blocks");
         let sid = Uuid::new_v4().to_string();
         let file_path = project_dir.join(format!("{}.jsonl", sid));
-        let lines = vec![
-            json!({
-                "type": "user",
-                "message": {"content": [{"type": "text", "text": "block prompt"}]},
-            })
-            .to_string(),
-        ];
+        let lines = vec![json!({
+            "type": "user",
+            "message": {"content": [{"type": "text", "text": "block prompt"}]},
+        })
+        .to_string()];
         fs::write(&file_path, lines.join("\n") + "\n").unwrap();
 
         let sessions = list_sessions(None, None, 0, false).unwrap();
@@ -388,13 +402,11 @@ mod test_helpers {
         let project_dir = make_project_dir(&config_dir, "/test/prompt-command-fallback");
         let sid = Uuid::new_v4().to_string();
         let file_path = project_dir.join(format!("{}.jsonl", sid));
-        let lines = vec![
-            json!({
-                "type": "user",
-                "message": {"content": "<command-name>/help</command-name>stuff"},
-            })
-            .to_string(),
-        ];
+        let lines = vec![json!({
+            "type": "user",
+            "message": {"content": "<command-name>/help</command-name>stuff"},
+        })
+        .to_string()];
         fs::write(&file_path, lines.join("\n") + "\n").unwrap();
 
         let sessions = list_sessions(None, None, 0, false).unwrap();
@@ -498,7 +510,10 @@ mod test_list_sessions {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].summary, "My Custom Title");
         assert_eq!(sessions[0].custom_title.as_deref(), Some("My Custom Title"));
-        assert_eq!(sessions[0].first_prompt.as_deref(), Some("original question"));
+        assert_eq!(
+            sessions[0].first_prompt.as_deref(),
+            Some("original question")
+        );
     }
 
     #[test]
@@ -538,17 +553,43 @@ mod test_list_sessions {
         let project_dir = make_project_dir(&config_dir, real_path.to_str().unwrap());
 
         let (sid_old, _) = make_session_file(
-            &project_dir, None, "old", None, None, None, None, false, false, Some(1000.0),
+            &project_dir,
+            None,
+            "old",
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            Some(1000.0),
         );
         let (sid_new, _) = make_session_file(
-            &project_dir, None, "new", None, None, None, None, false, false, Some(3000.0),
+            &project_dir,
+            None,
+            "new",
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            Some(3000.0),
         );
         let (sid_mid, _) = make_session_file(
-            &project_dir, None, "mid", None, None, None, None, false, false, Some(2000.0),
+            &project_dir,
+            None,
+            "mid",
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            Some(2000.0),
         );
 
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions.len(), 3);
         let ids: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
         assert_eq!(ids, vec![&sid_new, &sid_mid, &sid_old]);
@@ -648,11 +689,19 @@ mod test_list_sessions {
 
         make_session_simple(&project_dir, "normal");
         make_session_file(
-            &project_dir, None, "sidechain", None, None, None, None, true, false, None,
+            &project_dir,
+            None,
+            "sidechain",
+            None,
+            None,
+            None,
+            None,
+            true,
+            false,
+            None,
         );
 
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].first_prompt.as_deref(), Some("normal"));
     }
@@ -668,12 +717,20 @@ mod test_list_sessions {
 
         // A session with only meta messages → no first_prompt, no summary
         make_session_file(
-            &project_dir, None, "ignored meta", None, None, None, None, false, true, None,
+            &project_dir,
+            None,
+            "ignored meta",
+            None,
+            None,
+            None,
+            None,
+            false,
+            true,
+            None,
         );
         make_session_simple(&project_dir, "real content");
 
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].first_prompt.as_deref(), Some("real content"));
     }
@@ -694,8 +751,7 @@ mod test_list_sessions {
         .unwrap();
         make_session_simple(&project_dir, "valid session");
 
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].first_prompt.as_deref(), Some("valid session"));
     }
@@ -712,8 +768,7 @@ mod test_list_sessions {
         fs::write(project_dir.join("README.md"), "not a session").unwrap();
         make_session_simple(&project_dir, "session");
 
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions.len(), 1);
     }
 
@@ -725,10 +780,28 @@ mod test_list_sessions {
         let proj2 = make_project_dir(&config_dir, "/some/path/two");
 
         make_session_file(
-            &proj1, None, "from proj1", None, None, None, None, false, false, Some(1000.0),
+            &proj1,
+            None,
+            "from proj1",
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            Some(1000.0),
         );
         make_session_file(
-            &proj2, None, "from proj2", None, None, None, None, false, false, Some(2000.0),
+            &proj2,
+            None,
+            "from proj2",
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            Some(2000.0),
         );
 
         let sessions = list_sessions(None, None, 0, false).unwrap();
@@ -783,8 +856,7 @@ mod test_list_sessions {
         let (tmp, _config_dir) = setup_config_dir();
         let project_path = tmp.path().join("never-used");
         fs::create_dir_all(&project_path).unwrap();
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions, vec![]);
     }
 
@@ -800,8 +872,7 @@ mod test_list_sessions {
         let sid = Uuid::new_v4().to_string();
         fs::write(project_dir.join(format!("{}.jsonl", sid)), "").unwrap();
 
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions, vec![]);
     }
 
@@ -823,8 +894,7 @@ mod test_list_sessions {
         );
         make_session_simple(&other_dir, "worktree session");
 
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].first_prompt.as_deref(), Some("main session"));
     }
@@ -870,8 +940,7 @@ mod test_list_sessions {
         // Session without cwd field
         make_session_simple(&project_dir, "no cwd field");
 
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(
             sessions[0].cwd.as_deref(),
@@ -901,8 +970,7 @@ mod test_list_sessions {
         ];
         fs::write(&file_path, lines.join("\n") + "\n").unwrap();
 
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].git_branch.as_deref(), Some("new-branch"));
     }
@@ -977,10 +1045,7 @@ mod test_get_session_messages {
             get_session_messages("not-a-uuid", None, None, 0).unwrap(),
             vec![]
         );
-        assert_eq!(
-            get_session_messages("", None, None, 0).unwrap(),
-            vec![]
-        );
+        assert_eq!(get_session_messages("", None, None, 0).unwrap(), vec![]);
     }
 
     #[test]
@@ -988,10 +1053,7 @@ mod test_get_session_messages {
     fn test_nonexistent_session() {
         let (_tmp, _config_dir) = setup_config_dir();
         let sid = Uuid::new_v4().to_string();
-        assert_eq!(
-            get_session_messages(&sid, None, None, 0).unwrap(),
-            vec![]
-        );
+        assert_eq!(get_session_messages(&sid, None, None, 0).unwrap(), vec![]);
     }
 
     #[test]
@@ -1001,10 +1063,7 @@ mod test_get_session_messages {
         let nonexistent = tmp.path().join("nonexistent");
         std::env::set_var("CLAUDE_CONFIG_DIR", nonexistent.to_str().unwrap());
         let sid = Uuid::new_v4().to_string();
-        assert_eq!(
-            get_session_messages(&sid, None, None, 0).unwrap(),
-            vec![]
-        );
+        assert_eq!(get_session_messages(&sid, None, None, 0).unwrap(), vec![]);
     }
 
     #[test]
@@ -1038,12 +1097,18 @@ mod test_get_session_messages {
         assert_eq!(messages[0].type_, "user");
         assert_eq!(messages[0].uuid, u1);
         assert_eq!(messages[0].session_id, sid);
-        assert_eq!(messages[0].message, json!({"role": "user", "content": "hello"}));
+        assert_eq!(
+            messages[0].message,
+            json!({"role": "user", "content": "hello"})
+        );
         assert!(messages[0].parent_tool_use_id.is_none());
 
         assert_eq!(messages[1].type_, "assistant");
         assert_eq!(messages[1].uuid, a1);
-        assert_eq!(messages[1].message, json!({"role": "assistant", "content": "hi!"}));
+        assert_eq!(
+            messages[1].message,
+            json!({"role": "assistant", "content": "hi!"})
+        );
 
         assert_eq!(messages[2].type_, "user");
         assert_eq!(messages[2].uuid, u2);
@@ -1107,7 +1172,14 @@ mod test_get_session_messages {
 
         let entries = vec![
             make_transcript_entry_simple("user", &u1, None, &sid, "hello"),
-            make_transcript_entry("progress", &prog, Some(&u1), &sid, None, serde_json::Map::new()),
+            make_transcript_entry(
+                "progress",
+                &prog,
+                Some(&u1),
+                &sid,
+                None,
+                serde_json::Map::new(),
+            ),
             make_transcript_entry_simple("assistant", &a1, Some(&prog), &sid, "hi"),
         ];
         write_transcript(&project_dir, &sid, &entries);
@@ -1171,7 +1243,11 @@ mod test_get_session_messages {
             .iter()
             .enumerate()
             .map(|(i, uid)| {
-                let parent = if i > 0 { Some(uuids[i - 1].as_str()) } else { None };
+                let parent = if i > 0 {
+                    Some(uuids[i - 1].as_str())
+                } else {
+                    None
+                };
                 let entry_type = if i % 2 == 0 { "user" } else { "assistant" };
                 make_transcript_entry_simple(entry_type, uid, parent, &sid, &format!("m{}", i))
             })
@@ -1295,7 +1371,14 @@ mod test_get_session_messages {
         let entries = vec![
             make_transcript_entry_simple("user", &u1, None, &sid, "hi"),
             make_transcript_entry_simple("assistant", &a1, Some(&u1), &sid, "hello"),
-            make_transcript_entry("progress", &prog, Some(&a1), &sid, None, serde_json::Map::new()),
+            make_transcript_entry(
+                "progress",
+                &prog,
+                Some(&a1),
+                &sid,
+                None,
+                serde_json::Map::new(),
+            ),
         ];
         write_transcript(&project_dir, &sid, &entries);
 
@@ -1575,15 +1658,11 @@ mod test_tag_extraction {
         // Compact JSON (no spaces) — matches CLI's on-disk format
         let lines = vec![
             json!({"type": "user", "message": {"content": "hello"}}).to_string(),
-            format!(
-                r#"{{"type":"tag","tag":"my-tag","sessionId":"{}"}}"#,
-                sid
-            ),
+            format!(r#"{{"type":"tag","tag":"my-tag","sessionId":"{}"}}"#, sid),
         ];
         fs::write(&file_path, lines.join("\n") + "\n").unwrap();
 
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].tag.as_deref(), Some("my-tag"));
     }
@@ -1601,13 +1680,18 @@ mod test_tag_extraction {
 
         let lines = vec![
             json!({"type": "user", "message": {"content": "hello"}}).to_string(),
-            format!(r#"{{"type":"tag","tag":"first-tag","sessionId":"{}"}}"#, sid),
-            format!(r#"{{"type":"tag","tag":"second-tag","sessionId":"{}"}}"#, sid),
+            format!(
+                r#"{{"type":"tag","tag":"first-tag","sessionId":"{}"}}"#,
+                sid
+            ),
+            format!(
+                r#"{{"type":"tag","tag":"second-tag","sessionId":"{}"}}"#,
+                sid
+            ),
         ];
         fs::write(&file_path, lines.join("\n") + "\n").unwrap();
 
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].tag.as_deref(), Some("second-tag"));
     }
@@ -1630,8 +1714,7 @@ mod test_tag_extraction {
         ];
         fs::write(&file_path, lines.join("\n") + "\n").unwrap();
 
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions.len(), 1);
         assert!(sessions[0].tag.is_none());
     }
@@ -1646,8 +1729,7 @@ mod test_tag_extraction {
         let project_dir = make_project_dir(&config_dir, real_path.to_str().unwrap());
         make_session_simple(&project_dir, "hello");
 
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions.len(), 1);
         assert!(sessions[0].tag.is_none());
     }
@@ -1681,8 +1763,7 @@ mod test_tag_extraction {
         ];
         fs::write(&file_path, lines.join("\n") + "\n").unwrap();
 
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].tag.as_deref(), Some("real-tag")); // NOT "myapp:v2"
     }
@@ -1713,8 +1794,7 @@ mod test_tag_extraction {
         ];
         fs::write(&file_path, lines.join("\n") + "\n").unwrap();
 
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions.len(), 1);
         assert!(sessions[0].tag.is_none()); // NOT "prod"
     }
@@ -1747,8 +1827,7 @@ mod test_tag_extraction {
         ];
         fs::write(&file_path, lines.join("\n") + "\n").unwrap();
 
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, sid);
         assert_eq!(sessions[0].summary, "test prompt");
@@ -1792,8 +1871,7 @@ mod test_created_at_extraction {
         ];
         fs::write(&file_path, lines.join("\n") + "\n").unwrap();
 
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].created_at, Some(1768473000000));
     }
@@ -1820,8 +1898,7 @@ mod test_created_at_extraction {
         let t = filetime::FileTime::from_unix_time(1769904000, 0);
         filetime::set_file_mtime(&file_path, t).unwrap();
 
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions.len(), 1);
         assert!(sessions[0].created_at.is_some());
         assert!(sessions[0].created_at.unwrap() <= sessions[0].last_modified);
@@ -1849,8 +1926,7 @@ mod test_created_at_extraction {
         ];
         fs::write(&file_path, lines.join("\n") + "\n").unwrap();
 
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].created_at, Some(1768473000000));
     }
@@ -1866,8 +1942,7 @@ mod test_created_at_extraction {
         // _make_session_file doesn't add a timestamp field
         make_session_simple(&project_dir, "no timestamp");
 
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions.len(), 1);
         assert!(sessions[0].created_at.is_none());
     }
@@ -1893,8 +1968,7 @@ mod test_created_at_extraction {
         .to_string()];
         fs::write(&file_path, lines.join("\n") + "\n").unwrap();
 
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions.len(), 1);
         assert!(sessions[0].created_at.is_none());
     }
@@ -1920,8 +1994,7 @@ mod test_created_at_extraction {
         .to_string()];
         fs::write(&file_path, lines.join("\n") + "\n").unwrap();
 
-        let sessions =
-            list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
+        let sessions = list_sessions(Some(project_path.to_str().unwrap()), None, 0, false).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].created_at, Some(1768473000000));
     }
@@ -2028,7 +2101,16 @@ mod test_get_session_info {
         let real_path = fs::canonicalize(&project_path).unwrap();
         let project_dir = make_project_dir(&config_dir, real_path.to_str().unwrap());
         let (sid, _) = make_session_file(
-            &project_dir, None, "sidechain", None, None, None, None, true, false, None,
+            &project_dir,
+            None,
+            "sidechain",
+            None,
+            None,
+            None,
+            None,
+            true,
+            false,
+            None,
         );
 
         assert!(get_session_info(&sid, Some(project_path.to_str().unwrap()))
@@ -2111,7 +2193,10 @@ mod test_list_subagents {
     #[serial]
     fn test_invalid_session_id() {
         let (_tmp, _config_dir) = setup_config_dir();
-        assert_eq!(list_subagents("not-a-uuid", None).unwrap(), Vec::<String>::new());
+        assert_eq!(
+            list_subagents("not-a-uuid", None).unwrap(),
+            Vec::<String>::new()
+        );
         assert_eq!(list_subagents("", None).unwrap(), Vec::<String>::new());
     }
 
@@ -2145,7 +2230,8 @@ mod test_list_subagents {
         let (tmp, config_dir) = setup_config_dir();
         let project_path = tmp.path().join("proj");
         fs::create_dir_all(&project_path).unwrap();
-        let (sid, _) = make_session_with_subagents(&config_dir, project_path.to_str().unwrap(), &[]);
+        let (sid, _) =
+            make_session_with_subagents(&config_dir, project_path.to_str().unwrap(), &[]);
 
         assert_eq!(
             list_subagents(&sid, Some(project_path.to_str().unwrap())).unwrap(),
@@ -2176,11 +2262,8 @@ mod test_list_subagents {
         let (tmp, config_dir) = setup_config_dir();
         let project_path = tmp.path().join("proj");
         fs::create_dir_all(&project_path).unwrap();
-        let (sid, subagents_dir) = make_session_with_subagents(
-            &config_dir,
-            project_path.to_str().unwrap(),
-            &["keep"],
-        );
+        let (sid, subagents_dir) =
+            make_session_with_subagents(&config_dir, project_path.to_str().unwrap(), &["keep"]);
         fs::write(subagents_dir.join("agent-keep.meta.json"), "{}").unwrap();
         fs::write(subagents_dir.join("other.jsonl"), "{}\n").unwrap();
         fs::write(subagents_dir.join("agent-noext"), "{}").unwrap();
@@ -2195,11 +2278,8 @@ mod test_list_subagents {
         let (tmp, config_dir) = setup_config_dir();
         let project_path = tmp.path().join("proj");
         fs::create_dir_all(&project_path).unwrap();
-        let (sid, subagents_dir) = make_session_with_subagents(
-            &config_dir,
-            project_path.to_str().unwrap(),
-            &["top"],
-        );
+        let (sid, subagents_dir) =
+            make_session_with_subagents(&config_dir, project_path.to_str().unwrap(), &["top"]);
         let nested = subagents_dir.join("workflows").join("run-1");
         fs::create_dir_all(&nested).unwrap();
         fs::write(nested.join("agent-nested.jsonl"), "{}\n").unwrap();
@@ -2272,15 +2352,18 @@ mod test_get_subagent_messages {
         let (tmp, config_dir) = setup_config_dir();
         let project_path = tmp.path().join("proj");
         fs::create_dir_all(&project_path).unwrap();
-        let (sid, _) = make_session_with_subagents(
-            &config_dir,
-            project_path.to_str().unwrap(),
-            &["other"],
-        );
+        let (sid, _) =
+            make_session_with_subagents(&config_dir, project_path.to_str().unwrap(), &["other"]);
 
         assert_eq!(
-            get_subagent_messages(&sid, "missing", Some(project_path.to_str().unwrap()), None, 0)
-                .unwrap(),
+            get_subagent_messages(
+                &sid,
+                "missing",
+                Some(project_path.to_str().unwrap()),
+                None,
+                0
+            )
+            .unwrap(),
             vec![]
         );
     }
@@ -2314,10 +2397,16 @@ mod test_get_subagent_messages {
                 .unwrap();
         assert_eq!(messages.len(), 4);
         let msg_uuids: Vec<&str> = messages.iter().map(|m| m.uuid.as_str()).collect();
-        assert_eq!(msg_uuids, vec![u1.as_str(), a1.as_str(), u2.as_str(), a2.as_str()]);
+        assert_eq!(
+            msg_uuids,
+            vec![u1.as_str(), a1.as_str(), u2.as_str(), a2.as_str()]
+        );
         assert_eq!(messages[0].type_, "user");
         assert_eq!(messages[0].session_id, sid);
-        assert_eq!(messages[0].message, json!({"role": "user", "content": "task"}));
+        assert_eq!(
+            messages[0].message,
+            json!({"role": "user", "content": "task"})
+        );
         assert!(messages[0].parent_tool_use_id.is_none());
         assert_eq!(messages[3].type_, "assistant");
     }
@@ -2369,11 +2458,7 @@ mod test_get_subagent_messages {
             "".to_string(),
             make_transcript_entry_simple("assistant", &a1, Some(&u1), &sid, "ok").to_string(),
         ];
-        fs::write(
-            subagents_dir.join("agent-x.jsonl"),
-            lines.join("\n") + "\n",
-        )
-        .unwrap();
+        fs::write(subagents_dir.join("agent-x.jsonl"), lines.join("\n") + "\n").unwrap();
 
         let messages =
             get_subagent_messages(&sid, "x", Some(project_path.to_str().unwrap()), None, 0)
@@ -2396,17 +2481,17 @@ mod test_get_subagent_messages {
             .iter()
             .enumerate()
             .map(|(i, uid)| {
-                let parent = if i > 0 { Some(uuids[i - 1].as_str()) } else { None };
+                let parent = if i > 0 {
+                    Some(uuids[i - 1].as_str())
+                } else {
+                    None
+                };
                 let entry_type = if i % 2 == 0 { "user" } else { "assistant" };
                 make_transcript_entry_simple(entry_type, uid, parent, &sid, &format!("m{}", i))
             })
             .collect();
         let lines: Vec<String> = entries.iter().map(|e| e.to_string()).collect();
-        fs::write(
-            subagents_dir.join("agent-p.jsonl"),
-            lines.join("\n") + "\n",
-        )
-        .unwrap();
+        fs::write(subagents_dir.join("agent-p.jsonl"), lines.join("\n") + "\n").unwrap();
 
         let pp = project_path.to_str().unwrap();
 

@@ -9,8 +9,7 @@
 //! trait-level behavior.
 
 use rust_agent_sdk::{
-    InMemorySessionStore, SessionKey, SessionListSubkeysKey, SessionStore,
-    SessionStoreEntry,
+    InMemorySessionStore, SessionKey, SessionListSubkeysKey, SessionStore, SessionStoreEntry,
 };
 
 // ---------------------------------------------------------------------------

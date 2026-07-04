@@ -1,8 +1,8 @@
 //! Tests for ClaudeSDKClient streaming functionality — ported from Python test_streaming_client.py.
 
 use rust_agent_sdk::{
-    ClaudeAgentOptions, ClaudeSDKClient, ClaudeSDKError, ContentBlock,
-    ContextUsageResponse, McpStatusResponse, Message, Transport,
+    ClaudeAgentOptions, ClaudeSDKClient, ClaudeSDKError, ContentBlock, ContextUsageResponse,
+    McpStatusResponse, Message, Transport,
 };
 use std::path::PathBuf;
 
@@ -214,9 +214,7 @@ async fn test_receive_response() {
     let messages = client.send_message("Answer me").await.unwrap();
 
     // Should contain an AssistantMessage and a ResultMessage
-    let has_assistant = messages
-        .iter()
-        .any(|m| matches!(m, Message::Assistant(_)));
+    let has_assistant = messages.iter().any(|m| matches!(m, Message::Assistant(_)));
     let has_result = messages.iter().any(|m| matches!(m, Message::Result(_)));
 
     assert!(has_assistant);
@@ -248,7 +246,10 @@ async fn test_interrupt_not_connected() {
     let result = client.interrupt().await;
 
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), ClaudeSDKError::CliConnection(_)));
+    assert!(matches!(
+        result.unwrap_err(),
+        ClaudeSDKError::CliConnection(_)
+    ));
 }
 
 /// Test reconnect_mcp_server sends correct control request.
@@ -272,7 +273,10 @@ async fn test_reconnect_mcp_server_not_connected() {
     let result = client.reconnect_mcp_server("my-server").await;
 
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), ClaudeSDKError::CliConnection(_)));
+    assert!(matches!(
+        result.unwrap_err(),
+        ClaudeSDKError::CliConnection(_)
+    ));
 }
 
 /// Test toggle_mcp_server sends correct control request.
@@ -284,10 +288,7 @@ async fn test_toggle_mcp_server() {
 
     client.connect().await.unwrap();
 
-    client
-        .toggle_mcp_server("my-server", false)
-        .await
-        .unwrap();
+    client.toggle_mcp_server("my-server", false).await.unwrap();
 }
 
 /// Test toggle_mcp_server with enabled=true.
@@ -314,7 +315,10 @@ async fn test_toggle_mcp_server_not_connected() {
     let result = client.toggle_mcp_server("my-server", true).await;
 
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), ClaudeSDKError::CliConnection(_)));
+    assert!(matches!(
+        result.unwrap_err(),
+        ClaudeSDKError::CliConnection(_)
+    ));
 }
 
 /// Test stop_task sends correct control request with task_id.
@@ -338,7 +342,10 @@ async fn test_stop_task_not_connected() {
     let result = client.stop_task("task-abc123").await;
 
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), ClaudeSDKError::CliConnection(_)));
+    assert!(matches!(
+        result.unwrap_err(),
+        ClaudeSDKError::CliConnection(_)
+    ));
 }
 
 /// Test get_mcp_status returns McpStatusResponse shape.
@@ -392,7 +399,10 @@ async fn test_get_mcp_status_not_connected() {
     let result = client.get_mcp_status().await;
 
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), ClaudeSDKError::CliConnection(_)));
+    assert!(matches!(
+        result.unwrap_err(),
+        ClaudeSDKError::CliConnection(_)
+    ));
 }
 
 /// Test get_context_usage returns ContextUsageResponse shape.
@@ -425,7 +435,10 @@ async fn test_get_context_usage_not_connected() {
     let result = client.get_context_usage().await;
 
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), ClaudeSDKError::CliConnection(_)));
+    assert!(matches!(
+        result.unwrap_err(),
+        ClaudeSDKError::CliConnection(_)
+    ));
 }
 
 /// Test client initialization with options.
@@ -463,9 +476,7 @@ async fn test_concurrent_send_receive() {
     let messages = client.send_message("Question 1").await.unwrap();
 
     // Should get at least an AssistantMessage
-    let has_assistant = messages
-        .iter()
-        .any(|m| matches!(m, Message::Assistant(_)));
+    let has_assistant = messages.iter().any(|m| matches!(m, Message::Assistant(_)));
     assert!(has_assistant);
 }
 
@@ -478,9 +489,10 @@ async fn test_concurrent_send_receive() {
 async fn test_query_with_async_iterable() {
     // In Python this uses query() with an async iterable and a mocked subprocess.
     // In Rust we test the query function directly.
-    let messages = rust_agent_sdk::query_collect("First message", Some(ClaudeAgentOptions::default()), None)
-        .await
-        .unwrap();
+    let messages =
+        rust_agent_sdk::query_collect("First message", Some(ClaudeAgentOptions::default()), None)
+            .await
+            .unwrap();
 
     // Should get at least a ResultMessage
     let has_result = messages.iter().any(|m| matches!(m, Message::Result(_)));
@@ -504,7 +516,10 @@ async fn test_receive_messages_not_connected() {
     let result = client.send_message("Hello").await;
 
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), ClaudeSDKError::CliConnection(_)));
+    assert!(matches!(
+        result.unwrap_err(),
+        ClaudeSDKError::CliConnection(_)
+    ));
 }
 
 /// Test receive_response when not connected.
@@ -516,7 +531,10 @@ async fn test_receive_response_not_connected() {
     let result = client.send_message("Hello").await;
 
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), ClaudeSDKError::CliConnection(_)));
+    assert!(matches!(
+        result.unwrap_err(),
+        ClaudeSDKError::CliConnection(_)
+    ));
 }
 
 /// Test connecting twice.
@@ -586,4 +604,3 @@ async fn test_receive_response_list_comprehension() {
     // Last message should be a ResultMessage
     assert!(matches!(messages.last(), Some(Message::Result(_))));
 }
-

@@ -9,9 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use rust_agent_sdk::internal::transport::Transport;
 use rust_agent_sdk::query::query_collect as query;
-use rust_agent_sdk::types::{
-    ClaudeAgentOptions, ContentBlock, Message, PermissionMode,
-};
+use rust_agent_sdk::types::{ClaudeAgentOptions, ContentBlock, Message, PermissionMode};
 use rust_agent_sdk::ClaudeSDKClient;
 use serde_json::json;
 
@@ -66,7 +64,8 @@ impl Transport for MockTransport {
             for w in written.iter().rev() {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(w.trim()) {
                     if v.get("type").and_then(|t| t.as_str()) == Some("control_request") {
-                        let req_id = v.get("request_id")
+                        let req_id = v
+                            .get("request_id")
                             .and_then(|r| r.as_str())
                             .unwrap_or("req_1")
                             .to_string();
@@ -144,12 +143,10 @@ async fn test_query_single_prompt() {
 
     assert_eq!(messages.len(), 2);
     match &messages[0] {
-        Message::Assistant(a) => {
-            match &a.content[0] {
-                ContentBlock::Text(tb) => assert_eq!(tb.text, "4"),
-                other => panic!("expected TextBlock, got {:?}", other),
-            }
-        }
+        Message::Assistant(a) => match &a.content[0] {
+            ContentBlock::Text(tb) => assert_eq!(tb.text, "4"),
+            other => panic!("expected TextBlock, got {:?}", other),
+        },
         other => panic!("expected AssistantMessage, got {:?}", other),
     }
     assert!(matches!(&messages[1], Message::Result(_)));
@@ -175,12 +172,10 @@ async fn test_query_with_options() {
 
     assert_eq!(messages.len(), 2);
     match &messages[0] {
-        Message::Assistant(a) => {
-            match &a.content[0] {
-                ContentBlock::Text(tb) => assert_eq!(tb.text, "Hello!"),
-                other => panic!("expected TextBlock, got {:?}", other),
-            }
-        }
+        Message::Assistant(a) => match &a.content[0] {
+            ContentBlock::Text(tb) => assert_eq!(tb.text, "Hello!"),
+            other => panic!("expected TextBlock, got {:?}", other),
+        },
         other => panic!("expected AssistantMessage, got {:?}", other),
     }
 }
@@ -200,12 +195,10 @@ async fn test_query_with_cwd() {
     assert_eq!(messages.len(), 2);
 
     match &messages[0] {
-        Message::Assistant(a) => {
-            match &a.content[0] {
-                ContentBlock::Text(tb) => assert_eq!(tb.text, "Done"),
-                other => panic!("expected TextBlock, got {:?}", other),
-            }
-        }
+        Message::Assistant(a) => match &a.content[0] {
+            ContentBlock::Text(tb) => assert_eq!(tb.text, "Done"),
+            other => panic!("expected TextBlock, got {:?}", other),
+        },
         other => panic!("expected AssistantMessage, got {:?}", other),
     }
 
@@ -282,8 +275,8 @@ async fn test_string_prompt_spawns_wait_for_result_as_task() {
 #[tokio::test]
 async fn test_client_connect_with_mock_transport() {
     let transport = MockTransport::new(single_assistant("hi"));
-    let mut client = ClaudeSDKClient::new(ClaudeAgentOptions::default())
-        .with_transport(Box::new(transport));
+    let mut client =
+        ClaudeSDKClient::new(ClaudeAgentOptions::default()).with_transport(Box::new(transport));
 
     client.connect().await.unwrap();
     // Transport was consumed by connect — _transport is now inside Query

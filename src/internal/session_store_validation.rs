@@ -14,7 +14,7 @@ pub fn validate_session_store_options(options: &ClaudeAgentOptions) -> Result<()
         return Err(ClaudeSDKError::sdk(
             "session_store cannot be combined with enable_file_checkpointing \
              (checkpoints are local-disk only and would diverge from the \
-             mirrored transcript)"
+             mirrored transcript)",
         ));
     }
 
@@ -26,7 +26,7 @@ pub fn validate_session_store_options(options: &ClaudeAgentOptions) -> Result<()
             if !store.has_list_sessions() {
                 return Err(ClaudeSDKError::sdk(
                     "continue_conversation with session_store requires the store to \
-                     implement list_sessions()"
+                     implement list_sessions()",
                 ));
             }
         }

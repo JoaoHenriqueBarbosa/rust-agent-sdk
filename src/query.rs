@@ -29,5 +29,7 @@ pub async fn query_collect(
 ) -> Result<Vec<Message>> {
     let options = options.unwrap_or_default();
     let client = InternalClient::new();
-    client.process_query_collect(prompt, options, transport).await
+    client
+        .process_query_collect(prompt, options, transport)
+        .await
 }

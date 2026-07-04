@@ -13,7 +13,6 @@
 ///
 /// Ported from Python: tests/test_mcp_large_output.py (18 tests)
 /// ALL tests call `todo!()` methods and will panic — that's expected and correct.
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -165,10 +164,7 @@ mod test_env_inheritance_and_precedence {
         env.insert("MAX_MCP_OUTPUT_TOKENS".to_string(), "500000".to_string());
 
         let transport = make_transport(env);
-        assert_eq!(
-            transport.options.env["MAX_MCP_OUTPUT_TOKENS"],
-            "500000"
-        );
+        assert_eq!(transport.options.env["MAX_MCP_OUTPUT_TOKENS"], "500000");
         // build_command calls todo!()
         let _cmd = transport.build_command();
     }
@@ -202,10 +198,7 @@ mod test_env_inheritance_and_precedence {
     fn test_options_env_cannot_override_sdk_version() {
         // The SDK version env var is always set to the real version.
         let mut env = HashMap::new();
-        env.insert(
-            "CLAUDE_AGENT_SDK_VERSION".to_string(),
-            "0.0.0".to_string(),
-        );
+        env.insert("CLAUDE_AGENT_SDK_VERSION".to_string(), "0.0.0".to_string());
 
         let transport = make_transport(env);
         // The user-provided value should be overridden at connect() time.
@@ -279,31 +272,29 @@ mod test_tool_result_parsing {
         let data = user_message_with_tool_result(&content, false);
         let msg = parse_message(&data).unwrap().unwrap();
         match msg {
-            Message::User(u) => {
-                match &u.content {
-                    MessageContent::Blocks(blocks) => {
-                        let tool_results: Vec<&ToolResultBlock> = blocks
-                            .iter()
-                            .filter_map(|b| match b {
-                                ContentBlock::ToolResult(tr) => Some(tr),
-                                _ => None,
-                            })
-                            .collect();
-                        assert_eq!(tool_results.len(), 1);
-                        match &tool_results[0].content {
-                            Some(ToolResultContent::Text(text)) => {
-                                assert_eq!(text, &content);
-                                assert!(
-                                    !text.starts_with("<persisted-output>"),
-                                    "expected inline content, got persisted-output"
-                                );
-                            }
-                            other => panic!("expected Text content, got {:?}", other),
+            Message::User(u) => match &u.content {
+                MessageContent::Blocks(blocks) => {
+                    let tool_results: Vec<&ToolResultBlock> = blocks
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::ToolResult(tr) => Some(tr),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(tool_results.len(), 1);
+                    match &tool_results[0].content {
+                        Some(ToolResultContent::Text(text)) => {
+                            assert_eq!(text, &content);
+                            assert!(
+                                !text.starts_with("<persisted-output>"),
+                                "expected inline content, got persisted-output"
+                            );
                         }
+                        other => panic!("expected Text content, got {:?}", other),
                     }
-                    other => panic!("expected Blocks content, got {:?}", other),
                 }
-            }
+                other => panic!("expected Blocks content, got {:?}", other),
+            },
             other => panic!("expected User message, got {:?}", other),
         }
     }
@@ -316,31 +307,29 @@ mod test_tool_result_parsing {
         let data = user_message_with_tool_result(&content, false);
         let msg = parse_message(&data).unwrap().unwrap();
         match msg {
-            Message::User(u) => {
-                match &u.content {
-                    MessageContent::Blocks(blocks) => {
-                        let tool_results: Vec<&ToolResultBlock> = blocks
-                            .iter()
-                            .filter_map(|b| match b {
-                                ContentBlock::ToolResult(tr) => Some(tr),
-                                _ => None,
-                            })
-                            .collect();
-                        assert_eq!(tool_results.len(), 1);
-                        match &tool_results[0].content {
-                            Some(ToolResultContent::Text(text)) => {
-                                assert!(
-                                    text.starts_with("<persisted-output>"),
-                                    "Expected persisted-output wrapper, got: {:?}",
-                                    &text[..std::cmp::min(text.len(), 100)]
-                                );
-                            }
-                            other => panic!("expected Text content, got {:?}", other),
+            Message::User(u) => match &u.content {
+                MessageContent::Blocks(blocks) => {
+                    let tool_results: Vec<&ToolResultBlock> = blocks
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::ToolResult(tr) => Some(tr),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(tool_results.len(), 1);
+                    match &tool_results[0].content {
+                        Some(ToolResultContent::Text(text)) => {
+                            assert!(
+                                text.starts_with("<persisted-output>"),
+                                "Expected persisted-output wrapper, got: {:?}",
+                                &text[..std::cmp::min(text.len(), 100)]
+                            );
                         }
+                        other => panic!("expected Text content, got {:?}", other),
                     }
-                    other => panic!("expected Blocks content, got {:?}", other),
                 }
-            }
+                other => panic!("expected Blocks content, got {:?}", other),
+            },
             other => panic!("expected User message, got {:?}", other),
         }
     }
@@ -353,31 +342,29 @@ mod test_tool_result_parsing {
         let data = user_message_with_tool_result(&content, false);
         let msg = parse_message(&data).unwrap().unwrap();
         match msg {
-            Message::User(u) => {
-                match &u.content {
-                    MessageContent::Blocks(blocks) => {
-                        let tool_results: Vec<&ToolResultBlock> = blocks
-                            .iter()
-                            .filter_map(|b| match b {
-                                ContentBlock::ToolResult(tr) => Some(tr),
-                                _ => None,
-                            })
-                            .collect();
-                        match &tool_results[0].content {
-                            Some(ToolResultContent::Text(text)) => {
-                                assert!(
-                                    text.len() < LAYER2_THRESHOLD_CHARS,
-                                    "Expected preview under {} chars, got {}",
-                                    LAYER2_THRESHOLD_CHARS,
-                                    text.len()
-                                );
-                            }
-                            other => panic!("expected Text content, got {:?}", other),
+            Message::User(u) => match &u.content {
+                MessageContent::Blocks(blocks) => {
+                    let tool_results: Vec<&ToolResultBlock> = blocks
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::ToolResult(tr) => Some(tr),
+                            _ => None,
+                        })
+                        .collect();
+                    match &tool_results[0].content {
+                        Some(ToolResultContent::Text(text)) => {
+                            assert!(
+                                text.len() < LAYER2_THRESHOLD_CHARS,
+                                "Expected preview under {} chars, got {}",
+                                LAYER2_THRESHOLD_CHARS,
+                                text.len()
+                            );
                         }
+                        other => panic!("expected Text content, got {:?}", other),
                     }
-                    other => panic!("expected Blocks content, got {:?}", other),
                 }
-            }
+                other => panic!("expected Blocks content, got {:?}", other),
+            },
             other => panic!("expected User message, got {:?}", other),
         }
     }
@@ -388,22 +375,20 @@ mod test_tool_result_parsing {
         let data = user_message_with_tool_result("tool failed", true);
         let msg = parse_message(&data).unwrap().unwrap();
         match msg {
-            Message::User(u) => {
-                match &u.content {
-                    MessageContent::Blocks(blocks) => {
-                        let tool_results: Vec<&ToolResultBlock> = blocks
-                            .iter()
-                            .filter_map(|b| match b {
-                                ContentBlock::ToolResult(tr) => Some(tr),
-                                _ => None,
-                            })
-                            .collect();
-                        assert_eq!(tool_results.len(), 1);
-                        assert_eq!(tool_results[0].is_error, Some(true));
-                    }
-                    other => panic!("expected Blocks content, got {:?}", other),
+            Message::User(u) => match &u.content {
+                MessageContent::Blocks(blocks) => {
+                    let tool_results: Vec<&ToolResultBlock> = blocks
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::ToolResult(tr) => Some(tr),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(tool_results.len(), 1);
+                    assert_eq!(tool_results[0].is_error, Some(true));
                 }
-            }
+                other => panic!("expected Blocks content, got {:?}", other),
+            },
             other => panic!("expected User message, got {:?}", other),
         }
     }
@@ -415,22 +400,20 @@ mod test_tool_result_parsing {
         let data = user_message_with_tool_result(&content, false);
         let msg = parse_message(&data).unwrap().unwrap();
         match msg {
-            Message::User(u) => {
-                match &u.content {
-                    MessageContent::Blocks(blocks) => {
-                        let tool_results: Vec<&ToolResultBlock> = blocks
-                            .iter()
-                            .filter_map(|b| match b {
-                                ContentBlock::ToolResult(tr) => Some(tr),
-                                _ => None,
-                            })
-                            .collect();
-                        assert_eq!(tool_results.len(), 1);
-                        assert_eq!(tool_results[0].is_error, Some(false));
-                    }
-                    other => panic!("expected Blocks content, got {:?}", other),
+            Message::User(u) => match &u.content {
+                MessageContent::Blocks(blocks) => {
+                    let tool_results: Vec<&ToolResultBlock> = blocks
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::ToolResult(tr) => Some(tr),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(tool_results.len(), 1);
+                    assert_eq!(tool_results[0].is_error, Some(false));
                 }
-            }
+                other => panic!("expected Blocks content, got {:?}", other),
+            },
             other => panic!("expected User message, got {:?}", other),
         }
     }
@@ -451,30 +434,28 @@ mod test_persisted_output_detection_helper {
         let data = user_message_with_tool_result(&content, false);
         let msg = parse_message(&data).unwrap().unwrap();
         match msg {
-            Message::User(u) => {
-                match &u.content {
-                    MessageContent::Blocks(blocks) => {
-                        let tool_results: Vec<&ToolResultBlock> = blocks
-                            .iter()
-                            .filter_map(|b| match b {
-                                ContentBlock::ToolResult(tr) => Some(tr),
-                                _ => None,
-                            })
-                            .collect();
-                        assert_eq!(tool_results.len(), 1);
-                        match &tool_results[0].content {
-                            Some(ToolResultContent::Text(text)) => {
-                                assert!(
-                                    is_persisted_output(text),
-                                    "helper should detect persisted output"
-                                );
-                            }
-                            other => panic!("expected Text content, got {:?}", other),
+            Message::User(u) => match &u.content {
+                MessageContent::Blocks(blocks) => {
+                    let tool_results: Vec<&ToolResultBlock> = blocks
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::ToolResult(tr) => Some(tr),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(tool_results.len(), 1);
+                    match &tool_results[0].content {
+                        Some(ToolResultContent::Text(text)) => {
+                            assert!(
+                                is_persisted_output(text),
+                                "helper should detect persisted output"
+                            );
                         }
+                        other => panic!("expected Text content, got {:?}", other),
                     }
-                    other => panic!("expected Blocks content, got {:?}", other),
                 }
-            }
+                other => panic!("expected Blocks content, got {:?}", other),
+            },
             other => panic!("expected User message, got {:?}", other),
         }
     }
@@ -486,30 +467,28 @@ mod test_persisted_output_detection_helper {
         let data = user_message_with_tool_result(&content, false);
         let msg = parse_message(&data).unwrap().unwrap();
         match msg {
-            Message::User(u) => {
-                match &u.content {
-                    MessageContent::Blocks(blocks) => {
-                        let tool_results: Vec<&ToolResultBlock> = blocks
-                            .iter()
-                            .filter_map(|b| match b {
-                                ContentBlock::ToolResult(tr) => Some(tr),
-                                _ => None,
-                            })
-                            .collect();
-                        assert_eq!(tool_results.len(), 1);
-                        match &tool_results[0].content {
-                            Some(ToolResultContent::Text(text)) => {
-                                assert!(
-                                    !is_persisted_output(text),
-                                    "helper should NOT detect persisted output for inline content"
-                                );
-                            }
-                            other => panic!("expected Text content, got {:?}", other),
+            Message::User(u) => match &u.content {
+                MessageContent::Blocks(blocks) => {
+                    let tool_results: Vec<&ToolResultBlock> = blocks
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::ToolResult(tr) => Some(tr),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(tool_results.len(), 1);
+                    match &tool_results[0].content {
+                        Some(ToolResultContent::Text(text)) => {
+                            assert!(
+                                !is_persisted_output(text),
+                                "helper should NOT detect persisted output for inline content"
+                            );
                         }
+                        other => panic!("expected Text content, got {:?}", other),
                     }
-                    other => panic!("expected Blocks content, got {:?}", other),
                 }
-            }
+                other => panic!("expected Blocks content, got {:?}", other),
+            },
             other => panic!("expected User message, got {:?}", other),
         }
     }

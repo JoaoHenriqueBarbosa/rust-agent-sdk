@@ -1,7 +1,7 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::future::Future;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -430,7 +430,10 @@ pub enum HookSpecificOutput {
     PreToolUse {
         #[serde(rename = "permissionDecision", skip_serializing_if = "Option::is_none")]
         permission_decision: Option<String>,
-        #[serde(rename = "permissionDecisionReason", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "permissionDecisionReason",
+            skip_serializing_if = "Option::is_none"
+        )]
         permission_decision_reason: Option<String>,
         #[serde(rename = "updatedInput", skip_serializing_if = "Option::is_none")]
         updated_input: Option<serde_json::Value>,
@@ -440,7 +443,10 @@ pub enum HookSpecificOutput {
     PostToolUse {
         #[serde(rename = "additionalContext", skip_serializing_if = "Option::is_none")]
         additional_context: Option<String>,
-        #[serde(rename = "updatedMCPToolOutput", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "updatedMCPToolOutput",
+            skip_serializing_if = "Option::is_none"
+        )]
         updated_mcp_tool_output: Option<serde_json::Value>,
     },
     PostToolUseFailure {
@@ -503,7 +509,11 @@ pub struct HookContext {
 
 /// Can-use-tool permission callback type.
 pub type CanUseToolFn = Arc<
-    dyn Fn(String, HashMap<String, serde_json::Value>, ToolPermissionContext) -> Pin<Box<dyn Future<Output = PermissionResult> + Send>>
+    dyn Fn(
+            String,
+            HashMap<String, serde_json::Value>,
+            ToolPermissionContext,
+        ) -> Pin<Box<dyn Future<Output = PermissionResult> + Send>>
         + Send
         + Sync,
 >;
@@ -513,7 +523,11 @@ pub type StderrCallbackFn = Arc<dyn Fn(String) + Send + Sync>;
 
 /// Hook callback function type.
 pub type HookCallbackFn = Arc<
-    dyn Fn(HookInput, Option<String>, HookContext) -> futures::future::BoxFuture<'static, HookJSONOutput>
+    dyn Fn(
+            HookInput,
+            Option<String>,
+            HookContext,
+        ) -> futures::future::BoxFuture<'static, HookJSONOutput>
         + Send
         + Sync,
 >;
@@ -788,11 +802,7 @@ pub struct ToolUseBlock {
 }
 
 impl ToolUseBlock {
-    pub fn new(
-        id: impl Into<String>,
-        name: impl Into<String>,
-        input: serde_json::Value,
-    ) -> Self {
+    pub fn new(id: impl Into<String>, name: impl Into<String>, input: serde_json::Value) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
@@ -1241,13 +1251,12 @@ pub trait SessionStore: Send + Sync {
         &self,
         _project_key: &str,
     ) -> std::result::Result<Vec<SessionSummaryEntry>, ClaudeSDKError> {
-        Err(ClaudeSDKError::sdk("list_session_summaries not implemented"))
+        Err(ClaudeSDKError::sdk(
+            "list_session_summaries not implemented",
+        ))
     }
 
-    async fn delete(
-        &self,
-        _key: &SessionKey,
-    ) -> std::result::Result<(), ClaudeSDKError> {
+    async fn delete(&self, _key: &SessionKey) -> std::result::Result<(), ClaudeSDKError> {
         Err(ClaudeSDKError::sdk("delete not implemented"))
     }
 
@@ -1556,10 +1565,7 @@ pub enum ControlResponseBody {
         response: Option<serde_json::Value>,
     },
     #[serde(rename = "error")]
-    Error {
-        request_id: String,
-        error: String,
-    },
+    Error { request_id: String, error: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

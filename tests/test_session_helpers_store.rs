@@ -200,10 +200,7 @@ mod test_list_sessions_from_store {
         );
         side_entry["isSidechain"] = json!(true);
         store
-            .append(
-                &SessionKey::new(&pk, &sidechain_sid),
-                &[side_entry],
-            )
+            .append(&SessionKey::new(&pk, &sidechain_sid), &[side_entry])
             .await
             .unwrap();
 
@@ -248,7 +245,10 @@ mod test_list_sessions_from_store {
             page.iter().map(|s| s.session_id.clone()).collect();
         assert_eq!(
             page_ids,
-            valid_sids.iter().cloned().collect::<std::collections::HashSet<_>>()
+            valid_sids
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>()
         );
 
         let page2 = list_sessions_from_store(&store, Some(DIR), Some(5), 2)
@@ -299,10 +299,8 @@ mod test_list_sessions_from_store {
         let sessions = list_sessions_from_store(&store, Some(DIR), None, 0)
             .await
             .unwrap();
-        let by_id: std::collections::HashMap<_, _> = sessions
-            .iter()
-            .map(|s| (s.session_id.clone(), s))
-            .collect();
+        let by_id: std::collections::HashMap<_, _> =
+            sessions.iter().map(|s| (s.session_id.clone(), s)).collect();
         assert_eq!(by_id[&good_sid].summary, "prompt 0");
     }
 
@@ -458,10 +456,15 @@ mod test_get_session_messages_from_store {
     #[tokio::test]
     async fn test_unknown_session_empty() {
         let store = InMemorySessionStore::new();
-        let msgs =
-            get_session_messages_from_store(&store, &Uuid::new_v4().to_string(), Some(DIR), None, 0)
-                .await
-                .unwrap();
+        let msgs = get_session_messages_from_store(
+            &store,
+            &Uuid::new_v4().to_string(),
+            Some(DIR),
+            None,
+            0,
+        )
+        .await
+        .unwrap();
         assert!(msgs.is_empty());
     }
 }
@@ -591,10 +594,9 @@ mod test_subagents_from_store {
             .unwrap();
         assert!(ids.is_empty());
 
-        let msgs =
-            get_subagent_messages_from_store(&store, "not-a-uuid", "x", Some(DIR), None, 0)
-                .await
-                .unwrap();
+        let msgs = get_subagent_messages_from_store(&store, "not-a-uuid", "x", Some(DIR), None, 0)
+            .await
+            .unwrap();
         assert!(msgs.is_empty());
     }
 
@@ -846,8 +848,7 @@ mod test_fork_session_via_store {
         assert_eq!(trailer["type"], "custom-title");
         assert!(trailer["uuid"].is_string() && !trailer["uuid"].as_str().unwrap().is_empty());
         assert!(
-            trailer["timestamp"].is_string()
-                && !trailer["timestamp"].as_str().unwrap().is_empty()
+            trailer["timestamp"].is_string() && !trailer["timestamp"].as_str().unwrap().is_empty()
         );
     }
 
@@ -945,10 +946,9 @@ mod test_fork_session_via_store {
         let result = fork_session_via_store(&store, &sid, Some(DIR), None, Some("Forked"))
             .await
             .unwrap();
-        let msgs =
-            get_session_messages_from_store(&store, &result.session_id, Some(DIR), None, 0)
-                .await
-                .unwrap();
+        let msgs = get_session_messages_from_store(&store, &result.session_id, Some(DIR), None, 0)
+            .await
+            .unwrap();
         assert_eq!(msgs.len(), 4);
     }
 
@@ -959,10 +959,9 @@ mod test_fork_session_via_store {
         let sid = Uuid::new_v4().to_string();
         let uuids = seed_chain(&store, &sid, 3).await;
 
-        let result =
-            fork_session_via_store(&store, &sid, Some(DIR), Some(&uuids[1]), None)
-                .await
-                .unwrap();
+        let result = fork_session_via_store(&store, &sid, Some(DIR), Some(&uuids[1]), None)
+            .await
+            .unwrap();
         let forked = store.get_entries(&SessionKey::new(&pk, &result.session_id));
         let msg_entries: Vec<_> = forked
             .iter()
@@ -1023,15 +1022,10 @@ mod test_fork_session_via_store {
             .await
             .unwrap();
 
-        let result = fork_session_via_store(
-            &store,
-            &sid,
-            Some(DIR),
-            Some(&a1_uuid),
-            Some("My Fork"),
-        )
-        .await
-        .unwrap();
+        let result =
+            fork_session_via_store(&store, &sid, Some(DIR), Some(&a1_uuid), Some("My Fork"))
+                .await
+                .unwrap();
         assert_ne!(result.session_id, sid);
 
         let forked = store.get_entries(&SessionKey::new(&pk, &result.session_id));
@@ -1045,12 +1039,12 @@ mod test_fork_session_via_store {
         // UUIDs remapped, chain preserved.
         assert_ne!(f0["uuid"].as_str().unwrap(), u1_uuid);
         assert!(f0["parentUuid"].is_null());
-        assert_eq!(f1["parentUuid"].as_str().unwrap(), f0["uuid"].as_str().unwrap());
-        assert_eq!(f0["sessionId"].as_str().unwrap(), result.session_id);
         assert_eq!(
-            f0["forkedFrom"]["messageUuid"].as_str().unwrap(),
-            u1_uuid
+            f1["parentUuid"].as_str().unwrap(),
+            f0["uuid"].as_str().unwrap()
         );
+        assert_eq!(f0["sessionId"].as_str().unwrap(), result.session_id);
+        assert_eq!(f0["forkedFrom"]["messageUuid"].as_str().unwrap(), u1_uuid);
 
         // Custom-title entry carries uuid+timestamp.
         assert_eq!(title["type"], "custom-title");

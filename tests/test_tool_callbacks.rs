@@ -342,9 +342,7 @@ mod test_hook_callbacks {
                     reason: Some("Test reason for blocking".to_string()),
                     hook_specific_output: Some(HookSpecificOutput::PreToolUse {
                         permission_decision: Some("deny".to_string()),
-                        permission_decision_reason: Some(
-                            "Security policy violation".to_string(),
-                        ),
+                        permission_decision_reason: Some("Security policy violation".to_string()),
                         updated_input: Some(json!({"modified": "input"})),
                         additional_context: None,
                     }),
@@ -386,8 +384,14 @@ mod test_hook_callbacks {
 
         let serialized = serde_json::to_string(&output).unwrap();
         // "continue_" must be serialized as "continue" (serde rename)
-        assert!(serialized.contains("\"continue\":true"), "continue_ should be renamed to continue");
-        assert!(!serialized.contains("\"continue_\""), "continue_ should not appear in serialized output");
+        assert!(
+            serialized.contains("\"continue\":true"),
+            "continue_ should be renamed to continue"
+        );
+        assert!(
+            !serialized.contains("\"continue_\""),
+            "continue_ should not appear in serialized output"
+        );
         assert!(serialized.contains("\"suppressOutput\":false"));
         assert!(serialized.contains("\"stopReason\":\"Test stop reason\""));
         assert!(serialized.contains("\"decision\":\"block\""));
@@ -434,8 +438,14 @@ mod test_hook_callbacks {
         };
         let serialized = serde_json::to_string(&output).unwrap();
         // "async_" must be serialized as "async"
-        assert!(serialized.contains("\"async\":true"), "async_ should be renamed to async");
-        assert!(!serialized.contains("\"async_\""), "async_ should not appear in serialized output");
+        assert!(
+            serialized.contains("\"async\":true"),
+            "async_ should be renamed to async"
+        );
+        assert!(
+            !serialized.contains("\"async_\""),
+            "async_ should not appear in serialized output"
+        );
         assert!(serialized.contains("\"asyncTimeout\":5000"));
     }
 
@@ -483,8 +493,14 @@ mod test_hook_callbacks {
             hook_specific_output: None,
         };
         let sync_serialized = serde_json::to_string(&sync_output).unwrap();
-        assert!(sync_serialized.contains("\"continue\":false"), "continue_ should be converted to continue");
-        assert!(!sync_serialized.contains("\"continue_\""), "continue_ should not appear in output");
+        assert!(
+            sync_serialized.contains("\"continue\":false"),
+            "continue_ should be converted to continue"
+        );
+        assert!(
+            !sync_serialized.contains("\"continue_\""),
+            "continue_ should not appear in output"
+        );
         assert!(sync_serialized.contains("\"stopReason\":\"Testing field conversion\""));
         assert!(sync_serialized.contains("\"systemMessage\":\"Fields should be converted\""));
 
@@ -494,8 +510,14 @@ mod test_hook_callbacks {
             async_timeout: Some(10000),
         };
         let async_serialized = serde_json::to_string(&async_output).unwrap();
-        assert!(async_serialized.contains("\"async\":true"), "async_ should be converted to async");
-        assert!(!async_serialized.contains("\"async_\""), "async_ should not appear in output");
+        assert!(
+            async_serialized.contains("\"async\":true"),
+            "async_ should be converted to async"
+        );
+        assert!(
+            !async_serialized.contains("\"async_\""),
+            "async_ should not appear in output"
+        );
         assert!(async_serialized.contains("\"asyncTimeout\":10000"));
     }
 }
@@ -662,22 +684,21 @@ mod test_hook_event_callbacks {
     /// Test that a SubagentStart hook callback works correctly.
     #[tokio::test]
     async fn test_subagent_start_hook_callback() {
-        let _subagent_start_hook: HookCallbackFn =
-            Arc::new(|_input, _tool_use_id, _context| {
-                Box::pin(async move {
-                    HookJSONOutput::Sync {
-                        continue_: None,
-                        suppress_output: None,
-                        stop_reason: None,
-                        decision: None,
-                        system_message: None,
-                        reason: None,
-                        hook_specific_output: Some(HookSpecificOutput::SubagentStart {
-                            additional_context: Some("Subagent approved".to_string()),
-                        }),
-                    }
-                })
-            });
+        let _subagent_start_hook: HookCallbackFn = Arc::new(|_input, _tool_use_id, _context| {
+            Box::pin(async move {
+                HookJSONOutput::Sync {
+                    continue_: None,
+                    suppress_output: None,
+                    stop_reason: None,
+                    decision: None,
+                    system_message: None,
+                    reason: None,
+                    hook_specific_output: Some(HookSpecificOutput::SubagentStart {
+                        additional_context: Some("Subagent approved".to_string()),
+                    }),
+                }
+            })
+        });
 
         let transport = MockTransport::new();
         let _q = Query::new(Box::new(transport), true, 30.0);

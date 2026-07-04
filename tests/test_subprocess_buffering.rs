@@ -3,7 +3,9 @@
 
 use std::path::PathBuf;
 
-use rust_agent_sdk::internal::transport::{SubprocessCLITransport, Transport, DEFAULT_MAX_BUFFER_SIZE};
+use rust_agent_sdk::internal::transport::{
+    SubprocessCLITransport, Transport, DEFAULT_MAX_BUFFER_SIZE,
+};
 #[allow(unused_imports)]
 use rust_agent_sdk::types::ClaudeAgentOptions;
 
@@ -30,7 +32,8 @@ fn make_options(max_buffer_size: Option<usize>) -> ClaudeAgentOptions {
 /// objects to be delivered as a single line with embedded newlines.
 #[tokio::test]
 async fn test_multiple_json_objects_on_single_line() {
-    let json_obj1 = serde_json::json!({"type": "message", "id": "msg1", "content": "First message"});
+    let json_obj1 =
+        serde_json::json!({"type": "message", "id": "msg1", "content": "First message"});
     let json_obj2 = serde_json::json!({"type": "result", "id": "res1", "status": "completed"});
 
     let _buffered_line = format!("{}\n{}", json_obj1, json_obj2);
@@ -166,7 +169,10 @@ async fn test_large_minified_json() {
 /// Test that exceeding buffer size raises an appropriate error.
 #[tokio::test]
 async fn test_buffer_size_exceeded() {
-    let _huge_incomplete = format!("{{\"data\": \"{}", "x".repeat(DEFAULT_MAX_BUFFER_SIZE + 1000));
+    let _huge_incomplete = format!(
+        "{{\"data\": \"{}",
+        "x".repeat(DEFAULT_MAX_BUFFER_SIZE + 1000)
+    );
 
     let mut transport = SubprocessCLITransport::new("test", make_options(None));
 
@@ -193,8 +199,8 @@ async fn test_buffer_size_option() {
 /// Test handling a mix of complete and split JSON messages.
 #[tokio::test]
 async fn test_mixed_complete_and_split_json() {
-    let msg1 = serde_json::to_string(&serde_json::json!({"type": "system", "subtype": "start"}))
-        .unwrap();
+    let msg1 =
+        serde_json::to_string(&serde_json::json!({"type": "system", "subtype": "start"})).unwrap();
 
     let large_msg = serde_json::json!({
         "type": "assistant",
@@ -202,8 +208,8 @@ async fn test_mixed_complete_and_split_json() {
     });
     let large_json = serde_json::to_string(&large_msg).unwrap();
 
-    let msg3 = serde_json::to_string(&serde_json::json!({"type": "system", "subtype": "end"}))
-        .unwrap();
+    let msg3 =
+        serde_json::to_string(&serde_json::json!({"type": "system", "subtype": "end"})).unwrap();
 
     let _lines = vec![
         format!("{}\n", msg1),
@@ -230,11 +236,10 @@ async fn test_mixed_complete_and_split_json() {
 #[tokio::test]
 async fn test_non_json_debug_lines_skipped() {
     let debug = "[SandboxDebug] Seccomp filtering not available";
-    let msg1 = serde_json::to_string(&serde_json::json!({"type": "system", "subtype": "init"}))
+    let msg1 =
+        serde_json::to_string(&serde_json::json!({"type": "system", "subtype": "init"})).unwrap();
+    let msg2 = serde_json::to_string(&serde_json::json!({"type": "result", "subtype": "success"}))
         .unwrap();
-    let msg2 =
-        serde_json::to_string(&serde_json::json!({"type": "result", "subtype": "success"}))
-            .unwrap();
 
     let _stream_data = format!("{}\n{}\n{}\n{}\n", debug, msg1, debug, msg2);
 
@@ -264,10 +269,8 @@ async fn test_interleaved_non_json_lines_skipped() {
         "WARNING: something\n".to_string(),
         format!(
             "{}\n",
-            serde_json::to_string(
-                &serde_json::json!({"type": "result", "subtype": "success"})
-            )
-            .unwrap()
+            serde_json::to_string(&serde_json::json!({"type": "result", "subtype": "success"}))
+                .unwrap()
         ),
     ];
 

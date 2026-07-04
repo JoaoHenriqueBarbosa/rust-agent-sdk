@@ -2,12 +2,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
-use tokio::sync::{mpsc, Notify, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::errors::{ClaudeSDKError, Result};
 use crate::internal::task::{spawn_detached, TaskHandle};
-use crate::internal::transport::Transport;
 use crate::internal::transcript_mirror::TranscriptMirrorBatcher;
+use crate::internal::transport::Transport;
 use crate::types::{
     CanUseToolFn, HookCallbackFn, PermissionMode, PermissionResult, ToolPermissionContext,
 };
@@ -18,9 +18,15 @@ fn convert_hook_output_for_cli(hook_output: serde_json::Value) -> serde_json::Va
         let mut converted = serde_json::Map::new();
         for (key, value) in map {
             match key.as_str() {
-                "async_" => { converted.insert("async".to_string(), value); }
-                "continue_" => { converted.insert("continue".to_string(), value); }
-                _ => { converted.insert(key, value); }
+                "async_" => {
+                    converted.insert("async".to_string(), value);
+                }
+                "continue_" => {
+                    converted.insert("continue".to_string(), value);
+                }
+                _ => {
+                    converted.insert(key, value);
+                }
             }
         }
         serde_json::Value::Object(converted)
@@ -44,7 +50,9 @@ pub struct Query {
 
     // Control protocol state
     request_counter: u64,
-    pending_control_responses: Arc<Mutex<HashMap<String, oneshot::Sender<std::result::Result<serde_json::Value, String>>>>>,
+    pending_control_responses: Arc<
+        Mutex<HashMap<String, oneshot::Sender<std::result::Result<serde_json::Value, String>>>>,
+    >,
 
     // Callbacks
     can_use_tool: Option<CanUseToolFn>,
@@ -177,8 +185,17 @@ impl Query {
                         }
                     }
                     let mut hook_matcher_config = serde_json::Map::new();
-                    hook_matcher_config.insert("matcher".to_string(), matcher.get("matcher").cloned().unwrap_or(serde_json::Value::Null));
-                    hook_matcher_config.insert("hookCallbackIds".to_string(), serde_json::Value::Array(callback_ids));
+                    hook_matcher_config.insert(
+                        "matcher".to_string(),
+                        matcher
+                            .get("matcher")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
+                    );
+                    hook_matcher_config.insert(
+                        "hookCallbackIds".to_string(),
+                        serde_json::Value::Array(callback_ids),
+                    );
                     if let Some(timeout) = matcher.get("timeout") {
                         hook_matcher_config.insert("timeout".to_string(), timeout.clone());
                     }
@@ -195,14 +212,23 @@ impl Query {
         });
 
         if let Some(ref agents) = self.agents {
-            request.as_object_mut().unwrap().insert("agents".to_string(), agents.clone());
+            request
+                .as_object_mut()
+                .unwrap()
+                .insert("agents".to_string(), agents.clone());
         }
         if let Some(eds) = self.exclude_dynamic_sections {
-            request.as_object_mut().unwrap().insert("excludeDynamicSections".to_string(), json!(eds));
+            request
+                .as_object_mut()
+                .unwrap()
+                .insert("excludeDynamicSections".to_string(), json!(eds));
         }
         if let Some(ref skills) = self.skills {
             if skills.is_array() {
-                request.as_object_mut().unwrap().insert("skills".to_string(), skills.clone());
+                request
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("skills".to_string(), skills.clone());
             }
         }
 
@@ -333,29 +359,36 @@ impl Query {
                         return Ok(None);
                     }
 
-                    let msg_type = message
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let msg_type = message.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
                     match msg_type {
                         "control_response" => {
                             if let Some(response) = message.get("response") {
-                                let request_id = response.get("request_id")
+                                let request_id = response
+                                    .get("request_id")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("")
                                     .to_string();
                                 let sender = {
-                                    let mut pending = self.pending_control_responses.lock().unwrap();
+                                    let mut pending =
+                                        self.pending_control_responses.lock().unwrap();
                                     pending.remove(&request_id)
                                 };
                                 if let Some(sender) = sender {
-                                    let subtype = response.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
+                                    let subtype = response
+                                        .get("subtype")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
                                     if subtype == "error" {
-                                        let error = response.get("error").and_then(|v| v.as_str()).unwrap_or("Unknown error").to_string();
+                                        let error = response
+                                            .get("error")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("Unknown error")
+                                            .to_string();
                                         let _ = sender.send(Err(error));
                                     } else {
-                                        let resp_data = response.get("response").cloned().unwrap_or(json!({}));
+                                        let resp_data =
+                                            response.get("response").cloned().unwrap_or(json!({}));
                                         let _ = sender.send(Ok(resp_data));
                                     }
                                 }
@@ -446,7 +479,8 @@ impl Query {
 
     /// Handle an incoming control request from the CLI (#9, #10).
     async fn handle_control_request(&mut self, request: &serde_json::Value) {
-        let request_id = request.get("request_id")
+        let request_id = request
+            .get("request_id")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -454,7 +488,8 @@ impl Query {
             Some(r) => r.clone(),
             None => return,
         };
-        let subtype = request_data.get("subtype")
+        let subtype = request_data
+            .get("subtype")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -464,20 +499,29 @@ impl Query {
                 // Handle tool permission request (#10)
                 match &self.can_use_tool {
                     Some(callback) => {
-                        let tool_name = request_data.get("tool_name")
+                        let tool_name = request_data
+                            .get("tool_name")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        let input: HashMap<String, serde_json::Value> = request_data.get("input")
+                        let input: HashMap<String, serde_json::Value> = request_data
+                            .get("input")
                             .and_then(|v| v.as_object())
                             .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                             .unwrap_or_default();
-                        let original_input = request_data.get("input").cloned().unwrap_or(json!({}));
+                        let original_input =
+                            request_data.get("input").cloned().unwrap_or(json!({}));
                         let context = ToolPermissionContext {
                             signal: None,
                             suggestions: Vec::new(),
-                            tool_use_id: request_data.get("tool_use_id").and_then(|v| v.as_str()).map(String::from),
-                            agent_id: request_data.get("agent_id").and_then(|v| v.as_str()).map(String::from),
+                            tool_use_id: request_data
+                                .get("tool_use_id")
+                                .and_then(|v| v.as_str())
+                                .map(String::from),
+                            agent_id: request_data
+                                .get("agent_id")
+                                .and_then(|v| v.as_str())
+                                .map(String::from),
                         };
 
                         let cb = callback.clone();
@@ -501,10 +545,9 @@ impl Query {
                                     "message": deny.message,
                                 });
                                 if deny.interrupt {
-                                    resp.as_object_mut().unwrap().insert(
-                                        "interrupt".to_string(),
-                                        json!(true),
-                                    );
+                                    resp.as_object_mut()
+                                        .unwrap()
+                                        .insert("interrupt".to_string(), json!(true));
                                 }
                                 Ok(resp)
                             }
@@ -515,7 +558,8 @@ impl Query {
             }
             "hook_callback" => {
                 // Handle hook callback (#9)
-                let callback_id = request_data.get("callback_id")
+                let callback_id = request_data
+                    .get("callback_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
@@ -526,17 +570,26 @@ impl Query {
                 match callback {
                     Some(cb) => {
                         let input_val = request_data.get("input").cloned().unwrap_or(json!(null));
-                        let tool_use_id = request_data.get("tool_use_id").and_then(|v| v.as_str()).map(String::from);
+                        let tool_use_id = request_data
+                            .get("tool_use_id")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
                         let context = crate::types::HookContext { signal: None };
 
                         // Parse input into HookInput
-                        let hook_input: crate::types::HookInput = match serde_json::from_value(input_val) {
-                            Ok(hi) => hi,
-                            Err(e) => {
-                                let _ = self.send_control_response_error(&request_id, &format!("Failed to parse hook input: {e}")).await;
-                                return;
-                            }
-                        };
+                        let hook_input: crate::types::HookInput =
+                            match serde_json::from_value(input_val) {
+                                Ok(hi) => hi,
+                                Err(e) => {
+                                    let _ = self
+                                        .send_control_response_error(
+                                            &request_id,
+                                            &format!("Failed to parse hook input: {e}"),
+                                        )
+                                        .await;
+                                    return;
+                                }
+                            };
 
                         let output = cb(hook_input, tool_use_id, context).await;
                         let output_value = serde_json::to_value(&output).unwrap_or(json!({}));
@@ -712,50 +765,63 @@ impl Query {
         // Read from transport inline until we get our control_response or timeout.
         // Any non-control messages received during this wait are buffered in
         // message_tx for later consumption by receive_messages.
-        let deadline = tokio::time::Instant::now()
-            + std::time::Duration::from_secs_f64(timeout);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs_f64(timeout);
 
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 return Err(ClaudeSDKError::sdk(format!(
                     "Control request timeout: {}",
-                    request.get("subtype").and_then(|v| v.as_str()).unwrap_or("unknown")
+                    request
+                        .get("subtype")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
                 )));
             }
 
-            let read_result = tokio::time::timeout(
-                remaining,
-                self.transport.read_message(),
-            ).await;
+            let read_result = tokio::time::timeout(remaining, self.transport.read_message()).await;
 
             match read_result {
                 Err(_) => {
                     // Timeout
                     return Err(ClaudeSDKError::sdk(format!(
                         "Control request timeout: {}",
-                        request.get("subtype").and_then(|v| v.as_str()).unwrap_or("unknown")
+                        request
+                            .get("subtype")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
                     )));
                 }
                 Ok(Err(e)) => return Err(e),
                 Ok(Ok(None)) => {
                     // EOF before response
-                    return Err(ClaudeSDKError::sdk("Transport closed before control response"));
+                    return Err(ClaudeSDKError::sdk(
+                        "Transport closed before control response",
+                    ));
                 }
                 Ok(Ok(Some(message))) => {
                     let msg_type = message.get("type").and_then(|v| v.as_str()).unwrap_or("");
                     if msg_type == "control_response" {
                         if let Some(response) = message.get("response") {
-                            let resp_id = response.get("request_id")
+                            let resp_id = response
+                                .get("request_id")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("");
                             if resp_id == request_id {
-                                let subtype = response.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
+                                let subtype = response
+                                    .get("subtype")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
                                 if subtype == "error" {
-                                    let error = response.get("error").and_then(|v| v.as_str()).unwrap_or("Unknown error").to_string();
+                                    let error = response
+                                        .get("error")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("Unknown error")
+                                        .to_string();
                                     return Err(ClaudeSDKError::sdk(error));
                                 } else {
-                                    let resp_data = response.get("response").cloned().unwrap_or(json!({}));
+                                    let resp_data =
+                                        response.get("response").cloned().unwrap_or(json!({}));
                                     return Ok(resp_data);
                                 }
                             }
@@ -765,12 +831,20 @@ impl Query {
                                 pending.remove(resp_id)
                             };
                             if let Some(sender) = sender {
-                                let subtype = response.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
+                                let subtype = response
+                                    .get("subtype")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
                                 if subtype == "error" {
-                                    let error = response.get("error").and_then(|v| v.as_str()).unwrap_or("Unknown error").to_string();
+                                    let error = response
+                                        .get("error")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("Unknown error")
+                                        .to_string();
                                     let _ = sender.send(Err(error));
                                 } else {
-                                    let resp_data = response.get("response").cloned().unwrap_or(json!({}));
+                                    let resp_data =
+                                        response.get("response").cloned().unwrap_or(json!({}));
                                     let _ = sender.send(Ok(resp_data));
                                 }
                             }
