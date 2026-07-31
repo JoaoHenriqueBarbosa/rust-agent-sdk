@@ -88,6 +88,12 @@ impl InternalClient {
             });
             let skills = options.skills.clone();
 
+            // Servidores MCP in-process declarados nas opções desta chamada.
+            // Montado aqui porque `options` some dentro do transporte logo
+            // abaixo, e o `Query` precisa saber a quem entregar os
+            // `mcp_message` que o CLI vai mandar.
+            let sdk_mcp_servers = crate::sdk_mcp::registry_for_options(&options);
+
             // Use provided transport or create subprocess transport
             let mut chosen_transport: Box<dyn Transport> = match transport {
                 Some(t) => t,
@@ -123,6 +129,7 @@ impl InternalClient {
             if let Some(ref sk) = skills {
                 query.set_skills(sk.clone());
             }
+            query.set_sdk_mcp_servers(sdk_mcp_servers);
 
             // Start, initialize, write user message, spawn end_input handler
             let setup_err = async {

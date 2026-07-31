@@ -8,6 +8,7 @@ use crate::errors::{ClaudeSDKError, Result};
 use crate::internal::task::{spawn_detached, TaskHandle};
 use crate::internal::transcript_mirror::TranscriptMirrorBatcher;
 use crate::internal::transport::Transport;
+use crate::sdk_mcp::SdkMcpRegistry;
 use crate::types::{
     CanUseToolFn, HookCallbackFn, PermissionMode, PermissionResult, ToolPermissionContext,
 };
@@ -80,7 +81,7 @@ pub struct Query {
 
     // Hooks and SDK MCP servers (stored for wait_for_result logic)
     hooks: HashMap<String, Vec<serde_json::Value>>,
-    sdk_mcp_servers: HashMap<String, serde_json::Value>,
+    sdk_mcp_servers: SdkMcpRegistry,
 
     // Agent definitions and skills for initialize
     agents: Option<serde_json::Value>,
@@ -119,7 +120,7 @@ impl Query {
             first_result_fired: Arc::new(Mutex::new(false)),
             transcript_mirror_batcher: None,
             hooks: HashMap::new(),
-            sdk_mcp_servers: HashMap::new(),
+            sdk_mcp_servers: SdkMcpRegistry::new(),
             agents: None,
             exclude_dynamic_sections: None,
             skills: None,
@@ -133,6 +134,15 @@ impl Query {
 
     pub fn set_hooks(&mut self, hooks: HashMap<String, Vec<serde_json::Value>>) {
         self.hooks = hooks;
+    }
+
+    /// Registry de servidores MCP in-process desta sessão.
+    ///
+    /// Tem precedência sobre o registry global do processo
+    /// (`SdkMcpRegistry::global()`), que é a rede de segurança para os caminhos
+    /// que não montam o registry de instância.
+    pub fn set_sdk_mcp_servers(&mut self, servers: SdkMcpRegistry) {
+        self.sdk_mcp_servers = servers;
     }
 
     pub fn set_agents(&mut self, agents: serde_json::Value) {
@@ -598,6 +608,7 @@ impl Query {
                     None => Err(format!("No hook callback found for ID: {callback_id}")),
                 }
             }
+            "mcp_message" => self.handle_mcp_message(&request_data).await,
             _ => Err(format!("Unsupported control request subtype: {subtype}")),
         };
 
@@ -618,6 +629,47 @@ impl Query {
                 let _ = self.send_control_response_error(&request_id, &error).await;
             }
         }
+    }
+
+    /// Serve um `control_request` de subtype `mcp_message` com um servidor MCP
+    /// in-process.
+    ///
+    /// O CLI conversa com servidores `{"type": "sdk"}` por este canal: manda o
+    /// JSON-RPC do MCP dentro de `request.message`, com o servidor destino em
+    /// `request.server_name`, e espera a resposta embrulhada em
+    /// `{"mcp_response": ...}` dentro do `control_response` de sucesso — o
+    /// envelope está no bundle do CLI 2.1.220 (`sendMcpMessage`).
+    async fn handle_mcp_message(
+        &self,
+        request_data: &serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, String> {
+        let server_name = request_data
+            .get("server_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        // Registry da sessão primeiro; o global é a rede de segurança.
+        let server = self
+            .sdk_mcp_servers
+            .get(server_name)
+            .or_else(|| crate::sdk_mcp::SdkMcpRegistry::global().get(server_name));
+        let Some(server) = server else {
+            return Err(format!("No SDK MCP server found: {server_name}"));
+        };
+
+        let message = request_data
+            .get("message")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+
+        // Notificação (JSON-RPC sem `id`) não tem resposta, mas o
+        // control_request ainda precisa ser respondido — daí o envelope vazio.
+        let mcp_response = server
+            .handle_message(&message)
+            .await
+            .unwrap_or_else(|| json!({ "jsonrpc": "2.0", "result": {}, "id": 0 }));
+
+        Ok(json!({ "mcp_response": mcp_response }))
     }
 
     async fn send_control_response_error(&mut self, request_id: &str, error: &str) -> Result<()> {
@@ -849,7 +901,16 @@ impl Query {
                                 }
                             }
                         }
-                    } else {
+                    } else if msg_type == "control_request" {
+                        // O CLI faz perguntas enquanto espera a nossa resposta —
+                        // notadamente o handshake MCP dos servidores in-process,
+                        // que começa durante o `initialize`. Bufferizar isso como
+                        // se fosse mensagem de sessão trava os dois lados: ele
+                        // espera resposta que ninguém vai mandar.
+                        if !self.closed {
+                            self.handle_control_request(&message).await;
+                        }
+                    } else if msg_type != "control_cancel_request" {
                         // Non-control message — buffer for receive_messages
                         if let Some(ref tx) = self.message_tx {
                             let _ = tx.try_send(message);

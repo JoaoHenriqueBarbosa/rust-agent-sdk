@@ -2,6 +2,7 @@ pub mod client;
 pub mod errors;
 pub mod internal;
 pub mod query;
+pub mod sdk_mcp;
 pub mod types;
 
 /// Optional session-store backends, each gated behind a Cargo feature.
@@ -28,6 +29,10 @@ pub use internal::sessions::{
 pub use internal::task::{spawn_detached, TaskHandle};
 pub use internal::transport::{SubprocessCLITransport, Transport};
 pub use query::{query, query_collect};
+pub use sdk_mcp::{
+    PropertyKind, PropertySchema, SdkMcpRegistry, SdkMcpServer, SdkMcpServerBuilder, SdkTool,
+    ToolContent, ToolError, ToolInputSchema, ToolOutput,
+};
 pub use types::*;
 
 #[cfg(feature = "postgres")]
