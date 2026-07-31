@@ -10,7 +10,8 @@ use crate::internal::transcript_mirror::TranscriptMirrorBatcher;
 use crate::internal::transport::Transport;
 use crate::sdk_mcp::SdkMcpRegistry;
 use crate::types::{
-    CanUseToolFn, HookCallbackFn, PermissionMode, PermissionResult, ToolPermissionContext,
+    CanUseToolFn, HookCallbackFn, HookMatcher, PermissionMode, PermissionResult,
+    ToolPermissionContext,
 };
 
 /// Convert Python-safe field names to CLI-expected field names.
@@ -82,7 +83,7 @@ pub struct Query {
     transcript_mirror_batcher: Option<Arc<TranscriptMirrorBatcher>>,
 
     // Hooks and SDK MCP servers (stored for wait_for_result logic)
-    hooks: HashMap<String, Vec<serde_json::Value>>,
+    hooks: HashMap<String, Vec<HookMatcher>>,
     sdk_mcp_servers: SdkMcpRegistry,
 
     // Agent definitions and skills for initialize
@@ -134,7 +135,16 @@ impl Query {
         self.can_use_tool = Some(callback);
     }
 
-    pub fn set_hooks(&mut self, hooks: HashMap<String, Vec<serde_json::Value>>) {
+    /// Hooks desta sessão, **por handle**, indexados pelo nome do evento
+    /// (`"PostToolUse"`, `"PreToolUse"`, …).
+    ///
+    /// Recebe os `HookMatcher` inteiros, e não uma descrição JSON deles, porque
+    /// o callback é a metade que importa: o `initialize` gera um `hook_N` por
+    /// closure e o CLI devolve esse mesmo id no `control_request` de subtype
+    /// `hook_callback`. Enquanto isto tomava só JSON, as closures eram
+    /// descartadas na fronteira e todo `hook_callback` era respondido com
+    /// "No hook callback found for ID" — hook declarado, hook nunca executado.
+    pub fn set_hooks(&mut self, hooks: HashMap<String, Vec<HookMatcher>>) {
         self.hooks = hooks;
     }
 
@@ -193,34 +203,41 @@ impl Query {
             return Ok(None);
         }
 
-        // Build hooks configuration for initialization
+        // Build hooks configuration for initialization.
+        //
+        // O id gerado aqui é o contrato com o CLI: ele volta em
+        // `control_request{subtype:"hook_callback", callback_id}`. Por isso a
+        // closure é REGISTRADA no mesmo passo em que o id é criado — id sem
+        // callback registrado é hook que o CLI acha que existe e que a sessão
+        // não sabe executar.
         let mut hooks_config = serde_json::Map::new();
         for (event, matchers) in &self.hooks {
             if !matchers.is_empty() {
                 let mut event_matchers = Vec::new();
                 for matcher in matchers {
                     let mut callback_ids = Vec::new();
-                    if let Some(hooks_arr) = matcher.get("hooks").and_then(|h| h.as_array()) {
-                        for _ in hooks_arr {
-                            let callback_id = format!("hook_{}", self.next_callback_id);
-                            self.next_callback_id += 1;
-                            callback_ids.push(serde_json::Value::String(callback_id));
+                    for callback in &matcher.hooks {
+                        let callback_id = format!("hook_{}", self.next_callback_id);
+                        self.next_callback_id += 1;
+                        if let Ok(mut callbacks) = self.hook_callbacks.lock() {
+                            callbacks.insert(callback_id.clone(), callback.clone());
                         }
+                        callback_ids.push(serde_json::Value::String(callback_id));
                     }
                     let mut hook_matcher_config = serde_json::Map::new();
                     hook_matcher_config.insert(
                         "matcher".to_string(),
-                        matcher
-                            .get("matcher")
-                            .cloned()
-                            .unwrap_or(serde_json::Value::Null),
+                        match &matcher.matcher {
+                            Some(pattern) => serde_json::Value::String(pattern.clone()),
+                            None => serde_json::Value::Null,
+                        },
                     );
                     hook_matcher_config.insert(
                         "hookCallbackIds".to_string(),
                         serde_json::Value::Array(callback_ids),
                     );
-                    if let Some(timeout) = matcher.get("timeout") {
-                        hook_matcher_config.insert("timeout".to_string(), timeout.clone());
+                    if let Some(timeout) = matcher.timeout {
+                        hook_matcher_config.insert("timeout".to_string(), json!(timeout));
                     }
                     event_matchers.push(serde_json::Value::Object(hook_matcher_config));
                 }

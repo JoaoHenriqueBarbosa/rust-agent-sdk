@@ -28,6 +28,11 @@ fn to_sdk_err(e: impl std::fmt::Display) -> ClaudeSDKError {
 
 /// Table names are interpolated into SQL (identifiers cannot be bound as
 /// parameters), so they must be validated against a strict identifier pattern.
+///
+/// This function is the whole justification for the `AssertSqlSafe` wrappers
+/// below: every statement in this file is a compile-time literal plus a table
+/// name that already passed this gate in `with_pool`. No caller-supplied value
+/// ever reaches the SQL text — values are bound.
 fn valid_identifier(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
@@ -79,7 +84,7 @@ impl PostgresSessionStore {
             "#,
             table = self.table
         );
-        sqlx::raw_sql(&ddl)
+        sqlx::raw_sql(sqlx::AssertSqlSafe(ddl))
             .execute(&self.pool)
             .await
             .map_err(to_sdk_err)?;
@@ -118,7 +123,7 @@ impl SessionStore for PostgresSessionStore {
             "#,
             table = self.table
         );
-        sqlx::query(&sql)
+        sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(&key.project_key)
             .bind(&key.session_id)
             .bind(subpath_sentinel(key))
@@ -139,7 +144,7 @@ impl SessionStore for PostgresSessionStore {
              ORDER BY seq",
             table = self.table
         );
-        let rows = sqlx::query(&sql)
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(&key.project_key)
             .bind(&key.session_id)
             .bind(subpath_sentinel(key))
@@ -166,7 +171,7 @@ impl SessionStore for PostgresSessionStore {
              GROUP BY session_id",
             table = self.table
         );
-        let rows = sqlx::query(&sql)
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(project_key)
             .fetch_all(&self.pool)
             .await
@@ -201,7 +206,7 @@ impl SessionStore for PostgresSessionStore {
                 table = self.table
             )
         };
-        let mut q = sqlx::query(&sql)
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(&key.project_key)
             .bind(&key.session_id);
         if key
@@ -225,7 +230,7 @@ impl SessionStore for PostgresSessionStore {
              WHERE project_key = $1 AND session_id = $2 AND subpath <> ''",
             table = self.table
         );
-        let rows = sqlx::query(&sql)
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(&key.project_key)
             .bind(&key.session_id)
             .fetch_all(&self.pool)

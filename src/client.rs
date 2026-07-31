@@ -173,36 +173,26 @@ impl ClaudeSDKClient {
             query.set_can_use_tool(callback.clone());
         }
 
-        // Configure hooks on the query
+        // Configure hooks on the query.
+        //
+        // Os matchers vão inteiros — com as closures. Antes, esta fronteira
+        // convertia cada hook para `Value::Null` e só a FORMA chegava à
+        // `Query`: o CLI recebia os `hookCallbackIds` no initialize e, quando
+        // chamava um deles, ninguém atendia. Hook declarado nunca rodava.
         if let Some(ref hooks) = self._options.hooks {
             let mut internal_hooks = std::collections::HashMap::new();
             for (event, matchers) in hooks {
-                let mut internal_matchers = Vec::new();
-                for matcher in matchers {
-                    let mut m = serde_json::Map::new();
-                    m.insert(
-                        "matcher".to_string(),
-                        match &matcher.matcher {
-                            Some(s) => serde_json::Value::String(s.clone()),
-                            None => serde_json::Value::Null,
-                        },
-                    );
-                    let hooks_arr: Vec<serde_json::Value> = matcher
-                        .hooks
-                        .iter()
-                        .map(|_| serde_json::Value::Null)
-                        .collect();
-                    m.insert("hooks".to_string(), serde_json::Value::Array(hooks_arr));
-                    if let Some(timeout) = matcher.timeout {
-                        m.insert("timeout".to_string(), serde_json::json!(timeout));
-                    }
-                    internal_matchers.push(serde_json::Value::Object(m));
-                }
+                let internal_matchers: Vec<crate::types::HookMatcher> = matchers
+                    .iter()
+                    .map(|matcher| crate::types::HookMatcher {
+                        matcher: matcher.matcher.clone(),
+                        hooks: matcher.hooks.clone(),
+                        timeout: matcher.timeout,
+                    })
+                    .collect();
                 internal_hooks.insert(format!("{:?}", event), internal_matchers);
             }
-            let hooks_map: std::collections::HashMap<String, Vec<serde_json::Value>> =
-                internal_hooks;
-            query.set_hooks(hooks_map);
+            query.set_hooks(internal_hooks);
         }
 
         // Set agents and exclude_dynamic_sections for initialize

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::pin::Pin;
 
@@ -94,6 +95,28 @@ impl InternalClient {
             });
             let skills = options.skills.clone();
 
+            // Hooks desta chamada, extraídos ANTES de `options` ir para o
+            // transporte. Sem isto o caminho one-shot aceitava hooks e não
+            // registrava nenhum: o CLI nunca era informado no initialize e a
+            // closure morria com as options.
+            let hooks: Option<HashMap<String, Vec<crate::types::HookMatcher>>> =
+                options.hooks.as_ref().map(|hooks| {
+                    hooks
+                        .iter()
+                        .map(|(event, matchers)| {
+                            let matchers = matchers
+                                .iter()
+                                .map(|matcher| crate::types::HookMatcher {
+                                    matcher: matcher.matcher.clone(),
+                                    hooks: matcher.hooks.clone(),
+                                    timeout: matcher.timeout,
+                                })
+                                .collect();
+                            (format!("{event:?}"), matchers)
+                        })
+                        .collect()
+                });
+
             // Servidores MCP in-process declarados nas opções desta chamada.
             // Clonado aqui porque `options` some dentro do transporte logo
             // abaixo, e o `Query` precisa saber a quem entregar os
@@ -137,6 +160,9 @@ impl InternalClient {
                 query.set_skills(sk.clone());
             }
             query.set_sdk_mcp_servers(sdk_mcp_servers);
+            if let Some(hooks) = hooks {
+                query.set_hooks(hooks);
+            }
 
             // Start, initialize, write user message, spawn end_input handler
             let setup_err = async {
