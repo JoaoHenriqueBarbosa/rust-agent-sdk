@@ -606,7 +606,71 @@ async fn register_puts_the_server_in_the_global_registry_and_yields_the_config()
 }
 
 // ---------------------------------------------------------------------------
-// 10. schema — a serialização é o contrato lido pelo modelo
+// 10. registry montado a partir das opções (o caminho de uma tacada)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn registry_for_options_picks_up_declared_sdk_servers() {
+    use std::collections::HashMap;
+
+    let declared = SdkMcpServer::builder("options_case_declared")
+        .tool(
+            "add",
+            "Soma",
+            ToolInputSchema::object()
+                .required("a", PropertySchema::number())
+                .required("b", PropertySchema::number()),
+            |args: AddArgs| async move { Ok(ToolOutput::text((args.a + args.b).to_string())) },
+        )
+        .register();
+
+    let mut servers = HashMap::new();
+    servers.insert("options_case_declared".to_string(), declared);
+    // Um servidor `sdk` que ninguém registrou, e um stdio: nenhum dos dois pode
+    // entrar no registry da sessão.
+    servers.insert(
+        "options_case_missing".to_string(),
+        McpServerConfig::Sdk {
+            name: "options_case_missing".to_string(),
+        },
+    );
+    servers.insert(
+        "externo".to_string(),
+        McpServerConfig::Stdio {
+            command: "/bin/false".to_string(),
+            args: None,
+            env: None,
+        },
+    );
+
+    let options = rust_agent_sdk::types::ClaudeAgentOptions {
+        mcp_servers: rust_agent_sdk::types::McpServersConfig::Dict(servers),
+        ..Default::default()
+    };
+
+    let registry = SdkMcpRegistry::for_options(&options);
+
+    // Contrato: entra só o servidor `sdk` que está registrado — servidor não
+    // registrado e transporte externo ficam de fora.
+    assert_eq!(
+        registry.names(),
+        vec!["options_case_declared".to_string()],
+        "o registry da sessão é o recorte das opções, não o global inteiro"
+    );
+
+    // Contrato: o que entrou é o servidor de verdade, com suas tools.
+    let server = registry
+        .get("options_case_declared")
+        .expect("o servidor declarado tem de estar no registry");
+    assert_eq!(
+        server.tool_names(),
+        vec!["add".to_string()],
+        "o registry carrega o servidor com as tools, não só o nome"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 11. schema — a serialização é o contrato lido pelo modelo
 // ---------------------------------------------------------------------------
 
 #[test]

@@ -15,6 +15,12 @@ use crate::types::{ClaudeAgentOptions, Message};
 /// Internal client that manages the query lifecycle.
 pub struct InternalClient;
 
+impl Default for InternalClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InternalClient {
     pub fn new() -> Self {
         Self
@@ -92,7 +98,7 @@ impl InternalClient {
             // Montado aqui porque `options` some dentro do transporte logo
             // abaixo, e o `Query` precisa saber a quem entregar os
             // `mcp_message` que o CLI vai mandar.
-            let sdk_mcp_servers = crate::sdk_mcp::registry_for_options(&options);
+            let sdk_mcp_servers = crate::sdk_mcp::SdkMcpRegistry::for_options(&options);
 
             // Use provided transport or create subprocess transport
             let mut chosen_transport: Box<dyn Transport> = match transport {

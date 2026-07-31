@@ -724,30 +724,32 @@ impl SdkMcpRegistry {
     }
 }
 
-/// Monta um registry de instância com os servidores globais nomeados pelas
-/// entradas `{"type": "sdk"}` das opções.
-///
-/// Serve o caminho de uma tacada (`query()`), que sabe as opções na hora de
-/// construir o `Query` e não precisa depender do registry global em runtime.
-pub(crate) fn registry_for_options(options: &crate::types::ClaudeAgentOptions) -> SdkMcpRegistry {
-    let registry = SdkMcpRegistry::new();
-    if let crate::types::McpServersConfig::Dict(servers) = &options.mcp_servers {
+impl SdkMcpRegistry {
+    /// Monta um registry de instância com os servidores globais nomeados pelas
+    /// entradas `{"type": "sdk"}` das opções.
+    ///
+    /// Serve o caminho de uma tacada (`query()`), que conhece as opções na hora
+    /// de construir o `Query` e assim não depende do registry global em runtime.
+    pub fn for_options(options: &crate::types::ClaudeAgentOptions) -> SdkMcpRegistry {
+        let registry = SdkMcpRegistry::new();
+        let crate::types::McpServersConfig::Dict(servers) = &options.mcp_servers else {
+            return registry;
+        };
         for (key, config) in servers {
-            if let McpServerConfig::Sdk { name } = config {
-                // O CLI roteia pelo nome declarado; a chave do dicionário é
-                // apenas como o usuário organizou o mapa. Aceitamos os dois.
-                for candidate in [name.as_str(), key.as_str()] {
-                    if let Some(server) = SdkMcpRegistry::global().get(candidate) {
-                        registry.insert_arc(candidate.to_string(), server);
-                    }
+            let McpServerConfig::Sdk { name } = config else {
+                continue;
+            };
+            // O CLI roteia pelo nome declarado; a chave do dicionário é apenas
+            // como o consumidor organizou o mapa. Aceitamos as duas formas.
+            for candidate in [name.as_str(), key.as_str()] {
+                if let Some(server) = SdkMcpRegistry::global().get(candidate) {
+                    registry.insert_arc(candidate.to_string(), server);
                 }
             }
         }
+        registry
     }
-    registry
-}
 
-impl SdkMcpRegistry {
     fn insert_arc(&self, name: String, server: Arc<SdkMcpServer>) {
         if let Ok(mut servers) = self.servers.lock() {
             servers.insert(name, server);
