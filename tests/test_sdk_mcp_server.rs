@@ -582,7 +582,15 @@ async fn register_puts_the_server_in_the_global_registry_and_yields_the_config()
         "o CLI expõe a tool como mcp__<servidor>__<tool>"
     );
 
-    // Contrato: o `Query` sem registry de instância cai no global.
+    // Contrato: o global é DEPÓSITO, não fonte de runtime. Um `Query` sem
+    // registry de instância NÃO serve a tool, mesmo com o servidor registrado no
+    // processo — responde erro.
+    //
+    // Este teste já afirmou o contrário ("sem registry de instância, o global
+    // atende"). O fallback foi removido de propósito: como o global é indexado
+    // por nome e é do processo inteiro, ele fazia uma sessão servir a tool de um
+    // servidor que ela não declarou, com resposta bem formada e vinda do lugar
+    // errado. Ver `tests/test_streaming_sdk_mcp.rs`.
     let (transport, written) = ScriptedTransport::new(vec![mcp_request(
         "req_11",
         "global_registry_case",
@@ -598,10 +606,45 @@ async fn register_puts_the_server_in_the_global_registry_and_yields_the_config()
     while query.next_message().await.expect("leitura").is_some() {}
 
     let written = written.lock().unwrap().clone();
+    let response = written[0]
+        .get("response")
+        .expect("o control_request tem de ser respondido de algum jeito");
+    assert_eq!(
+        response.get("subtype").and_then(|s| s.as_str()),
+        Some("error"),
+        "sem registry de instância a sessão recusa, não serve do global: {written:?}"
+    );
+
+    // Contrato: o mesmo `Query`, agora com o registry montado das opções, serve.
+    // É o que prova que o depósito global continua sendo a origem legítima —
+    // via `for_options`, no connect, e não via fallback em runtime.
+    let mut servers = std::collections::HashMap::new();
+    servers.insert("global_registry_case".to_string(), config.clone());
+    let options = rust_agent_sdk::types::ClaudeAgentOptions {
+        mcp_servers: rust_agent_sdk::types::McpServersConfig::Dict(servers),
+        ..Default::default()
+    };
+
+    let (transport, written) = ScriptedTransport::new(vec![mcp_request(
+        "req_12",
+        "global_registry_case",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": { "name": "add", "arguments": { "a": 20, "b": 22 } },
+        }),
+    )]);
+    let mut query = Query::new(Box::new(transport), true, 60.0);
+    query.set_sdk_mcp_servers(SdkMcpRegistry::for_options(&options));
+    query.start().await.expect("start");
+    while query.next_message().await.expect("leitura").is_some() {}
+
+    let written = written.lock().unwrap().clone();
     assert_eq!(
         mcp_response(&written[0])["result"]["content"][0]["text"],
         "42",
-        "sem registry de instância, o global atende: {written:?}"
+        "declarado nas opções, o servidor do depósito global atende: {written:?}"
     );
 }
 
