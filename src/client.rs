@@ -1,6 +1,7 @@
 use crate::errors::{ClaudeSDKError, Result};
 use crate::internal::message_parser::parse_message;
 use crate::internal::query::Query;
+use crate::internal::session_store::SharedSessionStore;
 use crate::internal::transport::Transport;
 use crate::types::{
     ClaudeAgentOptions, ContextUsageResponse, McpServersConfig, McpStatusResponse, Message,
@@ -17,6 +18,8 @@ pub struct ClaudeSDKClient {
     _query: Option<Query>,
     _custom_transport: Option<Box<dyn Transport>>,
     _materialized: Option<crate::internal::session_resume::MaterializedResume>,
+    /// Handle compartilhado do `session_store` do usuário (ver `SharedSessionStore`).
+    _session_store: Option<SharedSessionStore>,
 }
 
 impl ClaudeSDKClient {
@@ -27,6 +30,7 @@ impl ClaudeSDKClient {
             _query: None,
             _custom_transport: None,
             _materialized: None,
+            _session_store: None,
         }
     }
 
@@ -50,6 +54,18 @@ impl ClaudeSDKClient {
 
         // Fail fast on invalid session_store option combinations
         validate_session_store_options(&self._options)?;
+
+        // Converte o store do usuário em handle compartilhável uma única vez.
+        // A partir daqui `self._options.session_store` guarda um
+        // `SharedSessionStore` equivalente, para que reconectar continue
+        // funcionando e o transporte ainda receba `--session-mirror`.
+        if self._session_store.is_none() {
+            if let Some(store) = self._options.session_store.take() {
+                let shared = SharedSessionStore::from_boxed(store);
+                self._options.session_store = Some(Box::new(shared.clone()));
+                self._session_store = Some(shared);
+            }
+        }
 
         // Validate and configure permission settings
         if self._options.can_use_tool.is_some() {
@@ -78,6 +94,12 @@ impl ClaudeSDKClient {
         let mut materialized_options = self._options.clone_without_callbacks();
         materialized_options.can_use_tool = self._options.can_use_tool.clone();
         materialized_options.stderr = self._options.stderr.clone();
+        // Sem isto o transporte não passa `--session-mirror` e o CLI nunca emite
+        // os frames `transcript_mirror` que o batcher espera.
+        materialized_options.session_store = self
+            ._session_store
+            .as_ref()
+            .map(|s| Box::new(s.clone()) as Box<dyn crate::types::SessionStore>);
 
         if let Some(ref m) = self._materialized {
             materialized_options = apply_materialized_options(materialized_options, m);
@@ -185,9 +207,47 @@ impl ClaudeSDKClient {
             query.set_skills(skills.clone());
         }
 
-        // Set up transcript mirror batcher
-        if self._options.session_store.is_some() {
-            // TODO: set up batcher when session_store is available
+        // Espelhamento de transcript para o SessionStore.
+        //
+        // O CLI só emite frames `transcript_mirror` quando recebe
+        // `--session-mirror`, e esse flag é derivado de `options.session_store`
+        // no transporte. Como `clone_without_callbacks` não consegue clonar o
+        // Box do store, o store é compartilhado via `SharedSessionStore`: uma
+        // cópia foi para as options do transporte (em `connect_with_prompt`) e
+        // outra vai para o batcher aqui.
+        if let Some(ref shared) = self._session_store {
+            let sender = query.message_sender();
+            let on_error: crate::internal::transcript_mirror::OnErrorCallback =
+                Box::new(move |key, error| {
+                    let sender = sender.clone();
+                    Box::pin(async move {
+                        // Erro de espelho não derruba a sessão: vira uma
+                        // mensagem `system/mirror_error` na fila do consumidor.
+                        if let Some(tx) = sender {
+                            let _ = tx
+                                .send(serde_json::json!({
+                                    "type": "system",
+                                    "subtype": "mirror_error",
+                                    "error": error,
+                                    "key": key,
+                                    "uuid": uuid::Uuid::new_v4().to_string(),
+                                    "session_id": key
+                                        .as_ref()
+                                        .map(|k| k.session_id.as_str())
+                                        .unwrap_or(""),
+                                }))
+                                .await;
+                        }
+                    })
+                });
+            let batcher = crate::internal::session_resume::build_mirror_batcher(
+                Box::new(shared.clone()),
+                self._materialized.as_ref(),
+                Some(&self._options.env),
+                on_error,
+                self._options.session_store_flush.clone(),
+            );
+            query.set_transcript_mirror_batcher(batcher);
         }
 
         // Start reading messages and initialize
@@ -216,7 +276,43 @@ impl ClaudeSDKClient {
         Ok(())
     }
 
+    /// Lê a próxima mensagem da sessão, ou `None` quando o stream terminou.
+    ///
+    /// É o primitivo do modo streaming: não fecha o stdin nem espera EOF, então
+    /// dá para consumir um turno e mandar outro `query()` na MESMA sessão.
+    /// Mensagens que o parser não reconhece são puladas (não terminam o stream).
+    pub async fn next_message(&mut self) -> Result<Option<Message>> {
+        let query = match self._query {
+            Some(ref mut q) => q,
+            None => {
+                return Err(ClaudeSDKError::cli_connection(
+                    "Not connected. Call connect() first.",
+                ))
+            }
+        };
+
+        loop {
+            match query.next_message().await? {
+                None => return Ok(None),
+                Some(data) => {
+                    if let Ok(Some(parsed)) = parse_message(&data) {
+                        return Ok(Some(parsed));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether `connect()` succeeded and the session is still open.
+    pub fn is_connected(&self) -> bool {
+        self._query.is_some()
+    }
+
     /// Receive all messages from Claude as a Vec (#5, #6).
+    ///
+    /// ATENÇÃO: drena até o EOF do transporte — é terminal. Numa sessão
+    /// streaming o CLI só manda EOF quando o stdin fecha, então use
+    /// `receive_response()`/`next_message()` para consumir turno a turno.
     pub async fn receive_messages(&mut self) -> Result<Vec<Message>> {
         if self._query.is_none() {
             return Err(ClaudeSDKError::cli_connection(
@@ -240,11 +336,16 @@ impl ClaudeSDKClient {
         Ok(messages)
     }
 
-    /// Receive messages until and including a ResultMessage (#5).
+    /// Recebe as mensagens do turno atual, incluindo o `ResultMessage` final.
+    ///
+    /// Para de ler assim que o `result` chega — nunca espera EOF, nunca fecha o
+    /// stdin. A sessão continua viva, então o próximo `query()` é atendido no
+    /// mesmo processo do CLI (é isso que sustenta multi-turno e o `resume`).
+    ///
+    /// Se o transporte terminar antes de um `result`, devolve o que chegou.
     pub async fn receive_response(&mut self) -> Result<Vec<Message>> {
-        let all = self.receive_messages().await?;
         let mut result = Vec::new();
-        for msg in all {
+        while let Some(msg) = self.next_message().await? {
             let is_result = matches!(&msg, Message::Result(_));
             result.push(msg);
             if is_result {
@@ -373,9 +474,20 @@ impl ClaudeSDKClient {
     }
 }
 
-// ClaudeAgentOptions helper — clone without non-Clone fields
 impl ClaudeAgentOptions {
-    fn clone_without_callbacks(&self) -> Self {
+    /// Copia as options preservando tudo que é copiável.
+    ///
+    /// `ClaudeAgentOptions` não pode derivar `Clone`: `session_store` é um
+    /// `Box<dyn SessionStore>` (objeto de trait sem `Clone`) e `hooks` carrega
+    /// closures que o SDK precisa manter registradas em um único dono. Trocar
+    /// esses campos por `Arc` quebraria a API pública de quem já constrói as
+    /// options com `Box::new(...)`, então a saída foi expor este helper: quem
+    /// monta um transporte customizado deixa de precisar construir as options
+    /// duas vezes.
+    ///
+    /// O que NÃO vem junto (fica `None`): `can_use_tool`, `hooks`,
+    /// `session_store` e `stderr`. Reatribua-os na cópia se precisar.
+    pub fn clone_without_callbacks(&self) -> Self {
         Self {
             tools: self.tools.clone(),
             allowed_tools: self.allowed_tools.clone(),

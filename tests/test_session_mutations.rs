@@ -236,7 +236,7 @@ mod test_try_append {
     #[serial]
     fn test_missing_parent_dir_returns_false() {
         let tmp = tempfile::tempdir().unwrap();
-        let config_dir = setup_config_dir(&tmp);
+        let _config_dir = setup_config_dir(&tmp);
         // No project dirs at all — just a bare projects/ dir
         let sid = uuid::Uuid::new_v4().to_string();
         let result = rename_session(&sid, "title", None);
@@ -1193,7 +1193,7 @@ mod test_fork_session {
                     None
                 }
             })
-            .last()
+            .next_back()
             .expect("should have a custom-title entry");
         assert_eq!(title_entry["customTitle"], "My Fork");
     }
@@ -1224,7 +1224,7 @@ mod test_fork_session {
                     None
                 }
             })
-            .last()
+            .next_back()
             .expect("should have a custom-title entry");
         let custom_title = title_entry["customTitle"].as_str().unwrap();
         assert!(

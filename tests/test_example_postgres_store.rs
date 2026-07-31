@@ -80,7 +80,10 @@ mod test_jsonb_ordering {
             "a": 2,
             "message": {"b": 1, "aa": 2},
         });
-        store.append(&key, &[entry.clone()]).await.unwrap();
+        store
+            .append(&key, std::slice::from_ref(&entry))
+            .await
+            .unwrap();
         let loaded = store.load(&key).await.unwrap().unwrap();
         assert_eq!(loaded, vec![entry]);
     }

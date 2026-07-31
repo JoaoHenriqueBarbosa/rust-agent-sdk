@@ -427,7 +427,7 @@ fn parse_result_message(
         }),
         permission_denials: data
             .get("permission_denials")
-            .and_then(|v| v.as_array().map(|a| a.clone())),
+            .and_then(|v| v.as_array().cloned()),
         errors: data.get("errors").and_then(|v| {
             v.as_array().map(|a| {
                 a.iter()

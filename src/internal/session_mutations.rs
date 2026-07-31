@@ -233,11 +233,7 @@ pub fn fork_session(
         let buf_len = content.len();
         let head_end = std::cmp::min(buf_len, LITE_READ_BUF_SIZE);
         let head = String::from_utf8_lossy(&content[..head_end]);
-        let tail_start = if buf_len > LITE_READ_BUF_SIZE {
-            buf_len - LITE_READ_BUF_SIZE
-        } else {
-            0
-        };
+        let tail_start = buf_len.saturating_sub(LITE_READ_BUF_SIZE);
         let tail = String::from_utf8_lossy(&content[tail_start..]);
 
         extract_last_json_string_field(&tail, "customTitle")

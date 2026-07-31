@@ -207,24 +207,13 @@ pub struct PermissionUpdate {
     pub destination: Option<PermissionUpdateDestination>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ToolPermissionContext {
     pub signal: Option<serde_json::Value>,
     #[serde(default)]
     pub suggestions: Vec<PermissionUpdate>,
     pub tool_use_id: Option<String>,
     pub agent_id: Option<String>,
-}
-
-impl Default for ToolPermissionContext {
-    fn default() -> Self {
-        Self {
-            signal: None,
-            suggestions: Vec::new(),
-            tool_use_id: None,
-            agent_id: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

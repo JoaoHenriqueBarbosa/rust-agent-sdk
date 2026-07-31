@@ -343,7 +343,7 @@ mod test_helpers {
         let project_dir = make_project_dir(&config_dir, "/test/prompt-skips-meta");
         let sid = Uuid::new_v4().to_string();
         let file_path = project_dir.join(format!("{}.jsonl", sid));
-        let lines = vec![
+        let lines = [
             json!({"type": "user", "isMeta": true, "message": {"content": "meta"}}).to_string(),
             json!({"type": "user", "message": {"content": "real prompt"}}).to_string(),
         ];
@@ -361,7 +361,7 @@ mod test_helpers {
         let project_dir = make_project_dir(&config_dir, "/test/prompt-skips-tool-result");
         let sid = Uuid::new_v4().to_string();
         let file_path = project_dir.join(format!("{}.jsonl", sid));
-        let lines = vec![
+        let lines = [
             json!({
                 "type": "user",
                 "message": {"content": [{"type": "tool_result", "content": "x"}]},
@@ -383,7 +383,7 @@ mod test_helpers {
         let project_dir = make_project_dir(&config_dir, "/test/prompt-content-blocks");
         let sid = Uuid::new_v4().to_string();
         let file_path = project_dir.join(format!("{}.jsonl", sid));
-        let lines = vec![json!({
+        let lines = [json!({
             "type": "user",
             "message": {"content": [{"type": "text", "text": "block prompt"}]},
         })
@@ -402,7 +402,7 @@ mod test_helpers {
         let project_dir = make_project_dir(&config_dir, "/test/prompt-command-fallback");
         let sid = Uuid::new_v4().to_string();
         let file_path = project_dir.join(format!("{}.jsonl", sid));
-        let lines = vec![json!({
+        let lines = [json!({
             "type": "user",
             "message": {"content": "<command-name>/help</command-name>stuff"},
         })
@@ -959,7 +959,7 @@ mod test_list_sessions {
 
         let sid = Uuid::new_v4().to_string();
         let file_path = project_dir.join(format!("{}.jsonl", sid));
-        let lines = vec![
+        let lines = [
             json!({
                 "type": "user",
                 "message": {"content": "hello"},
@@ -1402,7 +1402,7 @@ mod test_get_session_messages {
         let u1 = Uuid::new_v4().to_string();
         let a1 = Uuid::new_v4().to_string();
 
-        let lines = vec![
+        let lines = [
             make_transcript_entry_simple("user", &u1, None, &sid, "hi").to_string(),
             "not valid json {{{".to_string(),
             "".to_string(),
@@ -1497,7 +1497,7 @@ mod test_get_session_messages {
         let u1 = Uuid::new_v4().to_string();
         let a1 = Uuid::new_v4().to_string();
 
-        let lines = vec![
+        let lines = [
             make_transcript_entry_simple("user", &u1, None, &sid, "hi").to_string(),
             json!({"type": "summary", "summary": "A nice chat"}).to_string(),
             make_transcript_entry_simple("assistant", &a1, Some(&u1), &sid, "hello").to_string(),
@@ -1656,7 +1656,7 @@ mod test_tag_extraction {
         let file_path = project_dir.join(format!("{}.jsonl", sid));
 
         // Compact JSON (no spaces) — matches CLI's on-disk format
-        let lines = vec![
+        let lines = [
             json!({"type": "user", "message": {"content": "hello"}}).to_string(),
             format!(r#"{{"type":"tag","tag":"my-tag","sessionId":"{}"}}"#, sid),
         ];
@@ -1678,7 +1678,7 @@ mod test_tag_extraction {
         let sid = Uuid::new_v4().to_string();
         let file_path = project_dir.join(format!("{}.jsonl", sid));
 
-        let lines = vec![
+        let lines = [
             json!({"type": "user", "message": {"content": "hello"}}).to_string(),
             format!(
                 r#"{{"type":"tag","tag":"first-tag","sessionId":"{}"}}"#,
@@ -1707,7 +1707,7 @@ mod test_tag_extraction {
         let sid = Uuid::new_v4().to_string();
         let file_path = project_dir.join(format!("{}.jsonl", sid));
 
-        let lines = vec![
+        let lines = [
             json!({"type": "user", "message": {"content": "hello"}}).to_string(),
             format!(r#"{{"type":"tag","tag":"old-tag","sessionId":"{}"}}"#, sid),
             format!(r#"{{"type":"tag","tag":"","sessionId":"{}"}}"#, sid),
@@ -1745,7 +1745,7 @@ mod test_tag_extraction {
         let sid = Uuid::new_v4().to_string();
         let file_path = project_dir.join(format!("{}.jsonl", sid));
 
-        let lines = vec![
+        let lines = [
             json!({"type": "user", "message": {"content": "tag this v1.0"}}).to_string(),
             format!(r#"{{"type":"tag","tag":"real-tag","sessionId":"{}"}}"#, sid),
             // A tool_use entry with a "tag" key in its input — must NOT match.
@@ -1779,7 +1779,7 @@ mod test_tag_extraction {
         let sid = Uuid::new_v4().to_string();
         let file_path = project_dir.join(format!("{}.jsonl", sid));
 
-        let lines = vec![
+        let lines = [
             json!({"type": "user", "message": {"content": "build docker"}}).to_string(),
             json!({
                 "type": "assistant",
@@ -1813,7 +1813,7 @@ mod test_tag_extraction {
         let sid = Uuid::new_v4().to_string();
         let file_path = project_dir.join(format!("{}.jsonl", sid));
 
-        let lines = vec![
+        let lines = [
             json!({
                 "type": "user",
                 "message": {"content": "test prompt"},
@@ -1855,7 +1855,7 @@ mod test_created_at_extraction {
         let file_path = project_dir.join(format!("{}.jsonl", sid));
 
         // 2026-01-15T10:30:00.000Z → epoch 1768473000000 ms
-        let lines = vec![
+        let lines = [
             json!({
                 "type": "user",
                 "message": {"content": "hello"},
@@ -1887,7 +1887,7 @@ mod test_created_at_extraction {
         let sid = Uuid::new_v4().to_string();
         let file_path = project_dir.join(format!("{}.jsonl", sid));
 
-        let lines = vec![json!({
+        let lines = [json!({
             "type": "user",
             "message": {"content": "hello"},
             "timestamp": "2026-01-01T00:00:00.000Z",
@@ -1915,7 +1915,7 @@ mod test_created_at_extraction {
         let sid = Uuid::new_v4().to_string();
         let file_path = project_dir.join(format!("{}.jsonl", sid));
 
-        let lines = vec![
+        let lines = [
             json!({"type": "permission-mode", "permissionMode": "acceptEdits"}).to_string(),
             json!({
                 "type": "user",
@@ -1960,7 +1960,7 @@ mod test_created_at_extraction {
         let sid = Uuid::new_v4().to_string();
         let file_path = project_dir.join(format!("{}.jsonl", sid));
 
-        let lines = vec![json!({
+        let lines = [json!({
             "type": "user",
             "message": {"content": "hello"},
             "timestamp": "not-a-valid-iso-date",
@@ -1986,7 +1986,7 @@ mod test_created_at_extraction {
         let sid = Uuid::new_v4().to_string();
         let file_path = project_dir.join(format!("{}.jsonl", sid));
 
-        let lines = vec![json!({
+        let lines = [json!({
             "type": "user",
             "message": {"content": "hello"},
             "timestamp": "2026-01-15T10:30:00+00:00",
@@ -2151,7 +2151,7 @@ mod test_get_session_info {
         let sid = Uuid::new_v4().to_string();
         let file_path = project_dir.join(format!("{}.jsonl", sid));
 
-        let lines = vec![
+        let lines = [
             json!({"type": "user", "message": {"content": "hello"}}).to_string(),
             format!(r#"{{"type":"tag","tag":"urgent","sessionId":"{}"}}"#, sid),
         ];
@@ -2382,7 +2382,7 @@ mod test_get_subagent_messages {
         let u2 = Uuid::new_v4().to_string();
         let a2 = Uuid::new_v4().to_string();
 
-        let entries = vec![
+        let entries = [
             make_transcript_entry_simple("user", &u1, None, &sid, "task"),
             make_transcript_entry_simple("assistant", &a1, Some(&u1), &sid, "working"),
             make_transcript_entry_simple("user", &u2, Some(&a1), &sid, "continue"),
@@ -2425,7 +2425,7 @@ mod test_get_subagent_messages {
         let u1 = Uuid::new_v4().to_string();
         let a1 = Uuid::new_v4().to_string();
 
-        let entries = vec![
+        let entries = [
             make_transcript_entry_simple("user", &u1, None, &sid, "hi"),
             make_transcript_entry_simple("assistant", &a1, Some(&u1), &sid, "hello"),
         ];
@@ -2452,7 +2452,7 @@ mod test_get_subagent_messages {
         let u1 = Uuid::new_v4().to_string();
         let a1 = Uuid::new_v4().to_string();
 
-        let lines = vec![
+        let lines = [
             make_transcript_entry_simple("user", &u1, None, &sid, "hi").to_string(),
             "not valid json {".to_string(),
             "".to_string(),

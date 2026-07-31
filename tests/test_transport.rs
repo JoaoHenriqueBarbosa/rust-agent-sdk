@@ -23,6 +23,41 @@ fn make_options(f: impl FnOnce(&mut ClaudeAgentOptions)) -> ClaudeAgentOptions {
     opts
 }
 
+/// CLI falso executável para os testes que realmente dão `spawn`.
+///
+/// `DEFAULT_CLI_PATH` continua sendo `/usr/bin/claude` para os testes de
+/// construção de comando (eles só olham a string), mas quem chama `connect()`
+/// precisa de um binário que exista na máquina — senão o teste vira um teste do
+/// ambiente, não do transporte.
+fn fake_cli_path() -> PathBuf {
+    static CLI: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    CLI.get_or_init(|| {
+        // A checagem de versão spawnaria o stub de novo sem ganho nenhum.
+        std::env::set_var("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "1");
+        let dir =
+            std::env::temp_dir().join(format!("rust-agent-sdk-fake-cli-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir do CLI falso");
+        let path = dir.join("fake-claude");
+        // Consome o stdin e sai: o suficiente para exercitar spawn, write e close.
+        std::fs::write(&path, "#!/bin/sh\nexec cat >/dev/null\n").expect("script do CLI falso");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("permissão de execução");
+        }
+        path
+    })
+    .clone()
+}
+
+/// Como `make_options`, mas com um `cli_path` que dá para executar.
+fn spawnable_options(f: impl FnOnce(&mut ClaudeAgentOptions)) -> ClaudeAgentOptions {
+    let mut opts = make_options(f);
+    opts.cli_path = Some(fake_cli_path());
+    opts
+}
+
 fn make_default_options() -> ClaudeAgentOptions {
     ClaudeAgentOptions {
         cli_path: Some(PathBuf::from(DEFAULT_CLI_PATH)),
@@ -1127,7 +1162,7 @@ mod test_transport_lifecycle {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport = SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
     }
@@ -1140,7 +1175,7 @@ mod test_transport_lifecycle {
             use rust_agent_sdk::Transport;
             let mut transport = SubprocessCLITransport::new(
                 "test",
-                make_options(|o| {
+                spawnable_options(|o| {
                     o.cwd = Some(PathBuf::from("/this/directory/does/not/exist"));
                 }),
             );
@@ -1157,7 +1192,7 @@ mod test_transport_lifecycle {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport = SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
             transport.close().await.unwrap();
         });
@@ -1169,7 +1204,7 @@ mod test_transport_lifecycle {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport = SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
             transport.close().await.unwrap();
         });
@@ -1181,7 +1216,7 @@ mod test_transport_lifecycle {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport = SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
             transport.close().await.unwrap();
         });
@@ -1196,7 +1231,7 @@ mod test_transport_lifecycle {
             let mut transport = SubprocessCLITransport::new(
                 "test",
                 ClaudeAgentOptions {
-                    cli_path: Some(PathBuf::from("/usr/bin/claude")),
+                    cli_path: Some(fake_cli_path()),
                     ..Default::default()
                 },
             );
@@ -1214,7 +1249,7 @@ mod test_transport_lifecycle {
             let mut transport = SubprocessCLITransport::new(
                 "test",
                 ClaudeAgentOptions {
-                    cli_path: Some(PathBuf::from("/usr/bin/claude")),
+                    cli_path: Some(fake_cli_path()),
                     ..Default::default()
                 },
             );
@@ -1240,7 +1275,7 @@ mod test_env_vars {
             env.insert("MY_TEST_VAR".into(), "test-value".into());
             let mut transport = SubprocessCLITransport::new(
                 "test",
-                make_options(|o| {
+                spawnable_options(|o| {
                     o.env = env;
                 }),
             );
@@ -1258,7 +1293,7 @@ mod test_env_vars {
             env.insert("CLAUDE_CODE_ENTRYPOINT".into(), "custom-caller".into());
             let mut transport = SubprocessCLITransport::new(
                 "test",
-                make_options(|o| {
+                spawnable_options(|o| {
                     o.env = env;
                 }),
             );
@@ -1272,7 +1307,7 @@ mod test_env_vars {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport = SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
     }
@@ -1287,7 +1322,7 @@ mod test_env_vars {
             env.insert("TRACEPARENT".into(), "custom".into());
             let mut transport = SubprocessCLITransport::new(
                 "test",
-                make_options(|o| {
+                spawnable_options(|o| {
                     o.env = env;
                 }),
             );
@@ -1301,7 +1336,7 @@ mod test_env_vars {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport = SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
     }
@@ -1312,7 +1347,7 @@ mod test_env_vars {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport = SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
     }
@@ -1323,7 +1358,7 @@ mod test_env_vars {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport = SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
     }
@@ -1334,7 +1369,7 @@ mod test_env_vars {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport = SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
     }
@@ -1345,7 +1380,7 @@ mod test_env_vars {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport = SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
     }
@@ -1356,7 +1391,7 @@ mod test_env_vars {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport = SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
     }
@@ -1371,7 +1406,7 @@ mod test_env_vars {
             env.insert("CLAUDECODE".into(), "1".into());
             let mut transport = SubprocessCLITransport::new(
                 "test",
-                make_options(|o| {
+                spawnable_options(|o| {
                     o.env = env;
                 }),
             );
@@ -1387,7 +1422,7 @@ mod test_env_vars {
             use rust_agent_sdk::Transport;
             let mut transport = SubprocessCLITransport::new(
                 "test",
-                make_options(|o| {
+                spawnable_options(|o| {
                     o.user = Some("claude".into());
                 }),
             );
@@ -1409,7 +1444,7 @@ mod test_version_checks {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport = SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             // connect() triggers version check, which is todo!()
             transport.connect().await.unwrap();
         });
@@ -1421,7 +1456,7 @@ mod test_version_checks {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport = SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
     }
@@ -1457,7 +1492,7 @@ mod test_atexit_child_cleanup {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport = SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
             // Would test child process cleanup here once implemented
         });

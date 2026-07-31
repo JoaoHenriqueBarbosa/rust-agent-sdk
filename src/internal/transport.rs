@@ -687,14 +687,25 @@ impl Transport for SubprocessCLITransport {
         // User option passthrough (#20) — set via uid on unix
         #[cfg(unix)]
         if let Some(ref user) = self.options.user {
+            // `tokio::process::Command::uid` é inerente no unix — não precisa do
+            // trait `CommandExt` da std (importá-lo só gerava warning).
             if let Ok(uid) = user.parse::<u32>() {
-                use std::os::unix::process::CommandExt;
                 command.uid(uid);
             }
         }
 
         let mut child = command.spawn().map_err(|e| {
-            ClaudeSDKError::cli_connection(format!("Failed to spawn CLI process: {}", e))
+            // O erro cru do SO ("No such file or directory") não diz QUAL
+            // caminho faltou; sem o cwd e o binário na mensagem, diagnosticar
+            // um spawn falho vira adivinhação.
+            let cwd_note = match &self.options.cwd {
+                Some(cwd) => format!(" (cwd: {})", cwd.to_string_lossy()),
+                None => String::new(),
+            };
+            ClaudeSDKError::cli_connection(format!(
+                "Failed to spawn CLI process '{}'{}: {}",
+                program, cwd_note, e
+            ))
         })?;
 
         // Track child for atexit cleanup (#15)
@@ -838,8 +849,14 @@ impl Transport for SubprocessCLITransport {
                 match serde_json::from_str::<serde_json::Value>(trimmed) {
                     Ok(val) => return Ok(Some(val)),
                     Err(_) => {
-                        // Incomplete JSON — start buffering
-                        self.json_buffer.push_str(trimmed);
+                        // Só um OBJETO pode estar partido ao meio: o protocolo
+                        // stream-json manda um objeto por linha. Linhas de
+                        // debug do CLI começam com '[' (ex.: "[SandboxDebug]…")
+                        // e nunca completam — bufferizá-las envenenava o parser
+                        // e engolia todas as mensagens seguintes (#347).
+                        if trimmed.starts_with('{') {
+                            self.json_buffer.push_str(trimmed);
+                        }
                     }
                 }
             } else {

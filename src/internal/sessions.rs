@@ -43,7 +43,7 @@ pub fn simple_hash(s: &str) -> String {
         let char_code = ch as u32 as i64;
         h = (h << 5).wrapping_sub(h).wrapping_add(char_code);
         // Emulate JS `hash |= 0` (coerce to 32-bit signed int)
-        h = h & 0xFFFF_FFFF;
+        h &= 0xFFFF_FFFF;
         if h >= 0x8000_0000 {
             h -= 0x1_0000_0000;
         }
@@ -557,7 +557,7 @@ fn apply_sort_limit_offset(
     limit: Option<usize>,
     offset: usize,
 ) -> Vec<SDKSessionInfo> {
-    sessions.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.last_modified));
     if offset > 0 {
         if offset >= sessions.len() {
             return Vec::new();
@@ -609,7 +609,7 @@ fn list_sessions_for_project(
             (wt.clone(), sanitized)
         })
         .collect();
-    indexed.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    indexed.sort_by_key(|(_, sanitized)| std::cmp::Reverse(sanitized.len()));
 
     let all_dirents: Vec<PathBuf> = match fs::read_dir(&projects_dir) {
         Ok(entries) => entries
@@ -1221,7 +1221,7 @@ fn entries_to_subagent_messages(
             let t = e.get("type").and_then(|v| v.as_str()).unwrap_or("");
             t == "user" || t == "assistant"
         })
-        .map(|e| to_session_message(e))
+        .map(to_session_message)
         .collect();
 
     if let Some(limit) = limit {
@@ -1316,7 +1316,7 @@ pub async fn list_sessions_from_store(
     use std::collections::HashMap as Map;
 
     let project_key = project_key_for_directory(directory)?;
-    let project_path = directory.map(|d| canonicalize_path(d));
+    let project_path = directory.map(canonicalize_path);
     let project_path_ref = project_path.as_deref();
 
     let has_list_sessions = session_store.has_list_sessions();
@@ -1385,7 +1385,7 @@ pub async fn list_sessions_from_store(
             }
 
             // Paginate BEFORE gap-fill so load() count is bounded by page size
-            slots.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+            slots.sort_by_key(|slot| std::cmp::Reverse(slot.mtime));
             let page: Vec<Slot> = {
                 let after_offset = if offset > 0 {
                     &slots[offset.min(slots.len())..]
@@ -1490,7 +1490,7 @@ pub async fn get_session_info_from_store(
     }
 
     let project_key = project_key_for_directory(directory)?;
-    let project_path = directory.map(|d| canonicalize_path(d));
+    let project_path = directory.map(canonicalize_path);
     let project_path_ref = project_path.as_deref();
 
     let key = SessionKey::new(&project_key, session_id);

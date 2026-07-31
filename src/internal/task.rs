@@ -63,10 +63,7 @@ impl TaskHandle {
                     } else {
                         "task panicked".to_string()
                     };
-                    Err(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        msg,
-                    )))
+                    Err(Box::new(std::io::Error::other(msg)))
                 }
             }
         } else {

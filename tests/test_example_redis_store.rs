@@ -139,7 +139,7 @@ mod test_append {
         // contract says load returns None for unknown keys. After appending
         // an empty list the key may or may not exist — either behavior is
         // acceptable. We check that list_sessions shows nothing.
-        let sessions = store.list_sessions("proj").await.unwrap();
+        let _sessions = store.list_sessions("proj").await.unwrap();
         // Even if the key was stored, it should appear in sessions list (empty append is still an append).
         // The Python test asserts no keys at all; InMemorySessionStore creates the key.
         // We verify no entries were stored.

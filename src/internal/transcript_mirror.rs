@@ -19,7 +19,6 @@ const MIRROR_APPEND_BACKOFF_S: &[f64] = &[0.2, 0.8];
 struct MirrorEntry {
     file_path: String,
     entries: Vec<SessionStoreEntry>,
-    bytes: usize,
 }
 
 /// On-error callback type: receives the session key (if resolvable) and error message.
@@ -98,7 +97,6 @@ impl TranscriptMirrorBatcher {
             pending.push(MirrorEntry {
                 file_path: file_path.to_string(),
                 entries: entries.to_vec(),
-                bytes: size,
             });
             let mut ec = self.inner.pending_entry_count.lock().unwrap();
             *ec += entries.len();

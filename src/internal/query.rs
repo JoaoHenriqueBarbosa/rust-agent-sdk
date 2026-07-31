@@ -36,6 +36,10 @@ fn convert_hook_output_for_cli(hook_output: serde_json::Value) -> serde_json::Va
     }
 }
 
+/// Canal de resposta de um control_request em voo, indexado por request_id.
+type ControlResponseSender = oneshot::Sender<std::result::Result<serde_json::Value, String>>;
+type PendingControlResponses = Arc<Mutex<HashMap<String, ControlResponseSender>>>;
+
 /// Query — bidirectional control protocol handler.
 ///
 /// Manages:
@@ -51,9 +55,7 @@ pub struct Query {
 
     // Control protocol state
     request_counter: u64,
-    pending_control_responses: Arc<
-        Mutex<HashMap<String, oneshot::Sender<std::result::Result<serde_json::Value, String>>>>,
-    >,
+    pending_control_responses: PendingControlResponses,
 
     // Callbacks
     can_use_tool: Option<CanUseToolFn>,
@@ -159,6 +161,16 @@ impl Query {
 
     pub fn set_transcript_mirror_batcher(&mut self, batcher: TranscriptMirrorBatcher) {
         self.transcript_mirror_batcher = Some(Arc::new(batcher));
+    }
+
+    /// Clone do lado de escrita do canal interno de mensagens.
+    ///
+    /// Existe para que quem constrói a `Query` (o cliente) possa injetar
+    /// mensagens sintéticas — hoje só erros do espelho de transcript — na mesma
+    /// fila que o consumidor drena em `next_message`. Sem isso, o callback de
+    /// erro do batcher não teria como falar com o consumidor.
+    pub fn message_sender(&self) -> Option<mpsc::Sender<serde_json::Value>> {
+        self.message_tx.clone()
     }
 
     pub fn report_mirror_error(&self, key: Option<crate::types::SessionKey>, error: String) {
@@ -358,7 +370,14 @@ impl Query {
         }
 
         loop {
-            let msg = self.transport.read_message().await?;
+            // Mensagens que chegaram enquanto esperávamos um control_response
+            // ficaram bufferizadas em `message_tx`; elas são cronologicamente
+            // anteriores a qualquer coisa ainda no transporte, então saem
+            // primeiro. Sem esta drenagem elas se perdiam de vez.
+            let msg = match self.take_buffered_message() {
+                Some(buffered) => Some(buffered),
+                None => self.transport.read_message().await?,
+            };
             match msg {
                 None => {
                     self.finalize_stream().await;
@@ -458,6 +477,11 @@ impl Query {
                 }
             }
         }
+    }
+
+    /// Retira, sem bloquear, a próxima mensagem já bufferizada no canal interno.
+    fn take_buffered_message(&mut self) -> Option<serde_json::Value> {
+        self.message_rx.as_mut().and_then(|rx| rx.try_recv().ok())
     }
 
     /// Finalize the message stream: flush mirror, notify waiters, end input.

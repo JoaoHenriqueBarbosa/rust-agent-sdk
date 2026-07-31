@@ -1,25 +1,170 @@
 //! Tests for ClaudeSDKClient streaming functionality — ported from Python test_streaming_client.py.
+//!
+//! The transport here is *scripted*: it answers control requests (initialize,
+//! mcp_status, get_context_usage, …) and, for every user message written to it,
+//! queues one full turn (assistant → user echo → assistant → result). That is
+//! what the Python suite got from mocking the subprocess.
 
 use rust_agent_sdk::{
     ClaudeAgentOptions, ClaudeSDKClient, ClaudeSDKError, ContentBlock, ContextUsageResponse,
     McpStatusResponse, Message, Transport,
 };
+use serde_json::json;
+use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
-// MockTransport
+// MockTransport — scripted CLI stand-in
 // ---------------------------------------------------------------------------
 
 struct MockTransport {
     connected: bool,
-    written: Vec<String>,
+    written: Arc<Mutex<Vec<String>>>,
+    outgoing: VecDeque<serde_json::Value>,
 }
 
 impl MockTransport {
     fn new() -> Self {
         Self {
             connected: false,
-            written: Vec::new(),
+            written: Arc::new(Mutex::new(Vec::new())),
+            outgoing: VecDeque::new(),
+        }
+    }
+
+    fn control_ok(request_id: &str, response: serde_json::Value) -> serde_json::Value {
+        json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request_id,
+                "response": response,
+            }
+        })
+    }
+
+    fn mcp_status_fixture() -> serde_json::Value {
+        json!({
+            "mcpServers": [
+                {
+                    "name": "my-http-server",
+                    "status": "connected",
+                    "serverInfo": {"name": "my-http-server", "version": "1.0.0"},
+                    "config": {"type": "http", "url": "https://example.com/mcp"},
+                    "scope": "project",
+                    "tools": [
+                        {
+                            "name": "greet",
+                            "description": "Greets someone",
+                            "annotations": {"readOnly": true}
+                        },
+                        {"name": "reset"}
+                    ]
+                },
+                {
+                    "name": "failed-server",
+                    "status": "failed",
+                    "error": "Connection refused"
+                },
+                {
+                    "name": "proxy-server",
+                    "status": "connected",
+                    "config": {"type": "claudeai-proxy", "url": "https://proxy", "id": "abc"}
+                }
+            ]
+        })
+    }
+
+    fn context_usage_fixture() -> serde_json::Value {
+        json!({
+            "categories": [
+                {"name": "System prompt", "tokens": 3200, "color": "blue"},
+                {"name": "Messages", "tokens": 95000, "color": "green"}
+            ],
+            "totalTokens": 98200,
+            "maxTokens": 155000,
+            "rawMaxTokens": 200000,
+            "percentage": 49.1,
+            "model": "claude-sonnet-4-5",
+            "isAutoCompactEnabled": true,
+            "memoryFiles": [],
+            "mcpTools": [],
+            "agents": [],
+            "gridRows": []
+        })
+    }
+
+    /// One complete turn: two assistant messages, the user echo, and the result.
+    fn queue_turn(&mut self, prompt: &str) {
+        self.outgoing.push_back(json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": format!("Answering: {prompt}")}],
+                "model": "claude-sonnet-4-5"
+            }
+        }));
+        self.outgoing.push_back(json!({
+            "type": "user",
+            "message": {"role": "user", "content": prompt},
+            "session_id": "test-session"
+        }));
+        self.outgoing.push_back(json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Done."}],
+                "model": "claude-sonnet-4-5"
+            }
+        }));
+        self.outgoing.push_back(json!({
+            "type": "result",
+            "subtype": "success",
+            "duration_ms": 10,
+            "duration_api_ms": 8,
+            "is_error": false,
+            "num_turns": 1,
+            "session_id": "test-session",
+            "total_cost_usd": 0.001
+        }));
+    }
+
+    fn handle_written(&mut self, data: &str) {
+        let value: serde_json::Value = match serde_json::from_str(data.trim()) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        match value.get("type").and_then(|t| t.as_str()) {
+            Some("control_request") => {
+                let request_id = value
+                    .get("request_id")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("req_1")
+                    .to_string();
+                let subtype = value
+                    .get("request")
+                    .and_then(|r| r.get("subtype"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("");
+                let response = match subtype {
+                    "mcp_status" => Self::mcp_status_fixture(),
+                    "get_context_usage" => Self::context_usage_fixture(),
+                    _ => json!({}),
+                };
+                self.outgoing
+                    .push_back(Self::control_ok(&request_id, response));
+            }
+            Some("user") => {
+                let prompt = value
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                self.queue_turn(&prompt);
+            }
+            _ => {}
         }
     }
 }
@@ -37,7 +182,8 @@ impl Transport for MockTransport {
     }
 
     async fn write(&mut self, data: &str) -> rust_agent_sdk::errors::Result<()> {
-        self.written.push(data.to_string());
+        self.written.lock().unwrap().push(data.to_string());
+        self.handle_written(data);
         Ok(())
     }
 
@@ -47,6 +193,10 @@ impl Transport for MockTransport {
 
     fn is_ready(&self) -> bool {
         self.connected
+    }
+
+    async fn read_message(&mut self) -> rust_agent_sdk::errors::Result<Option<serde_json::Value>> {
+        Ok(self.outgoing.pop_front())
     }
 }
 
@@ -62,10 +212,12 @@ async fn test_auto_connect_with_context_manager() {
     let mut client = ClaudeSDKClient::new(options).with_transport(transport);
 
     client.connect().await.unwrap();
-    assert!(client._transport.is_some());
+    // Contract: after connect the session is live (the transport itself is owned
+    // by the Query, so `_transport` is intentionally None).
+    assert!(client.is_connected());
 
     client.disconnect().await.unwrap();
-    assert!(client._transport.is_none());
+    assert!(!client.is_connected());
 }
 
 /// Test manual connect and disconnect.
@@ -76,10 +228,10 @@ async fn test_manual_connect_disconnect() {
     let mut client = ClaudeSDKClient::new(options).with_transport(transport);
 
     client.connect().await.unwrap();
-    assert!(client._transport.is_some());
+    assert!(client.is_connected());
 
     client.disconnect().await.unwrap();
-    assert!(client._transport.is_none());
+    assert!(!client.is_connected());
 }
 
 /// Test connecting with a string prompt writes it as a user message.
@@ -135,7 +287,7 @@ async fn test_query() {
         Message::User(u) => {
             matches!(&u.content, rust_agent_sdk::MessageContent::Text(t) if t == "Test message")
         }
-        _ => true,
+        _ => false,
     });
     assert!(has_content);
 }
@@ -143,8 +295,10 @@ async fn test_query() {
 /// Test sending a message with custom session ID.
 #[tokio::test]
 async fn test_send_message_with_session_id() {
-    let mut options = ClaudeAgentOptions::default();
-    options.session_id = Some("custom-session".to_string());
+    let options = ClaudeAgentOptions {
+        session_id: Some("custom-session".to_string()),
+        ..Default::default()
+    };
 
     let transport = Box::new(MockTransport::new());
     let mut client = ClaudeSDKClient::new(options).with_transport(transport);
@@ -418,7 +572,7 @@ async fn test_get_context_usage() {
 
     assert_eq!(usage.total_tokens, 98200);
     assert_eq!(usage.max_tokens, 155000);
-    assert!((usage.percentage - 49.1).abs() < f64::EPSILON);
+    assert!((usage.percentage - 49.1).abs() < 1e-9);
     assert_eq!(usage.model, "claude-sonnet-4-5");
     assert!(usage.is_auto_compact_enabled);
     assert_eq!(usage.categories.len(), 2);
@@ -546,11 +700,13 @@ async fn test_double_connect() {
 
     // First connect
     client.connect().await.unwrap();
-    assert!(client._transport.is_some());
+    assert!(client.is_connected());
 
-    // Second connect should create new transport (or succeed without error)
+    // A second connect needs its own transport: the first one was handed over
+    // to the Query and cannot be reused.
+    client = client.with_transport(Box::new(MockTransport::new()));
     client.connect().await.unwrap();
-    assert!(client._transport.is_some());
+    assert!(client.is_connected());
 }
 
 /// Test disconnecting without connecting first.
@@ -578,7 +734,7 @@ async fn test_context_manager_with_exception() {
 
     // Disconnect should still succeed (cleanup equivalent)
     client.disconnect().await.unwrap();
-    assert!(client._transport.is_none());
+    assert!(!client.is_connected());
 }
 
 /// Test collecting messages with list comprehension as shown in examples.

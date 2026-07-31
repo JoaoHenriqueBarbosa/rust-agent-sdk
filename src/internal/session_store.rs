@@ -8,6 +8,83 @@ use crate::types::{
     SessionSummaryEntry,
 };
 
+/// Handle clonável para um `SessionStore` já existente.
+///
+/// `ClaudeAgentOptions::session_store` guarda um `Box<dyn SessionStore>`, que
+/// não é clonável — e a sessão precisa do mesmo store em dois lugares: nas
+/// options do transporte (é de lá que sai o flag `--session-mirror`) e no
+/// batcher que grava os frames espelhados. Este wrapper resolve isso sem mudar
+/// a assinatura pública do campo: o `Box` original é convertido uma vez em
+/// `Arc` e cada consumidor recebe um `SharedSessionStore` que delega tudo.
+#[derive(Clone)]
+pub struct SharedSessionStore(std::sync::Arc<dyn SessionStore>);
+
+impl SharedSessionStore {
+    /// Consome o `Box` do usuário e devolve um handle compartilhável.
+    pub fn from_boxed(store: Box<dyn SessionStore>) -> Self {
+        Self(std::sync::Arc::from(store))
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionStore for SharedSessionStore {
+    async fn append(
+        &self,
+        key: &SessionKey,
+        entries: &[SessionStoreEntry],
+    ) -> std::result::Result<(), ClaudeSDKError> {
+        self.0.append(key, entries).await
+    }
+
+    async fn load(
+        &self,
+        key: &SessionKey,
+    ) -> std::result::Result<Option<Vec<SessionStoreEntry>>, ClaudeSDKError> {
+        self.0.load(key).await
+    }
+
+    async fn list_sessions(
+        &self,
+        project_key: &str,
+    ) -> std::result::Result<Vec<SessionStoreListEntry>, ClaudeSDKError> {
+        self.0.list_sessions(project_key).await
+    }
+
+    async fn list_session_summaries(
+        &self,
+        project_key: &str,
+    ) -> std::result::Result<Vec<SessionSummaryEntry>, ClaudeSDKError> {
+        self.0.list_session_summaries(project_key).await
+    }
+
+    async fn delete(&self, key: &SessionKey) -> std::result::Result<(), ClaudeSDKError> {
+        self.0.delete(key).await
+    }
+
+    async fn list_subkeys(
+        &self,
+        key: &SessionListSubkeysKey,
+    ) -> std::result::Result<Vec<String>, ClaudeSDKError> {
+        self.0.list_subkeys(key).await
+    }
+
+    fn has_list_sessions(&self) -> bool {
+        self.0.has_list_sessions()
+    }
+
+    fn has_delete(&self) -> bool {
+        self.0.has_delete()
+    }
+
+    fn has_list_subkeys(&self) -> bool {
+        self.0.has_list_subkeys()
+    }
+
+    fn has_list_session_summaries(&self) -> bool {
+        self.0.has_list_session_summaries()
+    }
+}
+
 /// In-memory reference implementation of SessionStore for testing.
 pub struct InMemorySessionStore {
     data: Mutex<HashMap<String, Vec<SessionStoreEntry>>>,

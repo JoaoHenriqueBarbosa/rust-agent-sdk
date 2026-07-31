@@ -5,8 +5,8 @@ use rust_agent_sdk::internal::client::InternalClient;
 use rust_agent_sdk::internal::query::Query;
 use rust_agent_sdk::internal::transport::Transport;
 use rust_agent_sdk::types::{
-    ClaudeAgentOptions, HookCallbackFn, HookContext, HookEvent, HookJSONOutput, HookMatcher,
-    HookSpecificOutput, PermissionResultAllow, PermissionResultDeny, ToolPermissionContext,
+    ClaudeAgentOptions, HookCallbackFn, HookEvent, HookJSONOutput, HookMatcher, HookSpecificOutput,
+    PermissionResultAllow, PermissionResultDeny, ToolPermissionContext,
 };
 use serde_json::json;
 
@@ -16,7 +16,6 @@ use serde_json::json;
 
 struct MockTransport {
     written_messages: Arc<Mutex<Vec<String>>>,
-    messages_to_read: Vec<serde_json::Value>,
     connected: bool,
 }
 
@@ -24,13 +23,8 @@ impl MockTransport {
     fn new() -> Self {
         Self {
             written_messages: Arc::new(Mutex::new(Vec::new())),
-            messages_to_read: Vec::new(),
             connected: false,
         }
-    }
-
-    fn written(&self) -> Vec<String> {
-        self.written_messages.lock().unwrap().clone()
     }
 }
 
@@ -74,7 +68,7 @@ mod test_tool_permission_callbacks {
         let callback_invoked_clone = callback_invoked.clone();
 
         let transport = MockTransport::new();
-        let written = transport.written_messages.clone();
+        let _written = transport.written_messages.clone();
 
         // The Query should accept a can_use_tool callback and invoke it
         // when a "can_use_tool" control_request arrives.
@@ -288,7 +282,7 @@ mod test_hook_callbacks {
         let hook_calls: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
         let hook_calls_clone = hook_calls.clone();
 
-        let test_hook: HookCallbackFn = Arc::new(move |input, tool_use_id, _context| {
+        let _test_hook: HookCallbackFn = Arc::new(move |input, tool_use_id, _context| {
             let calls = hook_calls_clone.clone();
             Box::pin(async move {
                 calls.lock().unwrap().push(json!({
@@ -331,7 +325,7 @@ mod test_hook_callbacks {
     /// Test that all SyncHookJSONOutput fields are properly handled.
     #[tokio::test]
     async fn test_hook_output_fields() {
-        let comprehensive_hook: HookCallbackFn = Arc::new(|_input, _tool_use_id, _context| {
+        let _comprehensive_hook: HookCallbackFn = Arc::new(|_input, _tool_use_id, _context| {
             Box::pin(async move {
                 HookJSONOutput::Sync {
                     continue_: Some(true),
@@ -584,7 +578,7 @@ mod test_hook_event_callbacks {
         let hook_calls: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
         let hook_calls_clone = hook_calls.clone();
 
-        let notification_hook: HookCallbackFn = Arc::new(move |_input, _tool_use_id, _context| {
+        let _notification_hook: HookCallbackFn = Arc::new(move |_input, _tool_use_id, _context| {
             let calls = hook_calls_clone.clone();
             Box::pin(async move {
                 calls.lock().unwrap().push(json!({"event": "notification"}));
