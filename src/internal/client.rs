@@ -95,10 +95,11 @@ impl InternalClient {
             let skills = options.skills.clone();
 
             // Servidores MCP in-process declarados nas opções desta chamada.
-            // Montado aqui porque `options` some dentro do transporte logo
+            // Clonado aqui porque `options` some dentro do transporte logo
             // abaixo, e o `Query` precisa saber a quem entregar os
-            // `mcp_message` que o CLI vai mandar.
-            let sdk_mcp_servers = crate::sdk_mcp::SdkMcpRegistry::for_options(&options);
+            // `mcp_message` que o CLI vai mandar. O clone é um mapa próprio de
+            // `Arc`s — nada é compartilhado com outra sessão.
+            let sdk_mcp_servers = options.sdk_mcp_servers.clone();
 
             // Use provided transport or create subprocess transport
             let mut chosen_transport: Box<dyn Transport> = match transport {

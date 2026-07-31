@@ -15,12 +15,13 @@
 //!
 //! ```no_run
 //! use rust_agent_sdk::sdk_mcp::{PropertySchema, SdkMcpServer, ToolInputSchema, ToolOutput};
+//! use rust_agent_sdk::ClaudeAgentOptions;
 //! use serde::Deserialize;
 //!
 //! #[derive(Deserialize)]
 //! struct Add { a: f64, b: f64 }
 //!
-//! let config = SdkMcpServer::builder("calc")
+//! let server = SdkMcpServer::builder("calc")
 //!     .tool(
 //!         "add",
 //!         "Soma dois números",
@@ -29,34 +30,48 @@
 //!             .required("b", PropertySchema::number()),
 //!         |args: Add| async move { Ok(ToolOutput::text((args.a + args.b).to_string())) },
 //!     )
-//!     .register();
-//! // `config` vai para `ClaudeAgentOptions::mcp_servers`.
+//!     .build();
+//!
+//! // Uma chamada declara o servidor para o CLI (`--mcp-config`) E guarda o
+//! // handle dentro das opções desta sessão.
+//! let options = ClaudeAgentOptions::default().with_sdk_mcp_server(server);
 //! ```
 //!
 //! ## Onde mora o registry
 //!
 //! O roteamento é por **nome**: o CLI manda `server_name` em cada
 //! `mcp_message`, e o mesmo nome está no `--mcp-config`. Por isso o registry é
-//! indexado por nome. Existem dois níveis:
+//! indexado por nome — mas o registry é **da sessão**, não do processo.
 //!
-//! - [`SdkMcpRegistry::global()`] — onde [`SdkMcpServerBuilder::register`]
-//!   deposita o servidor. É o que atende o caminho do [`crate::ClaudeSDKClient`].
-//! - um registry de instância, que pode ser plugado num `Query` com
-//!   `set_sdk_mcp_servers`. É o que o caminho de uma tacada (`query()`) usa,
-//!   montado a partir das `ClaudeAgentOptions` da chamada.
+//! [`ClaudeAgentOptions::sdk_mcp_servers`] é um [`SdkMcpRegistry`] por valor:
+//! as opções carregam o `Arc<SdkMcpServer>` em si, não uma referência simbólica
+//! a um depósito compartilhado. No `connect` o cliente clona esse registry para
+//! dentro do `Query`, e é ele a ÚNICA fonte consultada em runtime.
 //!
-//! O registry de instância vence; o global é a rede de segurança. Consequência
-//! prática do global: dois servidores **diferentes** com o **mesmo nome** no
-//! mesmo processo colidem (o último registrado vence). Como o nome também é o
-//! que o CLI usa para rotear e o que prefixa as tools
-//! (`mcp__<servidor>__<tool>`), nomes distintos já eram obrigatórios.
+//! Isso é o conserto de um defeito real: até a versão anterior existia um
+//! `SdkMcpRegistry::global()` estático, indexado por nome, no qual
+//! `SdkMcpServerBuilder::register()` depositava e do qual nada removia. Duas
+//! consequências, ambas mordendo um worker que abre uma sessão por documento no
+//! mesmo processo:
+//!
+//! - **colisão** — duas sessões concorrentes com servidores homônimos pegavam a
+//!   MESMA entrada (a última registrada), e a tool executada não era a que a
+//!   sessão declarou;
+//! - **vazamento** — nada removia a entrada, então cada sessão vazava um
+//!   `SdkMcpServer` inteiro (com tudo capturado pelas closures das tools) pelo
+//!   resto da vida do processo.
+//!
+//! Com o handle nas opções, duas sessões homônimas são naturalmente isoladas
+//! (cada `Query` tem o seu registry) e o servidor morre quando a sessão morre
+//! (o `Arc` só é mantido pelas opções e pelo `Query`). Não há mais estado
+//! estático nenhum neste módulo.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -508,14 +523,6 @@ impl SdkMcpServer {
         }
     }
 
-    /// Registra este servidor no registry global do processo e devolve a config
-    /// para colocar em `ClaudeAgentOptions::mcp_servers`.
-    pub fn register(self) -> McpServerConfig {
-        let config = self.config();
-        SdkMcpRegistry::global().insert(self);
-        config
-    }
-
     /// Serve uma mensagem JSON-RPC do MCP.
     ///
     /// Devolve `None` para notificações (mensagem sem `id`), que por contrato do
@@ -641,7 +648,12 @@ impl SdkMcpServerBuilder {
         self
     }
 
-    /// Fecha a construção sem registrar.
+    /// Fecha a construção.
+    ///
+    /// O que se faz com o resultado é declará-lo numa sessão, com
+    /// [`crate::ClaudeAgentOptions::with_sdk_mcp_server`] (ou
+    /// `add_sdk_mcp_server`). Não existe registro global: o dono do servidor
+    /// são as opções da sessão.
     pub fn build(self) -> SdkMcpServer {
         SdkMcpServer {
             name: self.name,
@@ -650,10 +662,11 @@ impl SdkMcpServerBuilder {
         }
     }
 
-    /// Fecha a construção, registra o servidor no registry global e devolve a
-    /// config para colocar em `ClaudeAgentOptions::mcp_servers`.
-    pub fn register(self) -> McpServerConfig {
-        self.build().register()
+    /// Fecha a construção já embrulhando num `Arc`, para quem vai declarar o
+    /// MESMO servidor em mais de um conjunto de opções (o caso do transporte
+    /// customizado, que exige montar as opções duas vezes).
+    pub fn build_shared(self) -> Arc<SdkMcpServer> {
+        Arc::new(self.build())
     }
 }
 
@@ -663,10 +676,16 @@ impl SdkMcpServerBuilder {
 
 /// Mapa de servidores in-process indexado pelo nome que o CLI usa para rotear.
 ///
-/// É barato de clonar: o conteúdo é compartilhado.
+/// **É um valor, não um recurso compartilhado.** Clonar produz um mapa
+/// independente (as entradas são `Arc`, então o clone é barato, mas inserir num
+/// clone não afeta o original). Foi essa a escolha do conserto: enquanto o
+/// registry tinha `Arc<Mutex<..>>` por dentro, duas sessões podiam acabar
+/// apontando para o mesmo mapa sem que o tipo dissesse isso. Agora cada sessão
+/// tem literalmente o seu, e o servidor é liberado quando a última sessão que o
+/// declarou morre.
 #[derive(Clone, Default)]
 pub struct SdkMcpRegistry {
-    servers: Arc<Mutex<HashMap<String, Arc<SdkMcpServer>>>>,
+    servers: HashMap<String, Arc<SdkMcpServer>>,
 }
 
 impl fmt::Debug for SdkMcpRegistry {
@@ -683,76 +702,42 @@ impl SdkMcpRegistry {
         Self::default()
     }
 
-    /// O registry do processo — onde [`SdkMcpServerBuilder::register`] deposita.
-    pub fn global() -> &'static SdkMcpRegistry {
-        static GLOBAL: OnceLock<SdkMcpRegistry> = OnceLock::new();
-        GLOBAL.get_or_init(SdkMcpRegistry::new)
-    }
-
     /// Registra (ou substitui) o servidor de mesmo nome e devolve o handle.
-    pub fn insert(&self, server: SdkMcpServer) -> Arc<SdkMcpServer> {
-        let server = Arc::new(server);
-        if let Ok(mut servers) = self.servers.lock() {
-            servers.insert(server.name.clone(), Arc::clone(&server));
-        }
+    ///
+    /// Aceita tanto um `SdkMcpServer` por valor quanto um `Arc<SdkMcpServer>`
+    /// já compartilhado — este último é o caso de quem precisa declarar o mesmo
+    /// servidor em dois conjuntos de opções.
+    pub fn insert(&mut self, server: impl Into<Arc<SdkMcpServer>>) -> Arc<SdkMcpServer> {
+        let server = server.into();
+        self.servers
+            .insert(server.name.clone(), Arc::clone(&server));
         server
     }
 
     /// Busca um servidor pelo nome.
     pub fn get(&self, name: &str) -> Option<Arc<SdkMcpServer>> {
-        self.servers.lock().ok()?.get(name).cloned()
+        self.servers.get(name).cloned()
     }
 
     /// Remove um servidor pelo nome.
-    pub fn remove(&self, name: &str) -> Option<Arc<SdkMcpServer>> {
-        self.servers.lock().ok()?.remove(name)
+    pub fn remove(&mut self, name: &str) -> Option<Arc<SdkMcpServer>> {
+        self.servers.remove(name)
     }
 
     /// Nomes registrados, em ordem estável.
     pub fn names(&self) -> Vec<String> {
-        let Ok(servers) = self.servers.lock() else {
-            return Vec::new();
-        };
-        let mut names: Vec<String> = servers.keys().cloned().collect();
+        let mut names: Vec<String> = self.servers.keys().cloned().collect();
         names.sort();
         names
     }
 
+    /// Quantos servidores estão registrados.
+    pub fn len(&self) -> usize {
+        self.servers.len()
+    }
+
     /// Se não há nenhum servidor registrado.
     pub fn is_empty(&self) -> bool {
-        self.servers.lock().map(|s| s.is_empty()).unwrap_or(true)
-    }
-}
-
-impl SdkMcpRegistry {
-    /// Monta um registry de instância com os servidores globais nomeados pelas
-    /// entradas `{"type": "sdk"}` das opções.
-    ///
-    /// Serve o caminho de uma tacada (`query()`), que conhece as opções na hora
-    /// de construir o `Query` e assim não depende do registry global em runtime.
-    pub fn for_options(options: &crate::types::ClaudeAgentOptions) -> SdkMcpRegistry {
-        let registry = SdkMcpRegistry::new();
-        let crate::types::McpServersConfig::Dict(servers) = &options.mcp_servers else {
-            return registry;
-        };
-        for (key, config) in servers {
-            let McpServerConfig::Sdk { name } = config else {
-                continue;
-            };
-            // O CLI roteia pelo nome declarado; a chave do dicionário é apenas
-            // como o consumidor organizou o mapa. Aceitamos as duas formas.
-            for candidate in [name.as_str(), key.as_str()] {
-                if let Some(server) = SdkMcpRegistry::global().get(candidate) {
-                    registry.insert_arc(candidate.to_string(), server);
-                }
-            }
-        }
-        registry
-    }
-
-    fn insert_arc(&self, name: String, server: Arc<SdkMcpServer>) {
-        if let Ok(mut servers) = self.servers.lock() {
-            servers.insert(name, server);
-        }
+        self.servers.is_empty()
     }
 }

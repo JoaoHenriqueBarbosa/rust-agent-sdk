@@ -159,24 +159,14 @@ impl ClaudeSDKClient {
         let transport = self._transport.take().unwrap();
         let mut query = Query::new(transport, true, initialize_timeout);
 
-        // Registry de MCP in-process da SESSÃO, montado a partir das opções.
+        // Registry de MCP in-process da SESSÃO: os handles que as próprias
+        // opções carregam.
         //
-        // Sem esta linha o caminho streaming resolvia `mcp_message` só pelo
-        // registry global do processo. Isso é errado por dois motivos, e os dois
-        // mordem um worker de fila que abre várias sessões no mesmo processo:
-        //
-        // 1. ISOLAMENTO: o global é indexado por nome. Duas sessões concorrentes
-        //    que declarassem servidores homônimos com tools diferentes veriam uma
-        //    à outra, e quem registrasse por último venceria — a tool chamada não
-        //    seria a que a sessão declarou.
-        // 2. INTENÇÃO: `mcp_servers` nas opções é a declaração do que ESTA sessão
-        //    expõe. Servir do global ignora a declaração e entrega qualquer coisa
-        //    que algum outro ponto do processo tenha registrado.
-        //
-        // `for_options` já era usado pelo caminho de uma tacada
-        // (`internal/client.rs`); o streaming ficou de fora porque este arquivo
-        // estava sendo editado em paralelo quando o MCP in-process entrou.
-        query.set_sdk_mcp_servers(crate::sdk_mcp::SdkMcpRegistry::for_options(&self._options));
+        // Não há resolução por nome contra nenhum depósito do processo. É isso
+        // que isola duas sessões concorrentes com servidores homônimos (cada
+        // `Query` tem o seu mapa) e é isso que faz o servidor morrer com a
+        // sessão (o `Arc` não fica pendurado em lugar nenhum estático).
+        query.set_sdk_mcp_servers(self._options.sdk_mcp_servers.clone());
 
         // Set can_use_tool callback if provided
         if let Some(ref callback) = self._options.can_use_tool {
@@ -515,6 +505,10 @@ impl ClaudeAgentOptions {
                 McpServersConfig::Dict(d) => McpServersConfig::Dict(d.clone()),
                 McpServersConfig::Path(p) => McpServersConfig::Path(p.clone()),
             },
+            // Clone de `SdkMcpRegistry` é um mapa NOVO com os mesmos `Arc`: a
+            // cópia declara os mesmos servidores sem passar a compartilhar
+            // estado mutável com o original.
+            sdk_mcp_servers: self.sdk_mcp_servers.clone(),
             strict_mcp_config: self.strict_mcp_config,
             permission_mode: self.permission_mode.clone(),
             continue_conversation: self.continue_conversation,

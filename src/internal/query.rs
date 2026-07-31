@@ -140,10 +140,10 @@ impl Query {
 
     /// Registry de servidores MCP in-process desta sessão.
     ///
-    /// É a ÚNICA fonte que `handle_control_request` consulta para `mcp_message`.
-    /// O registry global (`SdkMcpRegistry::global()`) é só o depósito de onde
-    /// `SdkMcpRegistry::for_options` monta este aqui na hora do connect — não é
-    /// consultado em runtime, para que uma sessão nunca sirva a tool de outra.
+    /// É a ÚNICA fonte que `handle_control_request` consulta para `mcp_message`,
+    /// e é um clone do `ClaudeAgentOptions::sdk_mcp_servers` da sessão. Não
+    /// existe depósito global: uma sessão nunca alcança o servidor de outra, nem
+    /// por engano de nome.
     pub fn set_sdk_mcp_servers(&mut self, servers: SdkMcpRegistry) {
         self.sdk_mcp_servers = servers;
     }
@@ -673,21 +673,14 @@ impl Query {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        // SÓ o registry da sessão. Não há fallback para o registry global.
+        // SÓ o registry da sessão. Não existe fallback, e não existe mais
+        // registry global algum para servir de fallback.
         //
-        // O global existia como rede de segurança enquanto o caminho streaming
-        // (`ClaudeSDKClient`) não montava o registry de instância. Agora os dois
-        // caminhos montam (`SdkMcpRegistry::for_options` em `client.rs` e em
-        // `internal/client.rs`), e a rede virou risco: como o global é indexado
-        // por nome e é do processo inteiro, o fallback fazia uma sessão servir a
-        // tool de um servidor que ela não declarou — silenciosamente e com a
-        // resposta errada. Errar alto ("No SDK MCP server found") é melhor do que
-        // executar a tool de outra sessão.
-        //
-        // Isto não perde nenhum caso legítimo: a disponibilidade que o CLI vê vem
-        // do `--mcp-config`, gerado das MESMAS opções que alimentam
-        // `for_options`. Um `server_name` fora da declaração é o CLI roteando
-        // para algo que a sessão nunca expôs.
+        // Errar alto ("No SDK MCP server found") é melhor do que executar a tool
+        // de outra sessão. E não se perde nenhum caso legítimo: a
+        // disponibilidade que o CLI vê vem do `--mcp-config`, gerado das MESMAS
+        // opções que carregam os handles. Um `server_name` fora da declaração é o
+        // CLI roteando para algo que a sessão nunca expôs.
         let server = self.sdk_mcp_servers.get(server_name);
         let Some(server) = server else {
             return Err(format!("No SDK MCP server found: {server_name}"));

@@ -1379,6 +1379,17 @@ pub struct ClaudeAgentOptions {
     pub allowed_tools: Vec<String>,
     pub system_prompt: Option<SystemPromptConfig>,
     pub mcp_servers: McpServersConfig,
+    /// Servidores MCP in-process desta sessão, **por handle**.
+    ///
+    /// `mcp_servers` só declara `{"type":"sdk","name":...}` para o CLI: é texto,
+    /// e nome não é identidade. Este campo é quem realmente atende os
+    /// `mcp_message` — o `Query` da sessão recebe um clone dele no `connect`.
+    ///
+    /// Preencha com [`ClaudeAgentOptions::with_sdk_mcp_server`] /
+    /// [`ClaudeAgentOptions::add_sdk_mcp_server`], que declaram e guardam o
+    /// handle na mesma chamada. Antes disto existia um registry global por nome,
+    /// e duas sessões concorrentes com servidores homônimos colidiam.
+    pub sdk_mcp_servers: crate::sdk_mcp::SdkMcpRegistry,
     pub strict_mcp_config: bool,
     pub permission_mode: Option<PermissionMode>,
     pub continue_conversation: bool,
@@ -1439,6 +1450,7 @@ impl Default for ClaudeAgentOptions {
             allowed_tools: Vec::new(),
             system_prompt: None,
             mcp_servers: McpServersConfig::Dict(HashMap::new()),
+            sdk_mcp_servers: crate::sdk_mcp::SdkMcpRegistry::new(),
             strict_mcp_config: false,
             permission_mode: None,
             continue_conversation: false,
@@ -1479,6 +1491,44 @@ impl Default for ClaudeAgentOptions {
             task_budget: None,
             stderr: None,
         }
+    }
+}
+
+impl ClaudeAgentOptions {
+    /// Declara um servidor MCP in-process para ESTA sessão e devolve a config
+    /// que foi para `mcp_servers`.
+    ///
+    /// Faz as duas metades de uma vez, porque separá-las era a origem do bug:
+    ///
+    /// 1. põe `{"type":"sdk","name":<nome>}` em `mcp_servers` (é o que vira
+    ///    `--mcp-config` e o que faz o CLI expor `mcp__<nome>__<tool>`);
+    /// 2. guarda o **handle** em `sdk_mcp_servers` (é quem atende o
+    ///    `mcp_message` em runtime).
+    ///
+    /// A chave do dicionário é o próprio nome do servidor, que é o que o CLI
+    /// manda em `server_name` — e é por esse nome que o `Query` resolve.
+    ///
+    /// Se `mcp_servers` for [`McpServersConfig::Path`], a declaração fica por
+    /// conta do arquivo apontado e só o handle é guardado aqui.
+    pub fn add_sdk_mcp_server(
+        &mut self,
+        server: impl Into<Arc<crate::sdk_mcp::SdkMcpServer>>,
+    ) -> McpServerConfig {
+        let server = self.sdk_mcp_servers.insert(server);
+        let config = server.config();
+        if let McpServersConfig::Dict(servers) = &mut self.mcp_servers {
+            servers.insert(server.name().to_string(), config.clone());
+        }
+        config
+    }
+
+    /// Versão encadeável de [`ClaudeAgentOptions::add_sdk_mcp_server`].
+    pub fn with_sdk_mcp_server(
+        mut self,
+        server: impl Into<Arc<crate::sdk_mcp::SdkMcpServer>>,
+    ) -> Self {
+        self.add_sdk_mcp_server(server);
+        self
     }
 }
 

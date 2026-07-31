@@ -129,7 +129,7 @@ fn mcp_request(request_id: &str, server_name: &str, message: Value) -> Value {
 
 /// Roda o `Query` sobre um roteiro e devolve o que ele escreveu no transporte.
 async fn drive(server: SdkMcpServer, inbound: Vec<Value>) -> Vec<Value> {
-    let registry = SdkMcpRegistry::new();
+    let mut registry = SdkMcpRegistry::new();
     registry.insert(server);
 
     let (transport, written) = ScriptedTransport::new(inbound);
@@ -481,7 +481,7 @@ async fn notification_still_gets_a_control_response() {
 
 #[tokio::test]
 async fn mcp_traffic_does_not_disturb_session_messages() {
-    let registry = SdkMcpRegistry::new();
+    let mut registry = SdkMcpRegistry::new();
     registry.insert(test_server("calc"));
 
     let (transport, written) = ScriptedTransport::new(vec![
@@ -544,14 +544,12 @@ async fn mcp_traffic_does_not_disturb_session_messages() {
 }
 
 // ---------------------------------------------------------------------------
-// 9. registry global e config declarada
+// 9. declarar o servidor nas opções: config para o CLI + handle para o runtime
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn register_puts_the_server_in_the_global_registry_and_yields_the_config() {
-    // Nome único: o registry global é do processo inteiro e os testes rodam
-    // juntos.
-    let config = SdkMcpServer::builder("global_registry_case")
+async fn declaring_a_server_yields_the_config_and_keeps_the_handle_in_the_options() {
+    let server = SdkMcpServer::builder("declared_case")
         .tool(
             "add",
             "Soma",
@@ -560,40 +558,49 @@ async fn register_puts_the_server_in_the_global_registry_and_yields_the_config()
                 .required("b", PropertySchema::number()),
             |args: AddArgs| async move { Ok(ToolOutput::text((args.a + args.b).to_string())) },
         )
-        .register();
+        .build();
 
-    // Contrato: o que sai do `register` é a config que vai nas opções.
+    let mut options = rust_agent_sdk::types::ClaudeAgentOptions::default();
+    let config = options.add_sdk_mcp_server(server);
+
+    // Contrato: o que sai de `add_sdk_mcp_server` é a declaração `sdk` que o
+    // transporte serializa em `--mcp-config`.
     assert_eq!(
         config,
         McpServerConfig::Sdk {
-            name: "global_registry_case".to_string()
+            name: "declared_case".to_string()
         },
-        "register devolve a declaração `sdk` com o nome do servidor"
+        "add_sdk_mcp_server devolve a declaração `sdk` com o nome do servidor"
     );
 
-    let server = SdkMcpRegistry::global()
-        .get("global_registry_case")
-        .expect("register deixa o servidor no registry do processo");
-
-    // Contrato: os nomes qualificados são os que entram em `allowed_tools`.
+    // Contrato: a mesma chamada põe a declaração em `mcp_servers`, keyed pelo
+    // nome — que é o `server_name` que o CLI vai mandar de volta.
+    let rust_agent_sdk::types::McpServersConfig::Dict(ref declared) = options.mcp_servers else {
+        panic!("mcp_servers precisa continuar sendo um dicionário");
+    };
     assert_eq!(
-        server.qualified_tool_names(),
-        vec!["mcp__global_registry_case__add".to_string()],
+        declared.get("declared_case"),
+        Some(&config),
+        "a declaração entra no dicionário sob o nome do servidor"
+    );
+
+    // Contrato: o HANDLE ficou nas opções. É ele, e não o nome, que atende.
+    let handle = options
+        .sdk_mcp_servers
+        .get("declared_case")
+        .expect("as opções guardam o servidor, não só o nome");
+    assert_eq!(
+        handle.qualified_tool_names(),
+        vec!["mcp__declared_case__add".to_string()],
         "o CLI expõe a tool como mcp__<servidor>__<tool>"
     );
 
-    // Contrato: o global é DEPÓSITO, não fonte de runtime. Um `Query` sem
-    // registry de instância NÃO serve a tool, mesmo com o servidor registrado no
-    // processo — responde erro.
-    //
-    // Este teste já afirmou o contrário ("sem registry de instância, o global
-    // atende"). O fallback foi removido de propósito: como o global é indexado
-    // por nome e é do processo inteiro, ele fazia uma sessão servir a tool de um
-    // servidor que ela não declarou, com resposta bem formada e vinda do lugar
-    // errado. Ver `tests/test_streaming_sdk_mcp.rs`.
+    // Contrato: um `Query` SEM registry não serve a tool, mesmo com um servidor
+    // de mesmo nome vivo no processo (o `options` acima). Não há depósito global
+    // para cair; servidor não declarado é erro.
     let (transport, written) = ScriptedTransport::new(vec![mcp_request(
         "req_11",
-        "global_registry_case",
+        "declared_case",
         json!({
             "jsonrpc": "2.0",
             "id": 3,
@@ -612,22 +619,13 @@ async fn register_puts_the_server_in_the_global_registry_and_yields_the_config()
     assert_eq!(
         response.get("subtype").and_then(|s| s.as_str()),
         Some("error"),
-        "sem registry de instância a sessão recusa, não serve do global: {written:?}"
+        "sem registry da sessão a resposta é erro, não a tool: {written:?}"
     );
 
-    // Contrato: o mesmo `Query`, agora com o registry montado das opções, serve.
-    // É o que prova que o depósito global continua sendo a origem legítima —
-    // via `for_options`, no connect, e não via fallback em runtime.
-    let mut servers = std::collections::HashMap::new();
-    servers.insert("global_registry_case".to_string(), config.clone());
-    let options = rust_agent_sdk::types::ClaudeAgentOptions {
-        mcp_servers: rust_agent_sdk::types::McpServersConfig::Dict(servers),
-        ..Default::default()
-    };
-
+    // Contrato: o mesmo `Query`, agora com o registry das opções, serve.
     let (transport, written) = ScriptedTransport::new(vec![mcp_request(
         "req_12",
-        "global_registry_case",
+        "declared_case",
         json!({
             "jsonrpc": "2.0",
             "id": 4,
@@ -636,7 +634,7 @@ async fn register_puts_the_server_in_the_global_registry_and_yields_the_config()
         }),
     )]);
     let mut query = Query::new(Box::new(transport), true, 60.0);
-    query.set_sdk_mcp_servers(SdkMcpRegistry::for_options(&options));
+    query.set_sdk_mcp_servers(options.sdk_mcp_servers.clone());
     query.start().await.expect("start");
     while query.next_message().await.expect("leitura").is_some() {}
 
@@ -644,18 +642,16 @@ async fn register_puts_the_server_in_the_global_registry_and_yields_the_config()
     assert_eq!(
         mcp_response(&written[0])["result"]["content"][0]["text"],
         "42",
-        "declarado nas opções, o servidor do depósito global atende: {written:?}"
+        "declarado nas opções, o servidor atende: {written:?}"
     );
 }
 
 // ---------------------------------------------------------------------------
-// 10. registry montado a partir das opções (o caminho de uma tacada)
+// 10. o registry da sessão é exatamente o que as opções declararam
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn registry_for_options_picks_up_declared_sdk_servers() {
-    use std::collections::HashMap;
-
+async fn the_options_registry_holds_only_what_was_declared_by_handle() {
     let declared = SdkMcpServer::builder("options_case_declared")
         .tool(
             "add",
@@ -665,12 +661,17 @@ async fn registry_for_options_picks_up_declared_sdk_servers() {
                 .required("b", PropertySchema::number()),
             |args: AddArgs| async move { Ok(ToolOutput::text((args.a + args.b).to_string())) },
         )
-        .register();
+        .build();
 
-    let mut servers = HashMap::new();
-    servers.insert("options_case_declared".to_string(), declared);
-    // Um servidor `sdk` que ninguém registrou, e um stdio: nenhum dos dois pode
-    // entrar no registry da sessão.
+    let mut options =
+        rust_agent_sdk::types::ClaudeAgentOptions::default().with_sdk_mcp_server(declared);
+
+    // Entradas escritas na mão no dicionário: um `sdk` sem handle e um stdio.
+    // Nenhuma das duas pode virar servidor servível — declarar o NOME nunca
+    // bastou, e agora o tipo diz isso.
+    let rust_agent_sdk::types::McpServersConfig::Dict(ref mut servers) = options.mcp_servers else {
+        panic!("mcp_servers precisa continuar sendo um dicionário");
+    };
     servers.insert(
         "options_case_missing".to_string(),
         McpServerConfig::Sdk {
@@ -686,29 +687,57 @@ async fn registry_for_options_picks_up_declared_sdk_servers() {
         },
     );
 
-    let options = rust_agent_sdk::types::ClaudeAgentOptions {
-        mcp_servers: rust_agent_sdk::types::McpServersConfig::Dict(servers),
-        ..Default::default()
-    };
-
-    let registry = SdkMcpRegistry::for_options(&options);
-
-    // Contrato: entra só o servidor `sdk` que está registrado — servidor não
-    // registrado e transporte externo ficam de fora.
+    // Contrato: o registry da sessão tem só o servidor cujo handle foi entregue.
     assert_eq!(
-        registry.names(),
+        options.sdk_mcp_servers.names(),
         vec!["options_case_declared".to_string()],
-        "o registry da sessão é o recorte das opções, não o global inteiro"
+        "o registry da sessão é o conjunto dos handles, não das strings do --mcp-config"
+    );
+    assert!(
+        options
+            .sdk_mcp_servers
+            .get("options_case_missing")
+            .is_none(),
+        "declarar o nome sem entregar o handle não produz servidor"
     );
 
     // Contrato: o que entrou é o servidor de verdade, com suas tools.
-    let server = registry
+    let server = options
+        .sdk_mcp_servers
         .get("options_case_declared")
         .expect("o servidor declarado tem de estar no registry");
     assert_eq!(
         server.tool_names(),
         vec!["add".to_string()],
         "o registry carrega o servidor com as tools, não só o nome"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 10b. clonar as opções não faz duas sessões compartilharem um mapa mutável
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cloning_a_registry_yields_an_independent_map() {
+    let mut a = SdkMcpRegistry::new();
+    a.insert(test_server("shared"));
+
+    let mut b = a.clone();
+    b.insert(test_server("only_in_b"));
+    b.remove("shared");
+
+    // Contrato: mexer no clone não mexe no original. Enquanto o registry era
+    // `Arc<Mutex<HashMap>>` por dentro, este assert falharia — e era essa
+    // partilha invisível que deixava uma sessão alterar o mapa de outra.
+    assert_eq!(
+        a.names(),
+        vec!["shared".to_string()],
+        "o registry original não pode enxergar as mudanças do clone"
+    );
+    assert_eq!(
+        b.names(),
+        vec!["only_in_b".to_string()],
+        "o clone é um mapa próprio"
     );
 }
 
