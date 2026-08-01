@@ -21,7 +21,7 @@ pub use internal::session_mutations::{
 pub use internal::session_store::InMemorySessionStore;
 pub use internal::session_summary::{fold_session_summary, summary_entry_to_sdk_info};
 pub use internal::sessions::{
-    get_session_info, get_session_info_from_store, get_session_messages,
+    get_projects_dir, get_session_info, get_session_info_from_store, get_session_messages,
     get_session_messages_from_store, get_subagent_messages, get_subagent_messages_from_store,
     list_sessions, list_sessions_from_store, list_subagents, list_subagents_from_store,
     project_key_for_directory,

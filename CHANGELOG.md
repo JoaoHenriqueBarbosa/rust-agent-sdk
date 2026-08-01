@@ -5,6 +5,20 @@ Versões ainda não publicadas ficam em `Unreleased`.
 
 ## [Unreleased]
 
+### Adicionado — `get_projects_dir` é público
+
+A raiz em que o `claude` grava os transcripts canônicos
+(`~/.claude/projects`, ou `$CLAUDE_CONFIG_DIR/projects`) já era calculada pela
+crate, mas só internamente. Quem usa o `SessionStore` para espelhar transcripts
+precisa dela para responder duas perguntas que o espelho não responde: *o
+`<session_id>.jsonl` ainda existe?* (o `--resume` depende dele, e com transporte
+customizado a materialização de sessão é pulada) e *como apago o transcript real
+junto com a cópia espelhada?*. Reconstruir a fórmula do lado de fora duplicaria a
+regra de nomeação e ficaria dessincronizada na primeira mudança.
+
+`project_key_for_directory` já era público e continua sendo o nome da pasta sob
+essa raiz — os dois juntos localizam o arquivo.
+
 ### Corrigido — hook declarado agora é hook executado
 
 `ClaudeSDKClient::connect` convertia cada `HookMatcher` para JSON na fronteira
