@@ -1278,6 +1278,79 @@ pub trait SessionStore: Send + Sync {
     }
 }
 
+/// A `SessionStore` behind an `Arc` is a `SessionStore`.
+///
+/// Without this, every caller that needs to keep its own handle to a store
+/// while also handing one to `ClaudeAgentOptions` had to write a newtype and
+/// forward all ten methods by hand — including the four `has_*` capability
+/// probes, whose defaults return `false`. Forgetting one of those is the worst
+/// kind of mistake here: the store works, but the crate silently avoids the
+/// code paths that depend on it (`continue_conversation` requires
+/// `list_sessions`), so the feature just stops happening with no error.
+///
+/// Found in ahamkara, which had exactly that newtype: `SharedTranscript(Arc<..>)`
+/// with ten forwarding methods.
+#[async_trait::async_trait]
+impl<T: SessionStore + ?Sized> SessionStore for std::sync::Arc<T> {
+    async fn append(
+        &self,
+        key: &SessionKey,
+        entries: &[SessionStoreEntry],
+    ) -> std::result::Result<(), ClaudeSDKError> {
+        (**self).append(key, entries).await
+    }
+
+    async fn load(
+        &self,
+        key: &SessionKey,
+    ) -> std::result::Result<Option<Vec<SessionStoreEntry>>, ClaudeSDKError> {
+        (**self).load(key).await
+    }
+
+    async fn list_sessions(
+        &self,
+        project_key: &str,
+    ) -> std::result::Result<Vec<SessionStoreListEntry>, ClaudeSDKError> {
+        (**self).list_sessions(project_key).await
+    }
+
+    async fn list_session_summaries(
+        &self,
+        project_key: &str,
+    ) -> std::result::Result<Vec<SessionSummaryEntry>, ClaudeSDKError> {
+        (**self).list_session_summaries(project_key).await
+    }
+
+    async fn delete(&self, key: &SessionKey) -> std::result::Result<(), ClaudeSDKError> {
+        (**self).delete(key).await
+    }
+
+    async fn list_subkeys(
+        &self,
+        key: &SessionListSubkeysKey,
+    ) -> std::result::Result<Vec<String>, ClaudeSDKError> {
+        (**self).list_subkeys(key).await
+    }
+
+    // The capability probes forward too: answering for the inner store instead
+    // of falling back to the trait defaults is the whole point.
+    fn has_list_sessions(&self) -> bool {
+        (**self).has_list_sessions()
+    }
+
+    fn has_delete(&self) -> bool {
+        (**self).has_delete()
+    }
+
+    fn has_list_subkeys(&self) -> bool {
+        (**self).has_list_subkeys()
+    }
+
+    fn has_list_session_summaries(&self) -> bool {
+        (**self).has_list_session_summaries()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Session listing types
 // ---------------------------------------------------------------------------
@@ -1395,6 +1468,7 @@ pub struct ClaudeAgentOptions {
     pub continue_conversation: bool,
     pub resume: Option<String>,
     pub session_id: Option<String>,
+    pub name: Option<String>,
     pub max_turns: Option<i64>,
     pub max_budget_usd: Option<f64>,
     pub disallowed_tools: Vec<String>,
@@ -1456,6 +1530,7 @@ impl Default for ClaudeAgentOptions {
             continue_conversation: false,
             resume: None,
             session_id: None,
+            name: None,
             max_turns: None,
             max_budget_usd: None,
             disallowed_tools: Vec::new(),

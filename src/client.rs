@@ -504,6 +504,7 @@ impl ClaudeAgentOptions {
             continue_conversation: self.continue_conversation,
             resume: self.resume.clone(),
             session_id: self.session_id.clone(),
+            name: self.name.clone(),
             max_turns: self.max_turns,
             max_budget_usd: self.max_budget_usd,
             disallowed_tools: self.disallowed_tools.clone(),

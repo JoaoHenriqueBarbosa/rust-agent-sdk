@@ -506,6 +506,21 @@ impl SdkMcpServer {
         self.tools.iter().map(|t| t.name().to_string()).collect()
     }
 
+    /// As descrições das tools, na ordem em que `tools/list` as entrega.
+    ///
+    /// É o texto que o MODELO lê para decidir como usar cada tool, e por isso é
+    /// contrato observável: quem gera a descrição a partir de uma constante (o
+    /// mínimo de palavras de uma citação, o tamanho de uma sigla) precisa poder
+    /// afirmar, num teste, que o número aplicado aparece no texto lido. Sem este
+    /// acessor a única forma de "provar" isso seria reconstruir o texto à mão no
+    /// teste — isto é, provar a própria cópia.
+    pub fn tool_descriptions(&self) -> Vec<String> {
+        self.tools
+            .iter()
+            .map(|tool| tool.description().to_owned())
+            .collect()
+    }
+
     /// Nomes das tools como o CLI as expõe ao modelo
     /// (`mcp__<servidor>__<tool>`) — é essa a forma que entra em
     /// `ClaudeAgentOptions::allowed_tools`.
@@ -611,6 +626,19 @@ pub struct SdkMcpServerBuilder {
 }
 
 impl SdkMcpServerBuilder {
+    /// Anexa as tools de outro builder a este, preservando este nome/versão.
+    ///
+    /// É a peça de composição de um registry de tools: cada conjunto é
+    /// definido uma única vez no seu builder e os consumidores que precisam
+    /// da união (um servidor com ingestão E ontologia, por exemplo) mesclam
+    /// em vez de redeclarar. Nomes duplicados não são detectados aqui — o
+    /// `tools/call` resolve pelo primeiro registrado — então a unicidade é
+    /// contrato de quem mescla.
+    pub fn merge(mut self, other: SdkMcpServerBuilder) -> Self {
+        self.tools.extend(other.tools);
+        self
+    }
+
     /// Versão anunciada no `initialize`.
     pub fn version(mut self, version: impl Into<String>) -> Self {
         self.version = version.into();

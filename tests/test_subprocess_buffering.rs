@@ -333,3 +333,87 @@ async fn test_interleaved_non_json_lines_skipped() {
     assert_eq!(messages[0]["type"], "system");
     assert_eq!(messages[1]["type"], "result");
 }
+
+/// CLI falso que goteja o payload caractere a caractere.
+///
+/// Cada caractere vira um `printf` próprio com um sleep atrás, então uma linha
+/// leva centenas de milissegundos para completar — tempo de sobra para um
+/// `read_message()` ser cancelado no meio dela.
+fn dribbling_cli(payload: &str) -> (tempfile::TempDir, PathBuf) {
+    std::env::set_var("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "1");
+
+    let dir = tempfile::tempdir().expect("tempdir para o CLI falso");
+    let script_path = dir.path().join("fake-claude");
+    let mut script = String::from("#!/bin/sh\n");
+    for ch in payload.chars() {
+        assert!(
+            ch != '\'',
+            "o payload do gotejador não pode conter aspas simples"
+        );
+        if ch == '\n' {
+            script.push_str("printf '\\n'\nsleep 0.002\n");
+        } else {
+            script.push_str(&format!("printf %s '{ch}'\nsleep 0.002\n"));
+        }
+    }
+    std::fs::write(&script_path, script).expect("escrita do script");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+            .expect("permissão de execução");
+    }
+
+    (dir, script_path)
+}
+
+/// A canceled `read_message()` must not lose the line in flight.
+///
+/// É o contrato que permite pôr `read_message` num `select!` contra um sinal
+/// de interrupção: quem perde a corrida é o FUTURE, nunca os bytes. Antes
+/// deste contrato a linha em curso vivia num buffer local e o cancel a
+/// perdia — o resto dela chegava como fragmento não-JSON e era descartado.
+#[tokio::test]
+async fn a_canceled_read_does_not_lose_the_line_in_flight() {
+    let value = "a".repeat(120);
+    let payload = format!("{{\"type\":\"probe\",\"value\":\"{value}\"}}\n");
+    let (_dir, cli_path) = dribbling_cli(&payload);
+
+    let mut transport = SubprocessCLITransport::new("test", make_options(cli_path, None));
+    transport.connect().await.expect("spawn do CLI falso");
+
+    // Cancela a leitura no meio da linha, mais de uma vez — como um ator que
+    // perde o select para o botão de parar e volta a ler em seguida.
+    let mut early: Option<serde_json::Value> = None;
+    for _ in 0..3 {
+        let read = transport.read_message();
+        tokio::pin!(read);
+        tokio::select! {
+            result = &mut read => {
+                early = Some(result.expect("leitura sem erro").expect("houve mensagem"));
+            }
+            () = tokio::time::sleep(std::time::Duration::from_millis(30)) => {}
+        }
+        if early.is_some() {
+            break;
+        }
+    }
+
+    let message = match early {
+        Some(message) => message,
+        None => transport
+            .read_message()
+            .await
+            .expect("leitura sem erro")
+            .expect("a mensagem sobreviveu aos cancels"),
+    };
+    // Contrato: os bytes lidos pelos futures cancelados continuam na linha —
+    // a mensagem final é exatamente o payload, sem buracos.
+    assert_eq!(
+        message["value"],
+        serde_json::Value::String(value),
+        "a linha gotejada chega inteira depois de três cancels no meio dela"
+    );
+    let _ = transport.close().await;
+}

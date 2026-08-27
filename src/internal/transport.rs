@@ -90,6 +90,14 @@ pub struct SubprocessCLITransport {
     stdout_reader: Option<tokio::io::BufReader<tokio::process::ChildStdout>>,
     /// Accumulates partial JSON when a line doesn't parse on its own.
     json_buffer: String,
+    /// The line currently being read, kept across calls so that a
+    /// `read_message()` future canceled mid-line (e.g. losing a `select!`
+    /// against an interrupt signal) does not lose the bytes already read.
+    /// Bytes and not a String, and `read_until` and not `read_line`, on
+    /// purpose: `read_until` appends incrementally into the caller's buffer
+    /// (partial data survives the cancel), while `read_line` moves the
+    /// String's allocation into the future and drops it on cancel.
+    line_buffer: Vec<u8>,
     /// Write lock to serialize stdin writes and prevent TOCTOU with close()/end_input().
     write_lock: tokio::sync::Mutex<()>,
     /// Background task for reading stderr.
@@ -105,6 +113,7 @@ impl SubprocessCLITransport {
             child: None,
             stdout_reader: None,
             json_buffer: String::new(),
+            line_buffer: Vec::new(),
             write_lock: tokio::sync::Mutex::new(()),
             stderr_task: None,
         }
@@ -286,6 +295,10 @@ impl SubprocessCLITransport {
             cmd.push(resume.clone());
         }
 
+        if let Some(name) = &self.options.name {
+            cmd.push("--name".into());
+            cmd.push(name.clone());
+        }
         if let Some(session_id) = &self.options.session_id {
             cmd.push("--session-id".into());
             cmd.push(session_id.clone());
@@ -694,6 +707,25 @@ impl Transport for SubprocessCLITransport {
             }
         }
 
+        // O CLI vai para um GRUPO DE PROCESSOS PRÓPRIO, e isto não é detalhe.
+        //
+        // Sem isto o filho herda o grupo de quem chamou. Quando o chamador roda
+        // no terminal, um Ctrl-C entrega SIGINT ao grupo INTEIRO — o processo
+        // que hospeda o SDK e, junto, todas as sessões `claude` em voo. Um host
+        // que implemente desligamento gracioso (para de aceitar trabalho novo e
+        // espera as sessões terminarem) fica esperando por sessões que o
+        // sistema operacional já matou: a espera é educada e inútil, e o
+        // trabalho da sessão — que só existe em memória até o fim do turno — vai
+        // embora inteiro.
+        //
+        // Isolar o grupo faz o sinal do terminal parar no host, que passa a ser
+        // o ÚNICO a decidir a morte do filho. Isso já existe e continua valendo:
+        // `close()` mata o filho e o guard de saída manda SIGTERM em todos os
+        // filhos vivos. Ou seja, isto não cria processo órfão — só tira o
+        // terminal do caminho.
+        #[cfg(unix)]
+        command.process_group(0);
+
         let mut child = command.spawn().map_err(|e| {
             // O erro cru do SO ("No such file or directory") não diz QUAL
             // caminho faltou; sem o cwd e o binário na mensagem, diagnosticar
@@ -811,18 +843,29 @@ impl Transport for SubprocessCLITransport {
             .max_buffer_size
             .unwrap_or(DEFAULT_MAX_BUFFER_SIZE);
 
-        let reader = match &mut self.stdout_reader {
-            Some(r) => r,
-            None => return Ok(None),
-        };
+        if self.stdout_reader.is_none() {
+            return Ok(None);
+        }
 
         loop {
-            let mut line = String::new();
-            let bytes_read = reader.read_line(&mut line).await.map_err(|e| {
-                ClaudeSDKError::cli_connection(format!("Failed to read from stdout: {}", e))
-            })?;
+            // The in-flight line lives on `self`, not on the stack: a
+            // `read_message()` future canceled in a `select!` (e.g. losing to
+            // an interrupt signal) must not lose the bytes already read.
+            // `read_until` appends into this persistent buffer as data
+            // arrives, so the next call picks the SAME line up where the
+            // cancel left off.
+            let reader = match &mut self.stdout_reader {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            let bytes_read = reader
+                .read_until(b'\n', &mut self.line_buffer)
+                .await
+                .map_err(|e| {
+                    ClaudeSDKError::cli_connection(format!("Failed to read from stdout: {}", e))
+                })?;
 
-            if bytes_read == 0 {
+            if bytes_read == 0 && self.line_buffer.is_empty() {
                 // EOF — try to parse any remaining buffer
                 if !self.json_buffer.is_empty() {
                     let buf = std::mem::take(&mut self.json_buffer);
@@ -834,6 +877,10 @@ impl Transport for SubprocessCLITransport {
                 return Ok(None);
             }
 
+            // A tail read before EOF (stream died mid-line) still goes through
+            // the parser below: next iteration hits the empty-buffer EOF path.
+            let raw = std::mem::take(&mut self.line_buffer);
+            let line = String::from_utf8_lossy(&raw);
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
