@@ -1,2 +1,0 @@
-// function: initializeAnalyticsGates
-function initializeAnalyticsGates() {}

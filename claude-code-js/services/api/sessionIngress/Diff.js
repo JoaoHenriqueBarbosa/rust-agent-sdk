@@ -1,2 +1,0 @@
-// function: Diff
-function Diff() {}
