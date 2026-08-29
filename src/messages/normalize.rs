@@ -435,8 +435,13 @@ pub fn apply_tool_result_budget(messages: &mut [ApiMessage], max_result_chars: u
                         let original_len = text.len();
                         if original_len > max_result_chars {
                             let half = max_result_chars / 2;
-                            let first = &text[..half];
-                            let last = &text[original_len.saturating_sub(half)..];
+                            // Cortes SEMPRE em fronteira de char: fatiar por
+                            // byte panica em texto multibyte (acentos).
+                            let head_end = floor_char_boundary(text, half);
+                            let tail_start =
+                                ceil_char_boundary(text, original_len.saturating_sub(half));
+                            let first = &text[..head_end];
+                            let last = &text[tail_start..];
                             *text = format!(
                                 "{first}\n\n[Result truncated from {original_len} to {max_result_chars} characters]\n\n{last}",
                             );
@@ -446,6 +451,24 @@ pub fn apply_tool_result_budget(messages: &mut [ApiMessage], max_result_chars: u
             }
         }
     }
+}
+
+/// Maior índice <= `index` que cai em fronteira de char.
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    let mut i = index.min(text.len());
+    while i > 0 && !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Menor índice >= `index` que cai em fronteira de char.
+fn ceil_char_boundary(text: &str, index: usize) -> usize {
+    let mut i = index.min(text.len());
+    while i < text.len() && !text.is_char_boundary(i) {
+        i += 1;
+    }
+    i
 }
 
 /// Convenience wrapper that uses the default budget (80KB).

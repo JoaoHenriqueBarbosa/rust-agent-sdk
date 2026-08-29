@@ -32,6 +32,14 @@ pub struct AssistantMessage {
     pub content: Vec<ContentBlock>,
     pub stop_reason: StopReason,
     pub usage: Usage,
+    /// Preenchido pela CAMADA DE API quando esta mensagem é um erro
+    /// sintetizado (ex.: "max_output_tokens", "prompt_too_long") — nunca
+    /// inferido do texto do modelo. É a flag estrutural que o loop consulta;
+    /// farejar substring no texto do assistente alterava o fluxo de controle
+    /// quando o MODELO escrevia sobre erros (ex.: um rationale citando
+    /// "rate limit").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_error: Option<String>,
 }
 
 impl AssistantMessage {
@@ -310,6 +318,7 @@ impl StreamAccumulator {
             content: self.finalized_blocks.clone(),
             stop_reason: StopReason::from(self.stop_reason.as_ref()),
             usage: self.usage.clone(),
+            api_error: None,
         }
     }
 
@@ -321,6 +330,7 @@ impl StreamAccumulator {
             content: self.finalized_blocks,
             stop_reason: StopReason::from(self.stop_reason.as_ref()),
             usage: self.usage,
+            api_error: None,
         }
     }
 }
@@ -477,6 +487,7 @@ mod tests {
             ],
             stop_reason: StopReason::ToolUse,
             usage: Usage::default(),
+            api_error: None,
         };
 
         assert!(msg.has_tool_use());

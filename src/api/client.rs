@@ -8,7 +8,7 @@ use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::api::error_classifier::classify_api_error;
-use crate::api::retry::{ErrorKind, RetryConfig, get_retry_delay, should_retry};
+use crate::api::retry::{apply_unified_reset, ErrorKind, RetryConfig, get_retry_delay, should_retry};
 use crate::api::streaming::{AssistantMessage, StreamAccumulator, StreamUpdate, parse_sse_data};
 use crate::api::types::*;
 use crate::errors::{ClaudeSDKError, Result};
@@ -153,7 +153,7 @@ impl AnthropicClient {
 
         let url = format!("{}/v1/messages", self.base_url);
         let headers = self.build_headers();
-        let body = serde_json::to_string(&request)
+        let mut body = serde_json::to_string(&request)
             .map_err(|e| ClaudeSDKError::sdk(format!("Failed to serialize request: {e}")))?;
 
         let mut attempt = 0u32;
@@ -180,16 +180,41 @@ impl AnthropicClient {
                         return Ok(api_response);
                     }
 
-                    let retry_after = resp
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok().map(|s| s.to_string()));
+                    let header = |name: &str| {
+                        resp.headers()
+                            .get(name)
+                            .and_then(|v| v.to_str().ok().map(str::to_string))
+                    };
+                    let retry_after = header("retry-after");
+                    let should_retry_header = header("x-should-retry");
+                    let ratelimit_reset = header("anthropic-ratelimit-unified-reset");
                     let response_body = resp.text().await.ok();
-                    let error_kind = ErrorKind::from_status(
-                        status,
-                        retry_after.as_deref(),
-                        response_body.as_deref(),
+                    let error_kind = apply_unified_reset(
+                        ErrorKind::from_status(
+                            status,
+                            retry_after.as_deref(),
+                            response_body.as_deref(),
+                            should_retry_header.as_deref(),
+                        ),
+                        ratelimit_reset.as_deref(),
                     );
+
+                    // Overflow de max_tokens: reduz para o espaço disponível e
+                    // retenta a MESMA chamada (o que o withRetry do CLI faz),
+                    // em vez de falhar a run.
+                    if let ErrorKind::MaxTokensContextOverflow { available } = &error_kind {
+                        let adjusted = available
+                            .unwrap_or(crate::api::retry::FLOOR_OUTPUT_TOKENS)
+                            .max(crate::api::retry::FLOOR_OUTPUT_TOKENS);
+                        if request.max_tokens > adjusted && attempt < self.retry_config.max_retries {
+                            request.max_tokens = adjusted;
+                            body = serde_json::to_string(&request).map_err(|e| {
+                                ClaudeSDKError::sdk(format!("Failed to serialize request: {e}"))
+                            })?;
+                            attempt += 1;
+                            continue;
+                        }
+                    }
 
                     if error_kind == ErrorKind::Overloaded {
                         consecutive_529s += 1;
@@ -247,10 +272,8 @@ impl AnthropicClient {
 
         let url = format!("{}/v1/messages", self.base_url);
         let headers = self.build_headers();
-        let body = serde_json::to_string(&request)
-            .map_err(|e| ClaudeSDKError::sdk(format!("Failed to serialize request: {e}")))?;
 
-        let response = self.send_with_retry(&url, &headers, &body).await?;
+        let response = self.send_with_retry(&url, &headers, &mut request).await?;
 
         let byte_stream = response.bytes_stream();
         let stream = sse_to_stream_updates(byte_stream);
@@ -269,6 +292,7 @@ impl AnthropicClient {
             content: response.content,
             stop_reason: StopReason::from(response.stop_reason.as_ref()),
             usage: response.usage,
+            api_error: None,
         };
         let update = StreamUpdate::MessageComplete {
             message: assistant_msg,
@@ -300,8 +324,10 @@ impl AnthropicClient {
         &self,
         url: &str,
         headers: &HeaderMap,
-        body: &str,
+        request: &mut CreateMessageRequest,
     ) -> Result<reqwest::Response> {
+        let mut body = serde_json::to_string(request)
+            .map_err(|e| ClaudeSDKError::sdk(format!("Failed to serialize request: {e}")))?;
         let mut attempt = 0u32;
         let mut consecutive_529s = 0u32;
 
@@ -310,7 +336,7 @@ impl AnthropicClient {
                 .http_client
                 .post(url)
                 .headers(headers.clone())
-                .body(body.to_string())
+                .body(body.clone())
                 .send()
                 .await;
 
@@ -321,16 +347,41 @@ impl AnthropicClient {
                         return Ok(resp);
                     }
 
-                    let retry_after = resp
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok().map(|s| s.to_string()));
+                    let header = |name: &str| {
+                        resp.headers()
+                            .get(name)
+                            .and_then(|v| v.to_str().ok().map(str::to_string))
+                    };
+                    let retry_after = header("retry-after");
+                    let should_retry_header = header("x-should-retry");
+                    let ratelimit_reset = header("anthropic-ratelimit-unified-reset");
                     let response_body = resp.text().await.ok();
-                    let error_kind = ErrorKind::from_status(
-                        status,
-                        retry_after.as_deref(),
-                        response_body.as_deref(),
+                    let error_kind = apply_unified_reset(
+                        ErrorKind::from_status(
+                            status,
+                            retry_after.as_deref(),
+                            response_body.as_deref(),
+                            should_retry_header.as_deref(),
+                        ),
+                        ratelimit_reset.as_deref(),
                     );
+
+                    // Overflow de max_tokens: reduz para o espaço disponível e
+                    // retenta a MESMA chamada (o que o withRetry do CLI faz),
+                    // em vez de falhar a run.
+                    if let ErrorKind::MaxTokensContextOverflow { available } = &error_kind {
+                        let adjusted = available
+                            .unwrap_or(crate::api::retry::FLOOR_OUTPUT_TOKENS)
+                            .max(crate::api::retry::FLOOR_OUTPUT_TOKENS);
+                        if request.max_tokens > adjusted && attempt < self.retry_config.max_retries {
+                            request.max_tokens = adjusted;
+                            body = serde_json::to_string(&request).map_err(|e| {
+                                ClaudeSDKError::sdk(format!("Failed to serialize request: {e}"))
+                            })?;
+                            attempt += 1;
+                            continue;
+                        }
+                    }
 
                     if error_kind == ErrorKind::Overloaded {
                         consecutive_529s += 1;
@@ -528,6 +579,7 @@ impl FallbackStream {
                                     content: response.content,
                                     stop_reason: StopReason::from(response.stop_reason.as_ref()),
                                     usage: response.usage,
+            api_error: None,
                                 };
                                 let _ = tx
                                     .send(Ok(StreamUpdate::MessageComplete {

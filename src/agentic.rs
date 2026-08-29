@@ -20,7 +20,6 @@ use crate::api::types::*;
 use crate::compact::auto_compact::AutoCompactConfig;
 use crate::compact::compact::CompactionEngine;
 use crate::compact::file_tracker::{ReadFileTracker, POST_COMPACT_MAX_LINES_PER_FILE};
-use crate::compact::token_estimation::estimate_message_tokens;
 use crate::errors::Result;
 use crate::messages::api_format::inject_cache_control;
 use crate::messages::normalize::{apply_tool_result_budget_default, ensure_tool_result_pairing, normalize_messages_for_api};
@@ -231,6 +230,11 @@ struct LoopState {
     auto_compact_tracking: AutoCompactTracking,
     model_usage: HashMap<String, QueryUsage>,
     permission_denials: Vec<serde_json::Value>,
+    /// Âncora de contagem: (nº de mensagens já COBERTAS pelo usage real da
+    /// última resposta, tokens de contexto daquela resposta). O que veio
+    /// depois é estimado com margem — é o tokenCountWithEstimation do CLI:
+    /// usage exato para o grosso, heurística só para o delta.
+    usage_anchor: Option<(usize, u64)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -256,8 +260,10 @@ const COMPACT_BOUNDARY_MARKER: &str = "[COMPACT_BOUNDARY]";
 /// Checks if the assistant response text indicates a prompt-too-long error
 /// (API returned 413 as an assistant message rather than as an HTTP error).
 fn is_prompt_too_long_message(msg: &AssistantMessage) -> bool {
-    let text = msg.text().to_lowercase();
-    text.contains("prompt is too long") || text.contains("too many tokens")
+    // Flag ESTRUTURAL posta pela camada de API, nunca inferida do texto: o
+    // modelo escrevendo "prompt is too long" num rationale não pode disparar
+    // compactação.
+    msg.api_error.as_deref() == Some("prompt_too_long")
 }
 
 /// Port of getMessagesAfterCompactBoundary from utils/messages/
@@ -345,6 +351,35 @@ fn is_withheld_max_output_tokens(msg: &AssistantMessage) -> bool {
     msg.stop_reason == StopReason::MaxTokens
 }
 
+/// Contagem híbrida de contexto: o usage REAL da última resposta cobre o
+/// prefixo; só o que entrou depois (tool results, mensagens novas) é estimado,
+/// com margem. É o tokenCountWithEstimation do CLI — a heurística de 4
+/// chars/token subestima JSON em ~30%, e subestimar contexto é estourar a
+/// janela antes de o autocompact disparar.
+fn hybrid_token_count(
+    messages: &[ApiMessage],
+    system: &[SystemBlock],
+    tools: &[ToolDefinition],
+    anchor: Option<(usize, u64)>,
+) -> usize {
+    use crate::compact::token_estimation::{
+        estimate_message_tokens_with_margin, estimate_system_tokens,
+        estimate_tool_definition_tokens,
+    };
+    match anchor {
+        // O usage real já inclui system e tools do request anterior.
+        Some((covered, context_tokens)) if covered <= messages.len() => {
+            let delta = estimate_message_tokens_with_margin(&messages[covered..]);
+            usize::try_from(context_tokens).unwrap_or(usize::MAX).saturating_add(delta)
+        }
+        _ => {
+            estimate_system_tokens(system)
+                + estimate_message_tokens_with_margin(messages)
+                + estimate_tool_definition_tokens(tools)
+        }
+    }
+}
+
 /// Port of calculateTokenWarningState().isAtBlockingLimit from autoCompact.ts
 /// The blocking limit is context_window - MANUAL_COMPACT_BUFFER_TOKENS (3000)
 fn is_at_blocking_limit(token_count: usize, context_window: usize) -> bool {
@@ -396,7 +431,10 @@ impl AgenticLoop {
         tool_executor: ToolExecutor,
         options: AgenticLoopOptions,
     ) -> Self {
-        let auto_compact = AutoCompactConfig::new(options.context_window_tokens);
+        let auto_compact = AutoCompactConfig::new(
+            options.context_window_tokens,
+            usize::try_from(options.max_tokens).unwrap_or(usize::MAX),
+        );
         let compaction_engine = CompactionEngine::new(client.clone());
         let session_id = options.session_id.clone().unwrap_or_else(new_uuid);
         let abort = options.abort.clone().unwrap_or_default();
@@ -481,6 +519,7 @@ impl AgenticLoop {
                 auto_compact_tracking: AutoCompactTracking::default(),
                 model_usage: HashMap::new(),
                 permission_denials: Vec::new(),
+                usage_anchor: None,
             };
 
             // Yield system init
@@ -534,14 +573,15 @@ impl AgenticLoop {
                 // ─── Auto-compact ─────────────────────────────────────
                 // Port: let { compactionResult, consecutiveFailures } = await deps.autocompact(...)
                 let mut compaction_happened = false;
-                let tool_defs = self.tool_executor.registry.api_definitions();
 
+                let context_token_count = hybrid_token_count(
+                    &messages_for_query,
+                    &self.options.system_prompt,
+                    &self.tool_executor.registry.api_definitions(),
+                    state.usage_anchor,
+                );
                 if state.auto_compact_tracking.consecutive_failures < 3
-                    && self.auto_compact.should_compact(
-                        &self.options.system_prompt,
-                        &messages_for_query,
-                        &tool_defs,
-                    )
+                    && self.auto_compact.should_compact(context_token_count)
                 {
                     match self.compaction_engine.compact(&messages_for_query, &self.sys_text()).await {
                         Ok(compacted) => {
@@ -550,6 +590,7 @@ impl AgenticLoop {
                             insert_compact_boundary(&mut messages_for_query);
                             self.auto_compact.record_success();
                             compaction_happened = true;
+                            state.usage_anchor = None;
                             state.auto_compact_tracking = AutoCompactTracking {
                                 compacted: true,
                                 turn_counter: 0,
@@ -603,7 +644,9 @@ impl AgenticLoop {
                 //   if (isAtBlockingLimit) return yield error, { reason: "blocking_limit" }
                 // }
                 if !compaction_happened {
-                    let token_count = estimate_message_tokens(&messages_for_query);
+                    // A mesma contagem híbrida do autocompact — duas réguas
+                    // divergindo é como se estoura a janela entre elas.
+                    let token_count = context_token_count;
                     if is_at_blocking_limit(token_count, self.options.context_window_tokens) {
                         yield Ok(assistant_event(&AssistantMessage {
                             id: new_uuid(),
@@ -614,6 +657,7 @@ impl AgenticLoop {
                             )],
                             stop_reason: StopReason::EndTurn,
                             usage: Usage::default(),
+            api_error: None,
                         }, &sid));
                         yield Ok(AgenticEvent::Result {
                             subtype: "error_during_execution".to_string(),
@@ -687,6 +731,7 @@ impl AgenticLoop {
                                         let mut compacted_with_boundary = compacted;
                                         insert_compact_boundary(&mut compacted_with_boundary);
                                         state.messages = compacted_with_boundary;
+                                        state.usage_anchor = None;
                                         state.has_attempted_reactive_compact = true;
                                         state.transition = Some(Transition::ReactiveCompactRetry);
                                         yield Ok(AgenticEvent::System {
@@ -913,6 +958,18 @@ impl AgenticLoop {
                     }
                 };
 
+                // Âncora de contagem real: o input desta resposta cobre TUDO
+                // que foi enviado (messages_for_query), e o output vira parte
+                // do contexto seguinte.
+                {
+                    let u = &assistant_msg.usage;
+                    let context_tokens = u64::from(u.input_tokens)
+                        + u64::from(u.cache_read_input_tokens.unwrap_or(0))
+                        + u64::from(u.cache_creation_input_tokens.unwrap_or(0))
+                        + u64::from(u.output_tokens);
+                    state.usage_anchor = Some((messages_for_query.len(), context_tokens));
+                }
+
                 // Accumulate usage and cost
                 state.total_usage.accumulate(&assistant_msg.usage);
                 state.total_cost_usd += calculate_cost(&current_model, &assistant_msg.usage);
@@ -1036,11 +1093,10 @@ impl AgenticLoop {
                     // If the assistant message is itself an API error (e.g. from a non-streaming
                     // fallback that surfaced an error as text), skip stop hooks and return.
                     {
-                        let text_lower = assistant_msg.text().to_lowercase();
-                        let is_api_error_msg = text_lower.contains("api error")
-                            || text_lower.contains("rate limit")
-                            || text_lower.contains("invalid request")
-                            || text_lower.contains("internal server error");
+                        // Flag estrutural da camada de API (nunca o texto do
+                        // modelo): só uma mensagem SINTETIZADA como erro pula
+                        // os stop hooks.
+                        let is_api_error_msg = assistant_msg.api_error.is_some();
                         if is_api_error_msg {
                             let last_text = assistant_msg.text();
                             yield Ok(AgenticEvent::Result {
@@ -1380,6 +1436,7 @@ mod tests {
             ],
             stop_reason: StopReason::ToolUse,
             usage: Usage::default(),
+            api_error: None,
         };
 
         let results = yield_missing_tool_result_blocks(&[msg], "Interrupted");
@@ -1406,14 +1463,24 @@ mod tests {
 
     #[test]
     fn test_is_prompt_too_long_message() {
+        // A detecção é pela flag ESTRUTURAL da camada de API...
         let ptl_msg = AssistantMessage {
             id: "msg_1".to_string(),
             model: "test".to_string(),
             content: vec![ContentBlock::text("Error: prompt is too long (200000 tokens > 128000 max)")],
             stop_reason: StopReason::EndTurn,
             usage: Usage::default(),
+            api_error: Some("prompt_too_long".to_string()),
         };
         assert!(is_prompt_too_long_message(&ptl_msg));
+
+        // ...e NUNCA pelo texto: o modelo ESCREVENDO sobre o erro (um
+        // rationale citando "prompt is too long") não dispara compactação.
+        let text_only = AssistantMessage {
+            api_error: None,
+            ..ptl_msg.clone()
+        };
+        assert!(!is_prompt_too_long_message(&text_only));
 
         let normal_msg = AssistantMessage {
             id: "msg_2".to_string(),
@@ -1421,17 +1488,20 @@ mod tests {
             content: vec![ContentBlock::text("Hello, how can I help?")],
             stop_reason: StopReason::EndTurn,
             usage: Usage::default(),
+            api_error: None,
         };
         assert!(!is_prompt_too_long_message(&normal_msg));
 
+        // Texto sobre tokens sem a flag: também NÃO é sinal de erro.
         let tokens_msg = AssistantMessage {
             id: "msg_3".to_string(),
             model: "test".to_string(),
             content: vec![ContentBlock::text("too many tokens in the request")],
             stop_reason: StopReason::EndTurn,
             usage: Usage::default(),
+            api_error: None,
         };
-        assert!(is_prompt_too_long_message(&tokens_msg));
+        assert!(!is_prompt_too_long_message(&tokens_msg));
     }
 
     #[test]

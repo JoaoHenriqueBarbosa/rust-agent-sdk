@@ -136,3 +136,10 @@ mod tests {
         assert!(tokens > 0);
     }
 }
+
+/// Estimativa com margem de segurança de 1.33x (a mesma do microcompact do
+/// CLI): a heurística de 4 chars/token SUBESTIMA JSON de tool_use/tool_result,
+/// e subestimar contexto significa estourar a janela antes de compactar.
+pub fn estimate_message_tokens_with_margin(messages: &[crate::api::types::ApiMessage]) -> usize {
+    estimate_message_tokens(messages).saturating_mul(4) / 3
+}

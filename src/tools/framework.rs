@@ -311,37 +311,56 @@ impl ToolExecutor {
         self
     }
 
+    /// Máximo de tools concorrentes num grupo safe — o mesmo teto do CLI
+    /// (CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY default).
+    const MAX_TOOL_CONCURRENCY: usize = 10;
+
+    /// Agrupa os tool_uses em RUNS CONTÍGUAS de mesma classificação,
+    /// preservando a ordem que o modelo pediu — como o partitionToolCalls do
+    /// CLI. Particionar globalmente (todas as safe primeiro) reordenava as
+    /// chamadas, o que corrompe sequências de mutação transacionais
+    /// (declarar → commitar).
+    fn contiguous_groups(
+        &self,
+        tool_uses: Vec<crate::api::streaming::ToolUseBlock>,
+    ) -> Vec<(bool, Vec<crate::api::streaming::ToolUseBlock>)> {
+        let mut groups: Vec<(bool, Vec<crate::api::streaming::ToolUseBlock>)> = Vec::new();
+        for tu in tool_uses {
+            let safe = self
+                .registry
+                .get(&tu.name)
+                .map(|t| t.is_concurrency_safe())
+                .unwrap_or(false);
+            match groups.last_mut() {
+                Some((last_safe, run)) if *last_safe == safe => run.push(tu),
+                _ => groups.push((safe, vec![tu])),
+            }
+        }
+        groups
+    }
+
     /// Execute multiple tool_use blocks, respecting concurrency safety.
     pub async fn execute_all(
         &self,
         tool_uses: Vec<crate::api::streaming::ToolUseBlock>,
     ) -> Vec<ToolExecutionResult> {
-        let (safe, unsafe_): (Vec<_>, Vec<_>) = tool_uses
-            .into_iter()
-            .partition(|tu| {
-                self.registry
-                    .get(&tu.name)
-                    .map(|t| t.is_concurrency_safe())
-                    .unwrap_or(false)
-            });
-
+        use futures::stream::StreamExt as _;
         let mut results = Vec::new();
-
-        // Execute concurrency-safe tools in parallel
-        if !safe.is_empty() {
-            let safe_futures: Vec<_> = safe
-                .into_iter()
-                .map(|tu| self.execute_one(tu))
-                .collect();
-            let safe_results = futures::future::join_all(safe_futures).await;
-            results.extend(safe_results);
+        for (safe, run) in self.contiguous_groups(tool_uses) {
+            if safe {
+                // Concorrentes com teto, e `buffered` (não unordered) para os
+                // resultados saírem na ordem pedida.
+                let mut stream = futures::stream::iter(run.into_iter().map(|tu| self.execute_one(tu)))
+                    .buffered(Self::MAX_TOOL_CONCURRENCY);
+                while let Some(result) = stream.next().await {
+                    results.push(result);
+                }
+            } else {
+                for tu in run {
+                    results.push(self.execute_one(tu).await);
+                }
+            }
         }
-
-        // Execute non-safe tools sequentially
-        for tu in unsafe_ {
-            results.push(self.execute_one(tu).await);
-        }
-
         results
     }
 
@@ -353,30 +372,20 @@ impl ToolExecutor {
         tool_uses: Vec<crate::api::streaming::ToolUseBlock>,
     ) -> Pin<Box<dyn Stream<Item = ToolExecutionResult> + Send + '_>> {
         Box::pin(async_stream::stream! {
-            let (safe, unsafe_): (Vec<_>, Vec<_>) = tool_uses
-                .into_iter()
-                .partition(|tu| {
-                    self.registry
-                        .get(&tu.name)
-                        .map(|t| t.is_concurrency_safe())
-                        .unwrap_or(false)
-                });
-
-            // Execute concurrency-safe tools in parallel, then yield all results
-            if !safe.is_empty() {
-                let futures: Vec<_> = safe
-                    .into_iter()
-                    .map(|tu| self.execute_one(tu))
-                    .collect();
-                let results = futures::future::join_all(futures).await;
-                for result in results {
-                    yield result;
+            use futures::stream::StreamExt as _;
+            // Runs contíguas na ordem do modelo — mesma regra do execute_all.
+            for (safe, run) in self.contiguous_groups(tool_uses) {
+                if safe {
+                    let mut stream = futures::stream::iter(run.into_iter().map(|tu| self.execute_one(tu)))
+                        .buffered(Self::MAX_TOOL_CONCURRENCY);
+                    while let Some(result) = stream.next().await {
+                        yield result;
+                    }
+                } else {
+                    for tu in run {
+                        yield self.execute_one(tu).await;
+                    }
                 }
-            }
-
-            // Execute non-safe tools sequentially, yielding after each completes
-            for tu in unsafe_ {
-                yield self.execute_one(tu).await;
             }
         })
     }
@@ -588,8 +597,18 @@ fn truncate_result(mut result: ToolResult) -> ToolResult {
         if let ToolResultContent::Text(text) = content {
             if text.len() > MAX_RESULT_SIZE {
                 let half = MAX_RESULT_SIZE / 2;
-                let first = &text[..half];
-                let last = &text[text.len() - half..];
+                // Cortes em fronteira de char — fatiar por byte panica em
+                // texto multibyte (acentos).
+                let mut head_end = half.min(text.len());
+                while head_end > 0 && !text.is_char_boundary(head_end) {
+                    head_end -= 1;
+                }
+                let mut tail_start = text.len() - half;
+                while tail_start < text.len() && !text.is_char_boundary(tail_start) {
+                    tail_start += 1;
+                }
+                let first = &text[..head_end];
+                let last = &text[tail_start..];
                 *text = format!(
                     "{first}\n\n... [truncated {} bytes] ...\n\n{last}",
                     text.len() - MAX_RESULT_SIZE

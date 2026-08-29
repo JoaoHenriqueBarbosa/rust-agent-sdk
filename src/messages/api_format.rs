@@ -1,10 +1,4 @@
-use crate::api::types::{ApiMessage, CacheControl, ContentBlock, Role, SystemBlock, ToolResultContent};
-
-/// Maximum number of cache_control breakpoints allowed by the API.
-const MAX_CACHE_BREAKPOINTS: usize = 4;
-
-/// Minimum character length for a tool_result to be considered "large" enough to cache.
-const LARGE_TOOL_RESULT_THRESHOLD: usize = 1000;
+use crate::api::types::{ApiMessage, CacheControl, ContentBlock, SystemBlock};
 
 /// Represents a location where cache_control can be injected.
 #[allow(dead_code)] // referência do port; a injeção atual anda direto nos blocos
@@ -19,111 +13,59 @@ enum CacheTarget {
     ToolResultBlock { msg_index: usize, block_index: usize, content_len: usize },
 }
 
-/// Inject cache_control breakpoints following the addCacheBreakpoints strategy.
+/// Inject cache_control breakpoints — a estratégia do addCacheBreakpoints do
+/// CLI: UM único breakpoint de mensagem, no último bloco da ÚLTIMA mensagem.
+/// Tudo antes dele é prefixo estável, e o breakpoint do request anterior
+/// continua válido dentro da janela do cache — é isso que faz o prefixo ser
+/// reaproveitado. Marcar posições que se movem a cada turno (penúltima user,
+/// "maior tool_result") invalidava o cache em todo request.
 ///
-/// Priority order (up to MAX_CACHE_BREAKPOINTS total):
-///   1. Last system block
-///   2. Last user message (last text block)
-///   3. Second-to-last user message (last text block)
-///   4. Largest tool_result block with content > LARGE_TOOL_RESULT_THRESHOLD chars
+/// Os marcadores do turno anterior são LIMPOS antes: o histórico persiste
+/// entre iterações, e acumular breakpoints estoura o limite de 4 da API.
 pub fn inject_cache_control(
     messages: &mut [ApiMessage],
     system: &mut [SystemBlock],
 ) {
-    let mut budget = MAX_CACHE_BREAKPOINTS;
+    // System: o último bloco leva o breakpoint (o prompt não muda na sessão).
+    if let Some(last_sys) = system.last_mut() {
+        last_sys.cache_control = Some(CacheControl::ephemeral());
+    }
 
-    // 1. Last system block
-    if budget > 0 {
-        if let Some(last_sys) = system.last_mut() {
-            last_sys.cache_control = Some(CacheControl::ephemeral());
-            budget -= 1;
+    // Limpa marcadores de turnos anteriores.
+    for message in messages.iter_mut() {
+        for block in &mut message.content {
+            clear_block_cache_control(block);
         }
     }
 
-    // Collect user message indices (for priority 2 & 3)
-    let user_indices: Vec<usize> = messages
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| m.role == Role::User)
-        .map(|(i, _)| i)
-        .collect();
-
-    // 2. Last user message
-    if budget > 0 {
-        if let Some(&last_user_idx) = user_indices.last() {
-            if set_cache_on_last_text_block(&mut messages[last_user_idx]) {
-                budget -= 1;
-            }
-        }
-    }
-
-    // 3. Second-to-last user message
-    if budget > 0 && user_indices.len() >= 2 {
-        let second_last_idx = user_indices[user_indices.len() - 2];
-        if set_cache_on_last_text_block(&mut messages[second_last_idx]) {
-            budget -= 1;
-        }
-    }
-
-    // 4. Largest tool_result block above threshold
-    if budget > 0 {
-        let mut best: Option<(usize, usize, usize)> = None; // (msg_index, block_index, content_len)
-
-        for (msg_idx, msg) in messages.iter().enumerate() {
-            if msg.role != Role::User {
-                continue;
-            }
-            for (block_idx, block) in msg.content.iter().enumerate() {
-                if let ContentBlock::ToolResult { content, cache_control, .. } = block {
-                    // Skip if already has cache_control
-                    if cache_control.is_some() {
-                        continue;
-                    }
-                    let len = tool_result_content_len(content.as_deref());
-                    if len > LARGE_TOOL_RESULT_THRESHOLD
-                        && best.is_none_or(|(_, _, best_len)| len > best_len) {
-                            best = Some((msg_idx, block_idx, len));
-                        }
-                }
-            }
-        }
-
-        if let Some((msg_idx, block_idx, _)) = best {
-            if let ContentBlock::ToolResult { cache_control, .. } =
-                &mut messages[msg_idx].content[block_idx]
-            {
-                *cache_control = Some(CacheControl::ephemeral());
+    // Um breakpoint só: o último bloco cacheável da última mensagem.
+    if let Some(last) = messages.last_mut() {
+        for block in last.content.iter_mut().rev() {
+            if set_block_cache_control(block) {
+                break;
             }
         }
     }
 }
 
-/// Set cache_control on the last text block of a message. Returns true if set.
-fn set_cache_on_last_text_block(message: &mut ApiMessage) -> bool {
-    // Walk backwards to find the last text block
-    for block in message.content.iter_mut().rev() {
-        match block {
-            ContentBlock::Text { cache_control, .. } => {
-                *cache_control = Some(CacheControl::ephemeral());
-                return true;
-            }
-            _ => continue,
-        }
+fn clear_block_cache_control(block: &mut ContentBlock) {
+    match block {
+        ContentBlock::Text { cache_control, .. }
+        | ContentBlock::ToolResult { cache_control, .. } => *cache_control = None,
+        _ => {}
     }
-    false
 }
 
-/// Calculate total character length of tool_result content.
-fn tool_result_content_len(content: Option<&[ToolResultContent]>) -> usize {
-    content.map_or(0, |blocks| {
-        blocks
-            .iter()
-            .map(|c| match c {
-                ToolResultContent::Text { text } => text.len(),
-                ToolResultContent::Image { .. } => 0,
-            })
-            .sum()
-    })
+/// Marca o bloco quando ele aceita cache_control (thinking não aceita).
+fn set_block_cache_control(block: &mut ContentBlock) -> bool {
+    match block {
+        ContentBlock::Text { cache_control, .. }
+        | ContentBlock::ToolResult { cache_control, .. } => {
+            *cache_control = Some(CacheControl::ephemeral());
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Build a user message from a text prompt.
@@ -139,7 +81,7 @@ pub fn assistant_text_message(text: impl Into<String>) -> ApiMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::types::ToolResultContent;
+    use crate::api::types::{Role, ToolResultContent};
 
     #[test]
     fn test_inject_cache_control_basic() {
@@ -170,19 +112,39 @@ mod tests {
             _ => panic!("Expected text"),
         }
 
-        // Second-to-last user message (index 2) should have cache_control
-        match &messages[2].content[0] {
-            ContentBlock::Text { cache_control, .. } => {
-                assert!(cache_control.is_some());
+        // NENHUMA outra mensagem leva breakpoint: um único ponto, no fim do
+        // prompt — posições que se movem a cada turno invalidariam o cache.
+        for message in &messages[..4] {
+            for block in &message.content {
+                if let ContentBlock::Text { cache_control, .. } = block {
+                    assert!(cache_control.is_none());
+                }
             }
-            _ => panic!("Expected text"),
         }
+    }
 
-        // First user message should NOT have cache_control
-        match &messages[0].content[0] {
-            ContentBlock::Text { cache_control, .. } => {
-                assert!(cache_control.is_none());
-            }
+    #[test]
+    fn test_inject_cache_control_clears_stale_markers() {
+        // O histórico persiste entre turnos: o marcador do turno anterior tem
+        // de ser LIMPO, senão os breakpoints acumulam além do limite de 4.
+        let mut system = vec![SystemBlock::text("system")];
+        let mut messages = vec![
+            ApiMessage::user(vec![ContentBlock::text("first")]),
+            ApiMessage::user(vec![ContentBlock::text("second")]),
+        ];
+        inject_cache_control(&mut messages, &mut system);
+        messages.push(ApiMessage::user(vec![ContentBlock::text("third")]));
+        inject_cache_control(&mut messages, &mut system);
+
+        let marked: usize = messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(|b| matches!(b, ContentBlock::Text { cache_control: Some(_), .. }))
+            .count();
+        // Contrato: exatamente UM breakpoint de mensagem por request.
+        assert_eq!(marked, 1);
+        match &messages[2].content[0] {
+            ContentBlock::Text { cache_control, .. } => assert!(cache_control.is_some()),
             _ => panic!("Expected text"),
         }
     }
@@ -215,10 +177,11 @@ mod tests {
             _ => panic!("Expected text"),
         }
 
-        // Large tool_result: cached (we have budget: 4 - 1 system - 1 user = 2 remaining)
+        // tool_result NÃO ganha breakpoint próprio (estratégia do CLI: o
+        // único breakpoint de mensagem é o fim do prompt).
         match &messages[0].content[0] {
             ContentBlock::ToolResult { cache_control, .. } => {
-                assert!(cache_control.is_some());
+                assert!(cache_control.is_none());
             }
             _ => panic!("Expected tool_result"),
         }
@@ -291,7 +254,7 @@ mod tests {
             }
         }
 
-        assert!(count <= MAX_CACHE_BREAKPOINTS, "Should not exceed {MAX_CACHE_BREAKPOINTS} breakpoints, got {count}");
+        assert!(count <= 4, "Should not exceed 4 breakpoints (API limit), got {count}");
     }
 
     #[test]
