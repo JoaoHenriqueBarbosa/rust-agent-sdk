@@ -416,16 +416,47 @@ const DEFAULT_MAX_TOOL_RESULT_CHARS: usize = 80_000;
 /// Truncate oversized tool_result text blocks in-place, keeping the first and
 /// last portions of the text (similar to `truncate_result` in framework.rs).
 ///
-/// This is a simplified port of the TS `applyToolResultBudget` / `enforceToolResultBudget`.
-/// The TS version persists large results to disk and replaces them with references;
-/// here we simply truncate in-place since the Rust SDK doesn't have a persistence layer.
+/// Este é o fallback SEM diretório de persistência. Com diretório, use
+/// [`apply_tool_result_budget_persisting`], que é o comportamento do CLI:
+/// o conteúdo inteiro vai para disco e o bloco vira uma referência.
 pub fn apply_tool_result_budget(messages: &mut [ApiMessage], max_result_chars: usize) {
+    apply_budget(messages, max_result_chars, None);
+}
+
+/// O budget do CLI: um tool_result acima do teto é PERSISTIDO por inteiro em
+/// `<dir>/<tool_use_id>.txt` e o bloco vira um `<persisted-output>` com
+/// preview + caminho — o modelo relê com Read em vez de perder o miolo.
+///
+/// É idempotente por construção: o nome do arquivo vem do `tool_use_id` e um
+/// bloco já persistido não é reprocessado, então o prefixo não muda entre
+/// turnos — que é o que preserva o prompt cache. Falha de I/O cai no
+/// truncamento (perder o miolo é ruim; falhar a run por disco cheio é pior).
+pub fn apply_tool_result_budget_persisting(
+    messages: &mut [ApiMessage],
+    max_result_chars: usize,
+    dir: &std::path::Path,
+) {
+    apply_budget(messages, max_result_chars, Some(dir));
+}
+
+/// Marcador de bloco já persistido — a âncora da idempotência.
+const PERSISTED_MARKER: &str = "<persisted-output>";
+
+/// Preview inline de um resultado persistido.
+const PERSIST_PREVIEW_BYTES: usize = 2_000;
+
+fn apply_budget(
+    messages: &mut [ApiMessage],
+    max_result_chars: usize,
+    dir: Option<&std::path::Path>,
+) {
     for message in messages.iter_mut() {
         if message.role != Role::User {
             continue;
         }
         for block in &mut message.content {
             if let ContentBlock::ToolResult {
+                tool_use_id,
                 content: Some(ref mut content_blocks),
                 ..
             } = block
@@ -433,24 +464,74 @@ pub fn apply_tool_result_budget(messages: &mut [ApiMessage], max_result_chars: u
                 for content in content_blocks.iter_mut() {
                     if let ToolResultContent::Text { ref mut text } = content {
                         let original_len = text.len();
-                        if original_len > max_result_chars {
-                            let half = max_result_chars / 2;
-                            // Cortes SEMPRE em fronteira de char: fatiar por
-                            // byte panica em texto multibyte (acentos).
-                            let head_end = floor_char_boundary(text, half);
-                            let tail_start =
-                                ceil_char_boundary(text, original_len.saturating_sub(half));
-                            let first = &text[..head_end];
-                            let last = &text[tail_start..];
-                            *text = format!(
-                                "{first}\n\n[Result truncated from {original_len} to {max_result_chars} characters]\n\n{last}",
-                            );
+                        if original_len <= max_result_chars {
+                            continue;
                         }
+                        // Já persistido num turno anterior: não mexer (o
+                        // prefixo precisa ser idêntico entre requests).
+                        if text.starts_with(PERSISTED_MARKER) {
+                            continue;
+                        }
+                        if let Some(dir) = dir {
+                            if let Some(replacement) =
+                                persist_to_disk(text, tool_use_id, dir, original_len)
+                            {
+                                *text = replacement;
+                                continue;
+                            }
+                        }
+                        *text = truncate_middle(text, max_result_chars, original_len);
                     }
                 }
             }
         }
     }
+}
+
+/// Grava o texto inteiro e devolve o bloco de referência; `None` em falha de
+/// I/O (o chamador cai no truncamento).
+fn persist_to_disk(
+    text: &str,
+    tool_use_id: &str,
+    dir: &std::path::Path,
+    original_len: usize,
+) -> Option<String> {
+    let file_name = format!("{}.txt", sanitize_id(tool_use_id));
+    let path = dir.join(file_name);
+    std::fs::create_dir_all(dir).ok()?;
+    std::fs::write(&path, text.as_bytes()).ok()?;
+    let cut = floor_char_boundary(text, PERSIST_PREVIEW_BYTES.min(text.len()));
+    let preview = &text[..cut];
+    Some(format!(
+        "{PERSISTED_MARKER}\nOutput too large ({original_len} bytes). Full output saved to: {}\nUse the Read tool to access the complete output.\n\nPreview (first {cut} bytes):\n{preview}\n</persisted-output>",
+        path.display(),
+    ))
+}
+
+/// O id vira nome de arquivo: qualquer coisa fora de [A-Za-z0-9_-] cai fora.
+fn sanitize_id(id: &str) -> String {
+    let cleaned: String = id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    if cleaned.is_empty() {
+        "tool-result".to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn truncate_middle(text: &str, max_result_chars: usize, original_len: usize) -> String {
+    let half = max_result_chars / 2;
+    // Cortes SEMPRE em fronteira de char: fatiar por byte panica em texto
+    // multibyte (acentos).
+    let head_end = floor_char_boundary(text, half);
+    let tail_start = ceil_char_boundary(text, original_len.saturating_sub(half));
+    let first = &text[..head_end];
+    let last = &text[tail_start..];
+    format!(
+        "{first}\n\n[Result truncated from {original_len} to {max_result_chars} characters]\n\n{last}",
+    )
 }
 
 /// Maior índice <= `index` que cai em fronteira de char.
@@ -474,6 +555,19 @@ fn ceil_char_boundary(text: &str, index: usize) -> usize {
 /// Convenience wrapper that uses the default budget (80KB).
 pub fn apply_tool_result_budget_default(messages: &mut [ApiMessage]) {
     apply_tool_result_budget(messages, DEFAULT_MAX_TOOL_RESULT_CHARS);
+}
+
+/// O default (80KB) persistindo em disco quando há diretório configurado.
+pub fn apply_tool_result_budget_default_persisting(
+    messages: &mut [ApiMessage],
+    dir: Option<&std::path::Path>,
+) {
+    match dir {
+        Some(dir) => {
+            apply_tool_result_budget_persisting(messages, DEFAULT_MAX_TOOL_RESULT_CHARS, dir)
+        }
+        None => apply_tool_result_budget(messages, DEFAULT_MAX_TOOL_RESULT_CHARS),
+    }
 }
 
 #[cfg(test)]
@@ -878,5 +972,74 @@ mod tests {
             .filter(|b| matches!(b, ContentBlock::Image { .. }))
             .count();
         assert_eq!(image_count, 2);
+    }
+
+    // ── Budget com persistência (paridade com o CLI) ───────────────────
+
+    fn tool_result_msg(id: &str, text: String) -> ApiMessage {
+        ApiMessage::user(vec![ContentBlock::ToolResult {
+            tool_use_id: id.to_string(),
+            content: Some(vec![ToolResultContent::text(text)]),
+            is_error: None,
+            cache_control: None,
+        }])
+    }
+
+    fn text_of(msg: &ApiMessage) -> String {
+        match &msg.content[0] {
+            ContentBlock::ToolResult { content: Some(blocks), .. } => match &blocks[0] {
+                ToolResultContent::Text { text } => text.clone(),
+                _ => panic!("texto esperado"),
+            },
+            _ => panic!("tool_result esperado"),
+        }
+    }
+
+    #[test]
+    fn oversized_result_is_persisted_whole_and_replaced_by_a_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        // Multibyte de propósito: o preview corta em fronteira de char.
+        let big = format!("início-{}—fim", "é".repeat(60_000));
+        let mut messages = vec![tool_result_msg("toolu_persist", big.clone())];
+        apply_tool_result_budget_persisting(&mut messages, 1_000, dir.path());
+
+        let text = text_of(&messages[0]);
+        assert!(text.starts_with("<persisted-output>"), "{text}");
+        let file = dir.path().join("toolu_persist.txt");
+        assert!(text.contains(&file.display().to_string()));
+        // Contrato: o miolo NÃO se perde — o arquivo tem o texto inteiro.
+        let full = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(full, big);
+    }
+
+    #[test]
+    fn persisted_block_is_idempotent_across_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = "x".repeat(200_000);
+        let mut messages = vec![tool_result_msg("toolu_idem", big)];
+        apply_tool_result_budget_persisting(&mut messages, 1_000, dir.path());
+        let first = text_of(&messages[0]);
+        // Segunda passada (turno seguinte) NÃO pode mudar o bloco: prefixo
+        // idêntico é o que preserva o prompt cache.
+        apply_tool_result_budget_persisting(&mut messages, 1_000, dir.path());
+        assert_eq!(first, text_of(&messages[0]));
+    }
+
+    #[test]
+    fn without_a_dir_the_budget_still_truncates_in_place() {
+        let mut messages = vec![tool_result_msg("toolu_trunc", "y".repeat(200_000))];
+        apply_tool_result_budget_default(&mut messages);
+        let text = text_of(&messages[0]);
+        assert!(text.contains("[Result truncated from"), "{text}");
+        assert!(!text.contains("<persisted-output>"));
+    }
+
+    #[test]
+    fn a_result_under_the_budget_is_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut messages = vec![tool_result_msg("toolu_small", "curto".to_string())];
+        apply_tool_result_budget_persisting(&mut messages, 1_000, dir.path());
+        assert_eq!(text_of(&messages[0]), "curto");
+        assert!(!dir.path().join("toolu_small.txt").exists());
     }
 }

@@ -21,6 +21,7 @@ async fn main() {
         tools: Some(rust_agent_sdk::types::ToolsConfig::List(vec![
             "Bash".to_string(),
             "Read".to_string(),
+            "WebSearch".to_string(),
         ])),
         ..Default::default()
     };
@@ -55,6 +56,13 @@ async fn main() {
     println!("secret esperado: {secret}");
     let _ = std::fs::remove_file(&secret_path);
 
+    // Server tool: a busca roda NO SERVIDOR; o SDK só declara e consome.
+    client
+        .query("Use web_search para descobrir quem é o atual CEO da Anthropic. Responda em uma linha.")
+        .await
+        .expect("query 3");
+    print_messages(&client.receive_response().await.expect("response 3"));
+
     client.disconnect().await.expect("disconnect");
 }
 
@@ -68,6 +76,9 @@ fn print_messages(messages: &[Message]) {
                     }
                     if let ContentBlock::ToolUse(tu) = block {
                         println!("tool_use: {} {}", tu.name, tu.input);
+                    }
+                    if let ContentBlock::ServerToolUse(stu) = block {
+                        println!("server_tool_use: {} {}", stu.name, stu.input);
                     }
                 }
             }

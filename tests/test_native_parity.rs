@@ -606,3 +606,211 @@ async fn system_prompt_preset_reaches_the_request_with_append() {
         "append ausente do system: {first}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Server tools (web_search executada pelo SERVIDOR da API)
+// ---------------------------------------------------------------------------
+
+/// SSE em que o SERVIDOR já executou a busca: server_tool_use +
+/// web_search_tool_result chegam prontos, e o texto vem depois.
+fn sse_server_web_search(answer: &str) -> String {
+    sse_events(&[
+        json!({"type":"message_start","message":{"id":"msg_ws","model":"mock-model","role":"assistant","usage":{"input_tokens":30,"output_tokens":0}}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search"}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"preço bitcoin\"}"}}),
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[{"type":"web_search_result","title":"Preço","url":"https://exemplo","encrypted_content":"AAAA"}]}}),
+        json!({"type":"content_block_stop","index":1}),
+        json!({"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}),
+        json!({"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":answer}}),
+        json!({"type":"content_block_stop","index":2}),
+        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":12}}),
+        json!({"type":"message_stop"}),
+    ])
+}
+
+#[tokio::test]
+async fn web_search_is_declared_as_a_server_tool_and_never_executed_locally() {
+    let api = MockApi::start(vec![sse_server_web_search("O bitcoin está caro.")]).await;
+    let mut fx = fixture(
+        Spec {
+            tools: Some(vec!["WebSearch".to_string()]),
+            permission_mode: Some(PermissionMode::BypassPermissions),
+            ..Default::default()
+        },
+        &api,
+    )
+    .await;
+    let messages = run_one(&mut fx, "qual o preço do bitcoin?").await;
+
+    // Contrato: a definição enviada é a da SERVER tool — tipo versionado, sem
+    // input_schema — e não uma tool cliente qualquer.
+    let first = &api.requests().await[0];
+    let tools = first["tools"].as_array().expect("tools no request");
+    let ws = tools
+        .iter()
+        .find(|t| t["name"] == "web_search")
+        .expect("web_search declarada");
+    assert_eq!(ws["type"], "web_search_20250305");
+    assert!(ws.get("input_schema").is_none(), "server tool não leva input_schema: {ws}");
+    assert!(ws.get("cache_control").is_none(), "server tool não aceita cache_control: {ws}");
+
+    // Contrato: o resultado do servidor encerra o turno sem uma segunda
+    // request — o SDK não executou nada localmente.
+    assert_eq!(api.requests().await.len(), 1);
+    let result = result_of(&messages).expect("result");
+    assert_eq!(result.subtype, "success");
+    assert!(!result.is_error);
+    assert_eq!(result.result.as_deref(), Some("O bitcoin está caro."));
+}
+
+#[tokio::test]
+async fn an_unknown_content_block_type_does_not_kill_the_session() {
+    // Gateway fora de spec: um tipo de bloco que o SDK não conhece.
+    let api = MockApi::start(vec![sse_events(&[
+        json!({"type":"message_start","message":{"id":"msg_u","model":"mock-model","role":"assistant","usage":{"input_tokens":5,"output_tokens":0}}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"quantum_flux","payload":{"a":1}}}),
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}),
+        json!({"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"sobrevivi"}}),
+        json!({"type":"content_block_stop","index":1}),
+        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}),
+        json!({"type":"message_stop"}),
+    ])])
+    .await;
+    let mut fx = fixture(Spec::default(), &api).await;
+    let messages = run_one(&mut fx, "oi").await;
+    let result = result_of(&messages).expect("result");
+    // Contrato: bloco desconhecido é descartado, o turno continua.
+    assert_eq!(result.subtype, "success");
+    assert_eq!(result.result.as_deref(), Some("sobrevivi"));
+}
+
+#[tokio::test]
+async fn an_oversized_tool_result_is_persisted_and_the_next_request_carries_the_reference() {
+    // A tool devolve um output gigante; o modelo pede de novo no turno 2.
+    let api = MockApi::start(vec![
+        sse_tool_call_id("toolu_big", "Bash", &json!({"command": "yes paridade | head -c 120000"})),
+        sse_text("li o resumo"),
+    ])
+    .await;
+    let mut fx = fixture(
+        Spec {
+            tools: Some(vec!["Bash".to_string()]),
+            permission_mode: Some(PermissionMode::BypassPermissions),
+            ..Default::default()
+        },
+        &api,
+    )
+    .await;
+    let messages = run_one(&mut fx, "gere muito output").await;
+    assert_eq!(result_of(&messages).expect("result").subtype, "success");
+
+    let second = api.requests().await[1].to_string();
+    // Contrato: o miolo não vai inteiro para a API — vira referência com
+    // caminho, e o modelo relê com Read se precisar.
+    assert!(
+        second.contains("persisted-output"),
+        "output grande não virou referência: {}",
+        &second[..second.len().min(600)]
+    );
+    assert!(second.contains("Use the Read tool"));
+    // Contrato: o arquivo com o conteúdo COMPLETO existe em disco.
+    let path_start = second.find("saved to: ").expect("caminho no bloco") + "saved to: ".len();
+    let rest = &second[path_start..];
+    let path_end = rest.find("\\n").expect("fim do caminho");
+    let path = &rest[..path_end];
+    let full = std::fs::read_to_string(path).expect("arquivo persistido");
+    assert!(full.len() > 100_000, "arquivo truncado: {}", full.len());
+}
+
+#[tokio::test]
+async fn unsupported_options_are_announced_instead_of_silently_ignored() {
+    let api = MockApi::start(vec![sse_text("ok")]).await;
+    let config_dir = tempfile::tempdir().expect("config");
+    let cwd = tempfile::tempdir().expect("cwd");
+    let env = HashMap::from([
+        ("ANTHROPIC_API_KEY".to_string(), "mock-key".to_string()),
+        ("ANTHROPIC_BASE_URL".to_string(), api.addr.clone()),
+        ("ANTHROPIC_MODEL".to_string(), "mock-model".to_string()),
+        (
+            "CLAUDE_CONFIG_DIR".to_string(),
+            config_dir.path().display().to_string(),
+        ),
+    ]);
+    let transport_options = ClaudeAgentOptions {
+        env: env.clone(),
+        cwd: Some(cwd.path().to_path_buf()),
+        tools: Some(ToolsConfig::List(Vec::new())),
+        // Sem tradução nativa: precisa AVISAR, não engolir.
+        effort: Some("high".to_string()),
+        output_format: Some(json!({"type": "json_schema"})),
+        strict_mcp_config: true,
+        ..Default::default()
+    };
+    let client_options = ClaudeAgentOptions {
+        env,
+        cwd: Some(cwd.path().to_path_buf()),
+        ..Default::default()
+    };
+    let transport = NativeApiTransport::new(transport_options);
+    let mut client = ClaudeSDKClient::new(client_options).with_transport(Box::new(transport));
+    client.connect().await.expect("connect");
+    client.query("oi").await.expect("query");
+    let messages = client.receive_response().await.expect("response");
+    client.disconnect().await.expect("disconnect");
+
+    // Contrato: um system/unsupported_options nomeia CADA opção ignorada.
+    let announced = messages.iter().any(|m| match m {
+        Message::System(s) => {
+            s.subtype == "unsupported_options"
+                && s.data.to_string().contains("effort")
+                && s.data.to_string().contains("output_format")
+        }
+        _ => false,
+    });
+    assert!(announced, "opções sem tradução foram engolidas: {messages:?}");
+    assert_eq!(result_of(&messages).expect("result").subtype, "success");
+}
+
+#[tokio::test]
+async fn adaptive_thinking_becomes_a_real_budget_in_the_request() {
+    let api = MockApi::start(vec![sse_text("ok")]).await;
+    let config_dir = tempfile::tempdir().expect("config");
+    let cwd = tempfile::tempdir().expect("cwd");
+    let env = HashMap::from([
+        ("ANTHROPIC_API_KEY".to_string(), "mock-key".to_string()),
+        ("ANTHROPIC_BASE_URL".to_string(), api.addr.clone()),
+        ("ANTHROPIC_MODEL".to_string(), "mock-model".to_string()),
+        (
+            "CLAUDE_CONFIG_DIR".to_string(),
+            config_dir.path().display().to_string(),
+        ),
+    ]);
+    let transport_options = ClaudeAgentOptions {
+        env: env.clone(),
+        cwd: Some(cwd.path().to_path_buf()),
+        tools: Some(ToolsConfig::List(Vec::new())),
+        thinking: Some(rust_agent_sdk::types::ThinkingConfig::Adaptive { display: None }),
+        max_thinking_tokens: Some(4096),
+        strict_mcp_config: true,
+        ..Default::default()
+    };
+    let client_options = ClaudeAgentOptions {
+        env,
+        cwd: Some(cwd.path().to_path_buf()),
+        ..Default::default()
+    };
+    let transport = NativeApiTransport::new(transport_options);
+    let mut client = ClaudeSDKClient::new(client_options).with_transport(Box::new(transport));
+    client.connect().await.expect("connect");
+    client.query("pense").await.expect("query");
+    let _ = client.receive_response().await.expect("response");
+    client.disconnect().await.expect("disconnect");
+
+    // Contrato: adaptive vira thinking habilitado, com o teto de
+    // max_thinking_tokens — o pedido não é ignorado.
+    let first = &api.requests().await[0];
+    assert_eq!(first["thinking"]["type"], "enabled");
+    assert_eq!(first["thinking"]["budget_tokens"], 4096);
+}

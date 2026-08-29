@@ -22,7 +22,7 @@ use crate::compact::compact::CompactionEngine;
 use crate::compact::file_tracker::{ReadFileTracker, POST_COMPACT_MAX_LINES_PER_FILE};
 use crate::errors::Result;
 use crate::messages::api_format::inject_cache_control;
-use crate::messages::normalize::{apply_tool_result_budget_default, ensure_tool_result_pairing, normalize_messages_for_api};
+use crate::messages::normalize::{apply_tool_result_budget_default_persisting, ensure_tool_result_pairing, normalize_messages_for_api};
 use crate::tools::framework::ToolExecutor;
 
 // ---------------------------------------------------------------------------
@@ -587,7 +587,10 @@ impl AgenticLoop {
                 // ─── Apply tool result budget (BEFORE autocompact) ────
                 // Port: messagesForQuery = applyToolResultBudget(messagesForQuery, ...)
                 // Must happen before autocompact so token counts are accurate.
-                apply_tool_result_budget_default(&mut messages_for_query);
+                apply_tool_result_budget_default_persisting(
+                    &mut messages_for_query,
+                    self.tool_executor.context.tool_results_dir.as_deref(),
+                );
 
                 // ─── Auto-compact ─────────────────────────────────────
                 // Port: let { compactionResult, consecutiveFailures } = await deps.autocompact(...)

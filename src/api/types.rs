@@ -116,6 +116,20 @@ pub enum ContentBlock {
     RedactedThinking {
         data: String,
     },
+    /// Tool executada PELO SERVIDOR da API (web_search etc.) — o SDK não a
+    /// executa; o bloco atravessa intacto para o histórico e requests futuras.
+    #[serde(rename = "server_tool_use")]
+    ServerToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    /// Resultado de web_search server-side (conteúdo criptografado incluso).
+    #[serde(rename = "web_search_tool_result")]
+    WebSearchToolResult {
+        tool_use_id: String,
+        content: serde_json::Value,
+    },
 }
 
 impl ContentBlock {
@@ -225,12 +239,34 @@ impl CacheControl {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
+    /// Tipo versionado de server tool (ex.: `web_search_20250305`). Ausente
+    /// para tools cliente comuns.
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none", default)]
+    pub r#type: Option<String>,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Server tools NÃO levam input_schema — fica `null` e é omitido.
+    #[serde(skip_serializing_if = "serde_json::Value::is_null", default)]
     pub input_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub max_uses: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
+}
+
+impl ToolDefinition {
+    /// A server tool `web_search` versionada.
+    pub fn web_search(max_uses: Option<u32>) -> Self {
+        Self {
+            r#type: Some("web_search_20250305".to_string()),
+            name: "web_search".to_string(),
+            description: None,
+            input_schema: serde_json::Value::Null,
+            max_uses,
+            cache_control: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -361,6 +397,18 @@ pub enum ContentBlockStart {
     },
     #[serde(rename = "redacted_thinking")]
     RedactedThinking,
+    #[serde(rename = "server_tool_use")]
+    ServerToolUse { id: String, name: String },
+    /// Chega COMPLETO no content_block_start (o servidor já executou).
+    #[serde(rename = "web_search_tool_result")]
+    WebSearchToolResult {
+        tool_use_id: String,
+        #[serde(default)]
+        content: serde_json::Value,
+    },
+    /// Tipo de bloco desconhecido — atravessa sem matar a sessão.
+    #[serde(untagged)]
+    Unknown(serde_json::Value),
 }
 
 #[derive(Debug, Clone, Deserialize)]

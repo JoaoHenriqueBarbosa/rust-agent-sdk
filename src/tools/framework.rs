@@ -263,6 +263,13 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Definição customizada enviada à API. `None` = a definição padrão
+    /// (nome/descrição/schema). Server tools sobrescrevem isto para mandar o
+    /// tipo versionado que faz o SERVIDOR executar a tool.
+    fn api_definition(&self) -> Option<ToolDefinition> {
+        None
+    }
+
     /// Execute the tool with the given input.
     async fn execute(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult;
 }
@@ -357,15 +364,21 @@ impl ToolRegistry {
         let len = all.len();
         all.into_iter()
             .enumerate()
-            .map(|(i, tool)| ToolDefinition {
-                name: tool.name().to_string(),
-                description: Some(tool.description().to_string()),
-                input_schema: tool.input_schema(),
-                cache_control: if i == len - 1 {
-                    Some(CacheControl::ephemeral())
-                } else {
-                    None
-                },
+            .map(|(i, tool)| {
+                let mut def = tool.api_definition().unwrap_or_else(|| ToolDefinition {
+                    r#type: None,
+                    max_uses: None,
+                    name: tool.name().to_string(),
+                    description: Some(tool.description().to_string()),
+                    input_schema: tool.input_schema(),
+                    cache_control: None,
+                });
+                // Server tools NÃO aceitam cache_control — só a última tool
+                // cliente leva o breakpoint.
+                if i == len - 1 && def.r#type.is_none() {
+                    def.cache_control = Some(CacheControl::ephemeral());
+                }
+                def
             })
             .collect()
     }

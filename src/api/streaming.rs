@@ -113,6 +113,14 @@ enum BlockState {
         signature: Option<String>,
     },
     RedactedThinking,
+    ServerToolUse {
+        id: String,
+        name: String,
+        input_json: String,
+    },
+    /// Bloco já completo no start (web_search_tool_result) ou desconhecido —
+    /// finalizado por passthrough.
+    Complete(Option<ContentBlock>),
 }
 
 /// Accumulates streaming SSE events into a complete AssistantMessage.
@@ -197,6 +205,22 @@ impl StreamAccumulator {
                         BlockState::RedactedThinking,
                         None,
                     ),
+                    ContentBlockStart::ServerToolUse { id, name } => (
+                        BlockState::ServerToolUse {
+                            id,
+                            name,
+                            input_json: String::new(),
+                        },
+                        None,
+                    ),
+                    ContentBlockStart::WebSearchToolResult { tool_use_id, content } => (
+                        BlockState::Complete(Some(ContentBlock::WebSearchToolResult {
+                            tool_use_id,
+                            content,
+                        })),
+                        None,
+                    ),
+                    ContentBlockStart::Unknown(_) => (BlockState::Complete(None), None),
                 };
 
                 self.blocks[index] = state;
@@ -229,6 +253,10 @@ impl StreamAccumulator {
                         s.push_str(&sig);
                         None
                     }
+                    (BlockState::ServerToolUse { input_json, .. }, Delta::InputJsonDelta { partial_json }) => {
+                        input_json.push_str(&partial_json);
+                        None
+                    }
                     _ => None,
                 };
 
@@ -243,10 +271,15 @@ impl StreamAccumulator {
                     ));
                 }
 
-                let block = self.finalize_block(index)?;
-                let update = StreamUpdate::ContentBlockComplete { index, block: block.clone() };
-                self.finalized_blocks.push(block);
-                Ok(Some(update))
+                match self.finalize_block(index)? {
+                    Some(block) => {
+                        let update = StreamUpdate::ContentBlockComplete { index, block: block.clone() };
+                        self.finalized_blocks.push(block);
+                        Ok(Some(update))
+                    }
+                    // Bloco desconhecido descartado sem matar a sessão.
+                    None => Ok(None),
+                }
             }
 
             StreamEvent::MessageDelta { delta, usage } => {
@@ -274,13 +307,14 @@ impl StreamAccumulator {
     }
 
     /// Finalize a block at the given index into a ContentBlock.
-    fn finalize_block(&self, index: usize) -> Result<ContentBlock> {
+    /// `None` = bloco desconhecido, descartado deliberadamente.
+    fn finalize_block(&self, index: usize) -> Result<Option<ContentBlock>> {
         match &self.blocks[index] {
             BlockState::Text { text, cache_control } => {
-                Ok(ContentBlock::Text {
+                Ok(Some(ContentBlock::Text {
                     text: text.clone(),
                     cache_control: cache_control.clone(),
-                })
+                }))
             }
             BlockState::ToolUse { id, name, input_json } => {
                 let input = if input_json.is_empty() {
@@ -290,23 +324,39 @@ impl StreamAccumulator {
                         ClaudeSDKError::json_decode(input_json.clone(), e)
                     })?
                 };
-                Ok(ContentBlock::ToolUse {
+                Ok(Some(ContentBlock::ToolUse {
                     id: id.clone(),
                     name: name.clone(),
                     input,
-                })
+                }))
             }
             BlockState::Thinking { thinking, signature } => {
-                Ok(ContentBlock::Thinking {
+                Ok(Some(ContentBlock::Thinking {
                     thinking: thinking.clone(),
                     signature: signature.clone(),
-                })
+                }))
             }
             BlockState::RedactedThinking => {
-                Ok(ContentBlock::RedactedThinking {
+                Ok(Some(ContentBlock::RedactedThinking {
                     data: String::new(),
-                })
+                }))
             }
+            BlockState::ServerToolUse { id, name, input_json } => {
+                // Input malformado de server tool não derruba a run: o bloco
+                // é do SERVIDOR, e perder a sessão por causa dele seria pior.
+                let input = if input_json.is_empty() {
+                    serde_json::Value::Object(serde_json::Map::new())
+                } else {
+                    serde_json::from_str(input_json)
+                        .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()))
+                };
+                Ok(Some(ContentBlock::ServerToolUse {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input,
+                }))
+            }
+            BlockState::Complete(block) => Ok(block.clone()),
         }
     }
 

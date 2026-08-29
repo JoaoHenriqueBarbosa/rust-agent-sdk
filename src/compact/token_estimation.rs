@@ -28,6 +28,12 @@ pub fn estimate_block_tokens(block: &ContentBlock) -> usize {
         }
         ContentBlock::Thinking { thinking, .. } => estimate_tokens(thinking),
         ContentBlock::RedactedThinking { .. } => 100, // Opaque, can't estimate
+        ContentBlock::ServerToolUse { input, name, .. } => {
+            estimate_tokens(name) + estimate_tokens(&input.to_string())
+        }
+        ContentBlock::WebSearchToolResult { content, .. } => {
+            estimate_tokens(&content.to_string())
+        }
     }
 }
 

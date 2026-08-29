@@ -546,14 +546,74 @@ fn system_prompt_blocks(
     }
 }
 
+/// Budget usado quando o chamador pede thinking `adaptive` sem número: a API
+/// crua exige um teto, e o CLI resolve o "adaptativo" por dentro. Escolher um
+/// default é mais honesto que ignorar o pedido de thinking.
+const ADAPTIVE_THINKING_BUDGET: u32 = 8_192;
+
 fn thinking_param(options: &ClaudeAgentOptions) -> Option<ThinkingParam> {
+    // `max_thinking_tokens` das options vence o budget do ThinkingConfig —
+    // é o teto explícito de quem monta a sessão.
+    let explicit_max = options
+        .max_thinking_tokens
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|n| *n > 0);
     match &options.thinking {
-        Some(ThinkingConfig::Enabled { budget_tokens, .. }) => {
-            u32::try_from(*budget_tokens).ok().map(ThinkingParam::enabled)
-        }
-        // Adaptive não tem tradução direta na API crua; Disabled/ausente = sem thinking.
-        _ => None,
+        Some(ThinkingConfig::Enabled { budget_tokens, .. }) => explicit_max
+            .or_else(|| u32::try_from(*budget_tokens).ok())
+            .map(ThinkingParam::enabled),
+        Some(ThinkingConfig::Adaptive { .. }) => Some(ThinkingParam::enabled(
+            explicit_max.unwrap_or(ADAPTIVE_THINKING_BUDGET),
+        )),
+        // Disabled = sem thinking, mesmo com max_thinking_tokens posto.
+        Some(ThinkingConfig::Disabled) => None,
+        None => explicit_max.map(ThinkingParam::enabled),
     }
+}
+
+/// Opções da superfície pública que o transporte nativo NÃO traduz. Em vez de
+/// ignorá-las em silêncio, o engine avisa uma vez, no início da sessão — quem
+/// depende delas precisa do transporte subprocess do CLI.
+fn unsupported_options(options: &ClaudeAgentOptions) -> Vec<&'static str> {
+    let mut unsupported = Vec::new();
+    if options.output_format.is_some() {
+        unsupported.push("output_format (structured output)");
+    }
+    if options.effort.is_some() {
+        unsupported.push("effort");
+    }
+    if !options.plugins.is_empty() {
+        unsupported.push("plugins");
+    }
+    if options.settings.is_some() {
+        unsupported.push("settings");
+    }
+    if options.setting_sources.is_some() {
+        unsupported.push("setting_sources");
+    }
+    if options.skills.is_some() {
+        unsupported.push("skills");
+    }
+    if options.sandbox.is_some() {
+        unsupported.push("sandbox");
+    }
+    if options.permission_prompt_tool_name.is_some() {
+        unsupported.push("permission_prompt_tool_name");
+    }
+    if options.task_budget.is_some() {
+        unsupported.push("task_budget");
+    }
+    if options.continue_conversation {
+        unsupported.push("continue_conversation (use resume)");
+    }
+    let has_external_mcp = match &options.mcp_servers {
+        crate::types::McpServersConfig::Dict(map) => !map.is_empty(),
+        crate::types::McpServersConfig::Path(_) => true,
+    };
+    if has_external_mcp {
+        unsupported.push("mcp_servers externos (use sdk_mcp_servers)");
+    }
+    unsupported
 }
 
 async fn engine_main(
@@ -655,6 +715,26 @@ async fn engine_main(
         }
         base
     };
+    // Opções sem tradução nativa: avisadas UMA vez, nunca ignoradas em
+    // silêncio — quem depende delas precisa do transporte subprocess.
+    {
+        let unsupported = unsupported_options(&options);
+        if !unsupported.is_empty() {
+            let _ = shared.outbound.send(json!({
+                "type": "system",
+                "subtype": "unsupported_options",
+                "options": unsupported,
+                "message": format!(
+                    "These options have no native translation and were ignored: {}. \
+                     Use the CLI subprocess transport if you need them.",
+                    unsupported.join(", ")
+                ),
+                "session_id": session_id,
+                "uuid": uuid::Uuid::new_v4().to_string(),
+            }));
+        }
+    }
+
     shared
         .run_hooks("SessionStart", hook_base(json!({"source": "startup"})))
         .await;
@@ -1092,7 +1172,9 @@ fn register_named_builtins(registry: &mut ToolRegistry, names: &[String]) {
             "NotebookEdit" => registry.register(Box::new(notebook::NotebookEditTool)),
             "TodoWrite" => registry.register(Box::new(todo::TodoWriteTool)),
             "WebFetch" => registry.register(Box::new(web_fetch::WebFetchTool)),
-            "WebSearch" => registry.register(Box::new(web_search::WebSearchTool)),
+            "WebSearch" | "web_search" => {
+                registry.register(Box::new(web_search::WebSearchTool::default()))
+            }
             "AskUserQuestion" => registry.register(Box::new(ask_user::AskUserQuestionTool)),
             "TaskCreate" => registry.register(Box::new(tasks::TaskCreateTool)),
             "TaskGet" => registry.register(Box::new(tasks::TaskGetTool)),
