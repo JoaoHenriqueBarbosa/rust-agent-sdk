@@ -440,6 +440,56 @@ mod tests {
         }
     }
 
+    /// Um turno cortado no MEIO do `input_json` de um tool_use não pode
+    /// contaminar a tentativa seguinte: o retry mid-stream abre uma conexão
+    /// nova, e conexão nova é acumulador novo. Sem esta garantia, um `{"re`
+    /// perdido viraria `rereport` na tentativa seguinte — a assinatura exata
+    /// do campo que um agente chutou sete vezes em 29/08/2026.
+    #[test]
+    fn um_stream_cortado_no_meio_do_input_nao_contamina_o_proximo() {
+        let cortado: Vec<StreamEvent> = vec![
+            serde_json::from_str(r#"{"type":"message_start","message":{"id":"msg_cut","model":"m","role":"assistant","usage":{"input_tokens":1,"output_tokens":0}}}"#).unwrap(),
+            serde_json::from_str(r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_cut","name":"support"}}"#).unwrap(),
+            serde_json::from_str(r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"re"}}"#).unwrap(),
+        ];
+        let mut interrompido = StreamAccumulator::new();
+        for event in cortado {
+            let _ = interrompido.process_event(event);
+        }
+
+        // A tentativa seguinte nasce com acumulador PRÓPRIO.
+        let inteiro: Vec<StreamEvent> = vec![
+            serde_json::from_str(r#"{"type":"message_start","message":{"id":"msg_ok","model":"m","role":"assistant","usage":{"input_tokens":1,"output_tokens":0}}}"#).unwrap(),
+            serde_json::from_str(r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_ok","name":"support"}}"#).unwrap(),
+            serde_json::from_str(r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"report\":"}}"#).unwrap(),
+            serde_json::from_str(r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"tudo certo\"}"}}"#).unwrap(),
+            serde_json::from_str(r#"{"type":"content_block_stop","index":0}"#).unwrap(),
+            serde_json::from_str(r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":9}}"#).unwrap(),
+            serde_json::from_str(r#"{"type":"message_stop"}"#).unwrap(),
+        ];
+        let mut acc = StreamAccumulator::new();
+        let mut final_msg = None;
+        for event in inteiro {
+            if let Some(StreamUpdate::MessageComplete { message }) = acc.process_event(event).unwrap() {
+                final_msg = Some(message);
+            }
+        }
+
+        let msg = final_msg.expect("o segundo stream fecha a mensagem");
+        let tool = msg.tool_use_blocks().into_iter().next().expect("um tool_use");
+        // O campo chega com o nome LIMPO: nada do `{"re` interrompido sobrou.
+        assert!(
+            tool.input.get("report").is_some(),
+            "o input do segundo stream tem `report`, e não um nome contaminado: {:?}",
+            tool.input
+        );
+        assert!(
+            tool.input.get("rereport").is_none(),
+            "nenhum campo concatenado sobreviveu do stream interrompido: {:?}",
+            tool.input
+        );
+    }
+
     #[test]
     fn test_accumulator_with_tool_use() {
         let events: Vec<StreamEvent> = vec![
