@@ -6,6 +6,8 @@ use crate::tools::framework::{Tool, ToolContext, ToolResult};
 /// Fetch content from a URL.
 pub struct WebFetchTool;
 
+// Campos lidos só pelo serde: o parse valida o shape do input.
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct WebFetchInput {
     url: String,

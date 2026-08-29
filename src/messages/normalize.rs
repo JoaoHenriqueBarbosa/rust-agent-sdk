@@ -65,7 +65,7 @@ const API_MAX_MEDIA_PER_REQUEST: usize = 20;
 
 /// Remove excess Image blocks from messages when the total count exceeds
 /// `max_media`. Removes oldest images first (from earliest messages).
-pub fn strip_excess_media_items(messages: &mut Vec<ApiMessage>, max_media: usize) {
+pub fn strip_excess_media_items(messages: &mut [ApiMessage], max_media: usize) {
     // Count total image blocks
     let total_images: usize = messages
         .iter()
@@ -182,7 +182,7 @@ pub fn normalize_messages_for_api(messages: &[ApiMessage]) -> Vec<ApiMessage> {
     // Port: filterTrailingThinkingFromLastAssistant
     if let Some(last) = result.last_mut() {
         if last.role == Role::Assistant {
-            while last.content.last().map_or(false, |b| {
+            while last.content.last().is_some_and(|b| {
                 matches!(
                     b,
                     ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
@@ -251,7 +251,7 @@ pub fn ensure_tool_result_pairing(messages: &mut Vec<ApiMessage>) {
             // Port: if (msg.type !== "assistant") {
             //   check for orphaned tool_results before any assistant message
             if msg.role == Role::User {
-                let prev_is_assistant = result.last().map_or(false, |m: &ApiMessage| m.role == Role::Assistant);
+                let prev_is_assistant = result.last().is_some_and(|m: &ApiMessage| m.role == Role::Assistant);
                 if !prev_is_assistant {
                     // Strip tool_result blocks that appear before any assistant message
                     let stripped: Vec<ContentBlock> = msg
@@ -419,7 +419,7 @@ const DEFAULT_MAX_TOOL_RESULT_CHARS: usize = 80_000;
 /// This is a simplified port of the TS `applyToolResultBudget` / `enforceToolResultBudget`.
 /// The TS version persists large results to disk and replaces them with references;
 /// here we simply truncate in-place since the Rust SDK doesn't have a persistence layer.
-pub fn apply_tool_result_budget(messages: &mut Vec<ApiMessage>, max_result_chars: usize) {
+pub fn apply_tool_result_budget(messages: &mut [ApiMessage], max_result_chars: usize) {
     for message in messages.iter_mut() {
         if message.role != Role::User {
             continue;
@@ -449,7 +449,7 @@ pub fn apply_tool_result_budget(messages: &mut Vec<ApiMessage>, max_result_chars
 }
 
 /// Convenience wrapper that uses the default budget (80KB).
-pub fn apply_tool_result_budget_default(messages: &mut Vec<ApiMessage>) {
+pub fn apply_tool_result_budget_default(messages: &mut [ApiMessage]) {
     apply_tool_result_budget(messages, DEFAULT_MAX_TOOL_RESULT_CHARS);
 }
 

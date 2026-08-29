@@ -9,7 +9,7 @@ use tokio::sync::{Mutex, Notify};
 
 use crate::api::streaming::ToolUseBlock;
 use crate::api::types::{ApiMessage, ContentBlock};
-use crate::tools::framework::{Tool, ToolContext, ToolResult, ToolResultContent};
+use crate::tools::framework::{Tool, ToolContext, ToolResult};
 
 #[derive(Debug, Clone, PartialEq)]
 enum ToolStatus {

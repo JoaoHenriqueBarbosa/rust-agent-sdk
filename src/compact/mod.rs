@@ -1,3 +1,5 @@
+#![allow(clippy::module_inception)]
+
 pub mod token_estimation;
 pub mod auto_compact;
 pub mod compact;

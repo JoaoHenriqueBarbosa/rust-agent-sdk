@@ -83,7 +83,7 @@ impl Tool for NotebookEditTool {
                 }
                 cells.remove(idx);
             }
-            "replace" | _ => {
+            _ => {
                 let idx = input.cell_number.unwrap_or(0);
                 if idx >= cells.len() {
                     return ToolResult::error(format!("Cell index {} out of range (0-{})", idx, cells.len() - 1));

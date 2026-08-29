@@ -19,6 +19,8 @@ impl Default for BashTool {
     }
 }
 
+// Campos lidos só pelo serde: o parse valida o shape do input.
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct BashInput {
     command: String,

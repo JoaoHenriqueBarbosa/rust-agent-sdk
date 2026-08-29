@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use tokio::io::AsyncWriteExt;
 
-use crate::api::types::{ApiMessage, ContentBlock, Role};
+use crate::api::types::{ApiMessage, ContentBlock};
 use crate::errors::{ClaudeSDKError, Result};
 use crate::internal::sessions::{get_projects_dir, project_key_for_directory};
 
@@ -24,8 +24,18 @@ impl SessionStorage {
     /// Create session storage for a given working directory.
     /// Uses the same path scheme as the CLI: ~/.claude/projects/{project_key}/
     pub async fn for_cwd(cwd: &str) -> Result<Self> {
+        Self::for_cwd_with_env(cwd, None).await
+    }
+
+    /// Como [`Self::for_cwd`], mas honrando um env explícito
+    /// (`CLAUDE_CONFIG_DIR`) — é o que o transporte nativo passa, para que o
+    /// env SELADO das opções valha mais que o do processo.
+    pub async fn for_cwd_with_env(
+        cwd: &str,
+        env: Option<&std::collections::HashMap<String, String>>,
+    ) -> Result<Self> {
         let project_key = project_key_for_directory(Some(cwd))?;
-        let projects_dir = get_projects_dir(None);
+        let projects_dir = get_projects_dir(env);
         let project_dir = projects_dir.join(&project_key);
         tokio::fs::create_dir_all(&project_dir).await.map_err(|e| {
             ClaudeSDKError::sdk(format!(
@@ -36,7 +46,9 @@ impl SessionStorage {
         Ok(Self { project_dir })
     }
 
-    fn session_path(&self, session_id: &str) -> PathBuf {
+    /// Caminho do JSONL desta sessão — público porque o transporte nativo
+    /// precisa dele para `transcript_path` dos hooks e para o mirror.
+    pub fn session_path(&self, session_id: &str) -> PathBuf {
         self.project_dir.join(format!("{session_id}.jsonl"))
     }
 
@@ -104,7 +116,7 @@ impl SessionStorage {
         stop_reason: Option<&str>,
         parent_uuid: Option<&str>,
         cwd: &str,
-    ) -> Result<String> {
+    ) -> Result<(String, serde_json::Value)> {
         let uuid = uuid::Uuid::new_v4().to_string();
         let timestamp = chrono::Utc::now().to_rfc3339();
         let entry = serde_json::json!({
@@ -127,7 +139,7 @@ impl SessionStorage {
             }
         });
         self.append_entry(session_id, &entry).await?;
-        Ok(uuid)
+        Ok((uuid, entry))
     }
 
     /// Append a user message to the session JSONL file.
@@ -138,7 +150,7 @@ impl SessionStorage {
         content: &[ContentBlock],
         parent_uuid: Option<&str>,
         cwd: &str,
-    ) -> Result<String> {
+    ) -> Result<(String, serde_json::Value)> {
         let uuid = uuid::Uuid::new_v4().to_string();
         let timestamp = chrono::Utc::now().to_rfc3339();
         let entry = serde_json::json!({
@@ -157,7 +169,7 @@ impl SessionStorage {
             }
         });
         self.append_entry(session_id, &entry).await?;
-        Ok(uuid)
+        Ok((uuid, entry))
     }
 
     /// Append a raw JSON entry to the session file.
@@ -238,7 +250,7 @@ fn json_content_to_blocks(content: &serde_json::Value) -> Vec<ContentBlock> {
                     blocks.push(ContentBlock::ToolResult {
                         tool_use_id,
                         content: result_content,
-                        is_error: is_error.map(|e| e),
+                        is_error,
                         cache_control: None,
                     });
                 }

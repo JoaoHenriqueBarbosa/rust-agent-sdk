@@ -6,6 +6,9 @@ use crate::tools::framework::{Tool, ToolContext, ToolResult};
 /// Ask the user a question during execution.
 pub struct AskUserQuestionTool;
 
+// Campos lidos só pelo serde: o parse valida o shape do input mesmo
+// quando a tool (stub) não consome cada campo.
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct AskUserInput {
     question: String,

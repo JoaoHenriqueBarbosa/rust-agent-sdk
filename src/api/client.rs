@@ -15,7 +15,8 @@ use crate::errors::{ClaudeSDKError, Result};
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
-const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
+/// Modelo default quando nada foi configurado.
+pub const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
 const DEFAULT_MAX_TOKENS: u32 = 16384;
 
 /// Client for the Anthropic Messages API.

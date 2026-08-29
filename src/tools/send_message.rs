@@ -6,6 +6,9 @@ use crate::tools::framework::{Tool, ToolContext, ToolResult};
 /// Send a message to another agent or task.
 pub struct SendMessageTool;
 
+// Campos lidos só pelo serde: o parse valida o shape do input mesmo
+// quando a tool (stub) não consome cada campo.
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct SendMessageInput {
     to: String,

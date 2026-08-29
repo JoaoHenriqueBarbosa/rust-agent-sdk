@@ -91,8 +91,10 @@ mod tests {
     #[tokio::test]
     async fn test_glob_finds_cargo_toml() {
         let tool = GlobTool;
-        let mut ctx = ToolContext::default();
-        ctx.working_directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let ctx = ToolContext {
+            working_directory: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            ..Default::default()
+        };
 
         let result = tool
             .execute(serde_json::json!({"pattern": "Cargo.toml"}), &ctx)
@@ -109,8 +111,10 @@ mod tests {
     #[tokio::test]
     async fn test_glob_no_match() {
         let tool = GlobTool;
-        let mut ctx = ToolContext::default();
-        ctx.working_directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let ctx = ToolContext {
+            working_directory: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            ..Default::default()
+        };
 
         let result = tool
             .execute(serde_json::json!({"pattern": "*.nonexistent_extension_xyz"}), &ctx)

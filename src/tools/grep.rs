@@ -147,8 +147,10 @@ mod tests {
     #[tokio::test]
     async fn test_grep_finds_pattern() {
         let tool = GrepTool;
-        let mut ctx = ToolContext::default();
-        ctx.working_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let ctx = ToolContext {
+            working_directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            ..Default::default()
+        };
 
         let result = tool
             .execute(
@@ -169,8 +171,10 @@ mod tests {
     #[tokio::test]
     async fn test_grep_no_match() {
         let tool = GrepTool;
-        let mut ctx = ToolContext::default();
-        ctx.working_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let ctx = ToolContext {
+            working_directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            ..Default::default()
+        };
 
         let result = tool
             .execute(

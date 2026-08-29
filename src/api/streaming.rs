@@ -118,6 +118,12 @@ pub struct StreamAccumulator {
     finalized_blocks: Vec<ContentBlock>,
 }
 
+impl Default for StreamAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StreamAccumulator {
     pub fn new() -> Self {
         Self {

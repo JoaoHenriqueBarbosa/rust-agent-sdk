@@ -499,6 +499,7 @@ fn strip_images_from_messages(messages: &[ApiMessage]) -> Vec<ApiMessage> {
 // ---------------------------------------------------------------------------
 
 /// Extract readable text from messages for summarization.
+#[allow(dead_code)] // referência do port; a sumarização atual manda as mensagens inteiras
 fn extract_conversation_text(messages: &[ApiMessage]) -> String {
     let mut parts = Vec::new();
 
@@ -510,11 +511,10 @@ fn extract_conversation_text(messages: &[ApiMessage]) -> String {
 
         for block in &msg.content {
             match block {
-                ContentBlock::Text { text, .. } => {
-                    if !text.is_empty() {
+                ContentBlock::Text { text, .. }
+                    if !text.is_empty() => {
                         parts.push(format!("{role}: {text}"));
                     }
-                }
                 ContentBlock::ToolUse { name, input, .. } => {
                     let input_str = serde_json::to_string(input).unwrap_or_default();
                     let truncated = if input_str.len() > 200 {
@@ -539,8 +539,8 @@ fn extract_conversation_text(messages: &[ApiMessage]) -> String {
                         }
                     }
                 }
-                ContentBlock::Thinking { thinking, .. } => {
-                    if !thinking.is_empty() {
+                ContentBlock::Thinking { thinking, .. }
+                    if !thinking.is_empty() => {
                         let truncated = if thinking.len() > 300 {
                             format!("{}...", &thinking[..300])
                         } else {
@@ -548,7 +548,6 @@ fn extract_conversation_text(messages: &[ApiMessage]) -> String {
                         };
                         parts.push(format!("{role}: [Thinking: {truncated}]"));
                     }
-                }
                 _ => {}
             }
         }

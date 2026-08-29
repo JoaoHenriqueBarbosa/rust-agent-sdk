@@ -20,20 +20,61 @@ pub struct ToolPermissionRequest {
     pub tool_name: String,
     pub description: String,
     pub input: serde_json::Value,
+    /// The tool_use id from the model, so the decider can correlate.
+    pub tool_use_id: Option<String>,
 }
+
+/// Decision returned by the permission callback.
+///
+/// A deny carries the MESSAGE the model will read as the tool_result — that
+/// message is how a gatekeeper steers the agent (e.g. "call the commit tool
+/// instead"), so collapsing this to a bool would lose the steering channel.
+#[derive(Debug, Clone)]
+pub enum PermissionOutcome {
+    Allow {
+        /// Optionally rewrite the tool input before execution.
+        updated_input: Option<serde_json::Value>,
+    },
+    Deny {
+        message: String,
+    },
+}
+
+/// Async permission callback: decides whether a tool call may run.
+pub type PermissionCallbackFn = Arc<
+    dyn Fn(ToolPermissionRequest) -> Pin<Box<dyn Future<Output = PermissionOutcome> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Event handed to the post-tool-use observer after a tool executed.
+#[derive(Debug, Clone)]
+pub struct PostToolUseEvent {
+    pub tool_name: String,
+    pub tool_use_id: String,
+    pub tool_input: serde_json::Value,
+    /// The tool result content as it will be sent to the model.
+    pub tool_response: serde_json::Value,
+    pub is_error: bool,
+}
+
+/// Async observer invoked after each tool execution. Returned text is
+/// appended to the tool_result content so it reaches the model — the same
+/// channel the CLI uses for PostToolUse hook `additionalContext`.
+pub type PostToolUseFn = Arc<
+    dyn Fn(PostToolUseEvent) -> Pin<Box<dyn Future<Output = Option<String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// Context passed to tool execution.
 pub struct ToolContext {
     pub working_directory: PathBuf,
     pub permission_mode: PermissionMode,
-    /// Callback for asking user permission. Returns true if allowed.
-    pub permission_callback: Option<
-        Arc<
-            dyn Fn(ToolPermissionRequest) -> Pin<Box<dyn Future<Output = bool> + Send>>
-                + Send
-                + Sync,
-        >,
-    >,
+    /// Callback for asking user permission.
+    pub permission_callback: Option<PermissionCallbackFn>,
+    /// Observer called after each tool execution (PostToolUse hook channel).
+    pub post_tool_use: Option<PostToolUseFn>,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -42,6 +83,7 @@ impl std::fmt::Debug for ToolContext {
             .field("working_directory", &self.working_directory)
             .field("permission_mode", &self.permission_mode)
             .field("has_permission_callback", &self.permission_callback.is_some())
+            .field("has_post_tool_use", &self.post_tool_use.is_some())
             .finish()
     }
 }
@@ -52,6 +94,7 @@ impl Default for ToolContext {
             working_directory: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             permission_mode: PermissionMode::Default,
             permission_callback: None,
+            post_tool_use: None,
         }
     }
 }
@@ -343,14 +386,18 @@ impl ToolExecutor {
         &self,
         tool_use: crate::api::streaming::ToolUseBlock,
     ) -> ToolExecutionResult {
+        let mut tool_use = tool_use;
         // Check permissions
         let decision = self.permission_rules.check(&tool_use.name, &tool_use.input);
         match decision {
             PermissionDecision::Deny(reason) => {
-                return ToolExecutionResult {
-                    tool_use_id: tool_use.id,
-                    result: ToolResult::error(format!("Permission denied: {reason}")),
-                };
+                return self
+                    .observe_post_tool_use(ToolExecutionResult {
+                        tool_use_id: tool_use.id.clone(),
+                        result: ToolResult::error(format!("Permission denied: {reason}")),
+                        denied: true,
+                    }, &tool_use)
+                    .await;
             }
             PermissionDecision::Ask => {
                 if let Some(callback) = &self.context.permission_callback {
@@ -358,22 +405,30 @@ impl ToolExecutor {
                         tool_name: tool_use.name.clone(),
                         description: format!("Tool {} wants to execute", tool_use.name),
                         input: tool_use.input.clone(),
+                        tool_use_id: Some(tool_use.id.clone()),
                     };
-                    let allowed = callback(request).await;
-                    if !allowed {
-                        return ToolExecutionResult {
-                            tool_use_id: tool_use.id,
-                            result: ToolResult::error(
-                                "The user denied permission for this tool call.".to_string()
-                            ),
-                        };
+                    match callback(request).await {
+                        PermissionOutcome::Allow { updated_input } => {
+                            if let Some(new_input) = updated_input {
+                                tool_use.input = new_input;
+                            }
+                        }
+                        PermissionOutcome::Deny { message } => {
+                            return self
+                                .observe_post_tool_use(ToolExecutionResult {
+                                    tool_use_id: tool_use.id.clone(),
+                                    result: ToolResult::error(message),
+                                    denied: true,
+                                }, &tool_use)
+                                .await;
+                        }
                     }
-                    // Callback approved — proceed to execution
                 } else if self.context.permission_mode != PermissionMode::BypassPermissions {
                     // No callback and not in bypass mode — deny
                     return ToolExecutionResult {
                         tool_use_id: tool_use.id,
                         result: ToolResult::error("Permission required but no callback available"),
+                        denied: true,
                     };
                 }
             }
@@ -384,34 +439,69 @@ impl ToolExecutor {
         let tool = match self.registry.get(&tool_use.name) {
             Some(t) => t,
             None => {
-                return ToolExecutionResult {
-                    tool_use_id: tool_use.id,
-                    result: ToolResult::error(format!("Unknown tool: {}", tool_use.name)),
-                };
+                return self
+                    .observe_post_tool_use(ToolExecutionResult {
+                        tool_use_id: tool_use.id.clone(),
+                        result: ToolResult::error(format!("Unknown tool: {}", tool_use.name)),
+                        denied: false,
+                    }, &tool_use)
+                    .await;
             }
         };
 
         // Validate input against schema before execution
         let schema = tool.input_schema();
         if let Err(validation_error) = validate_tool_input(&tool_use.input, &schema) {
-            return ToolExecutionResult {
-                tool_use_id: tool_use.id,
-                result: ToolResult::error(format!(
-                    "Input validation error for {}: {}",
-                    tool_use.name, validation_error
-                )),
-            };
+            return self
+                .observe_post_tool_use(ToolExecutionResult {
+                    tool_use_id: tool_use.id.clone(),
+                    result: ToolResult::error(format!(
+                        "Input validation error for {}: {}",
+                        tool_use.name, validation_error
+                    )),
+                    denied: false,
+                }, &tool_use)
+                .await;
         }
 
-        let result = tool.execute(tool_use.input, &self.context).await;
+        let result = tool.execute(tool_use.input.clone(), &self.context).await;
 
         // Truncate large results
         let result = truncate_result(result);
 
-        ToolExecutionResult {
-            tool_use_id: tool_use.id,
+        self.observe_post_tool_use(ToolExecutionResult {
+            tool_use_id: tool_use.id.clone(),
             result,
+            denied: false,
+        }, &tool_use)
+        .await
+    }
+
+    /// Run the post-tool-use observer (when present) and append whatever
+    /// context it returns to the tool result, so the text reaches the model.
+    async fn observe_post_tool_use(
+        &self,
+        mut execution: ToolExecutionResult,
+        tool_use: &crate::api::streaming::ToolUseBlock,
+    ) -> ToolExecutionResult {
+        if let Some(observer) = &self.context.post_tool_use {
+            let response = serde_json::to_value(execution.result.to_api_content())
+                .unwrap_or(serde_json::Value::Null);
+            let event = PostToolUseEvent {
+                tool_name: tool_use.name.clone(),
+                tool_use_id: tool_use.id.clone(),
+                tool_input: tool_use.input.clone(),
+                tool_response: response,
+                is_error: execution.result.is_error,
+            };
+            if let Some(context_text) = observer(event).await {
+                execution
+                    .result
+                    .content
+                    .push(ToolResultContent::Text(context_text));
+            }
         }
+        execution
     }
 
     /// Build a user message containing all tool results.
@@ -440,6 +530,10 @@ impl ToolExecutor {
 pub struct ToolExecutionResult {
     pub tool_use_id: String,
     pub result: ToolResult,
+    /// True when the result is a permission DENIAL (as opposed to a tool
+    /// failure) — the loop records these in `permission_denials` structurally
+    /// instead of sniffing error text.
+    pub denied: bool,
 }
 
 /// Validate tool input against the tool's input_schema.
@@ -596,8 +690,10 @@ mod tests {
         reg.register(Box::new(MockTool { name: "safe2", concurrent: true }));
         reg.register(Box::new(MockTool { name: "unsafe1", concurrent: false }));
 
-        let mut ctx = ToolContext::default();
-        ctx.permission_mode = PermissionMode::BypassPermissions;
+        let ctx = ToolContext {
+            permission_mode: PermissionMode::BypassPermissions,
+            ..Default::default()
+        };
 
         let executor = ToolExecutor::new(reg, ctx);
 
@@ -619,8 +715,10 @@ mod tests {
         use crate::api::streaming::ToolUseBlock;
 
         let reg = ToolRegistry::new();
-        let mut ctx = ToolContext::default();
-        ctx.permission_mode = PermissionMode::BypassPermissions;
+        let ctx = ToolContext {
+            permission_mode: PermissionMode::BypassPermissions,
+            ..Default::default()
+        };
 
         let executor = ToolExecutor::new(reg, ctx);
 
@@ -719,8 +817,10 @@ mod tests {
         let mut reg = ToolRegistry::new();
         reg.register(Box::new(StrictTool));
 
-        let mut ctx = ToolContext::default();
-        ctx.permission_mode = PermissionMode::BypassPermissions;
+        let ctx = ToolContext {
+            permission_mode: PermissionMode::BypassPermissions,
+            ..Default::default()
+        };
 
         let executor = ToolExecutor::new(reg, ctx);
 

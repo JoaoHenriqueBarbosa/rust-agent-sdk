@@ -6,11 +6,16 @@ use crate::tools::framework::{Tool, ToolContext, ToolResult};
 /// Write or update a todo list.
 pub struct TodoWriteTool;
 
+// Campos lidos só pelo serde: o parse valida o shape do input mesmo
+// quando a tool (stub) não consome cada campo.
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct TodoWriteInput {
     todos: Vec<TodoItem>,
 }
 
+// Campos lidos só pelo serde: o parse valida o shape do input.
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct TodoItem {
     id: String,

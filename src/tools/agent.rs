@@ -6,6 +6,9 @@ use crate::tools::framework::{Tool, ToolContext, ToolResult};
 /// Spawn a sub-agent with isolated context.
 pub struct AgentTool;
 
+// Campos lidos só pelo serde: o parse valida o shape do input mesmo
+// quando a tool (stub) não consome cada campo.
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct AgentInput {
     prompt: String,

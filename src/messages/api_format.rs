@@ -7,6 +7,8 @@ const MAX_CACHE_BREAKPOINTS: usize = 4;
 const LARGE_TOOL_RESULT_THRESHOLD: usize = 1000;
 
 /// Represents a location where cache_control can be injected.
+#[allow(dead_code)] // referência do port; a injeção atual anda direto nos blocos
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug)]
 enum CacheTarget {
     /// Last system block.
@@ -78,11 +80,10 @@ pub fn inject_cache_control(
                         continue;
                     }
                     let len = tool_result_content_len(content.as_deref());
-                    if len > LARGE_TOOL_RESULT_THRESHOLD {
-                        if best.map_or(true, |(_, _, best_len)| len > best_len) {
+                    if len > LARGE_TOOL_RESULT_THRESHOLD
+                        && best.is_none_or(|(_, _, best_len)| len > best_len) {
                             best = Some((msg_idx, block_idx, len));
                         }
-                    }
                 }
             }
         }

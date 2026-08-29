@@ -39,3 +39,14 @@ pub use types::*;
 pub use stores::postgres::PostgresSessionStore;
 #[cfg(feature = "redis-store")]
 pub use stores::redis::RedisSessionStore;
+
+// Transporte nativo da API Anthropic (sem subprocess do CLI) e suas peças.
+pub mod agentic;
+pub mod api;
+pub mod compact;
+pub mod mcp;
+pub mod messages;
+pub mod session;
+pub mod tools;
+pub mod native;
+pub use native::NativeApiTransport;

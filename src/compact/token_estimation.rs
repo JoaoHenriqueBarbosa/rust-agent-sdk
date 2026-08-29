@@ -7,7 +7,7 @@ use crate::errors::Result;
 pub fn estimate_tokens(text: &str) -> usize {
     // ~4 chars per token is the standard heuristic for English/code.
     // This slightly overestimates which is safer for threshold checks.
-    (text.len() + 3) / 4
+    text.len().div_ceil(4)
 }
 
 /// Estimate token count for a single content block.

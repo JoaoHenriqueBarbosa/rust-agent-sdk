@@ -128,7 +128,7 @@ pub enum AgenticEvent {
         stop_reason: Option<String>,
         total_cost_usd: f64,
         usage: QueryUsage,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "modelUsage", skip_serializing_if = "Option::is_none")]
         model_usage: Option<serde_json::Value>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         permission_denials: Vec<serde_json::Value>,
@@ -920,7 +920,7 @@ impl AgenticLoop {
                 // Accumulate per-model usage
                 state.model_usage
                     .entry(current_model.clone())
-                    .or_insert_with(QueryUsage::default)
+                    .or_default()
                     .accumulate(&assistant_msg.usage);
 
                 // Capture stop_reason
@@ -1163,20 +1163,17 @@ impl AgenticLoop {
                     }
                 }
 
-                // Detect permission denials from tool execution results
-                for (exec_result, tu) in all_execution_results.iter().zip(tool_use_blocks.iter()) {
-                    if exec_result.result.is_error {
-                        let error_text = exec_result.result.content.iter().any(|c| {
-                            matches!(c, crate::tools::framework::ToolResultContent::Text(t)
-                                if t.contains("denied") || t.contains("Permission denied"))
-                        });
-                        if error_text {
-                            state.permission_denials.push(serde_json::json!({
-                                "tool_name": tu.name,
-                                "tool_use_id": tu.id,
-                                "tool_input": tu.input,
-                            }));
-                        }
+                // Record permission denials structurally — the executor marks
+                // them, so no error-text sniffing is involved. Results are
+                // matched by tool_use_id because the executor reorders
+                // (concurrency-safe tools run first).
+                for exec_result in all_execution_results.iter().filter(|r| r.denied) {
+                    if let Some(tu) = tool_use_blocks.iter().find(|tu| tu.id == exec_result.tool_use_id) {
+                        state.permission_denials.push(serde_json::json!({
+                            "tool_name": tu.name,
+                            "tool_use_id": tu.id,
+                            "tool_input": tu.input,
+                        }));
                     }
                 }
 

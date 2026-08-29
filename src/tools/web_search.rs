@@ -6,6 +6,9 @@ use crate::tools::framework::{Tool, ToolContext, ToolResult};
 /// Web search tool. Requires external search API configuration.
 pub struct WebSearchTool;
 
+// Campos lidos só pelo serde: o parse valida o shape do input mesmo
+// quando a tool (stub) não consome cada campo.
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct WebSearchInput {
     query: String,
