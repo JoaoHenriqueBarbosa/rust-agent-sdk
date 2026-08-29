@@ -2,7 +2,6 @@
 ///
 /// Ported from Python: tests/test_transport.py
 /// ALL tests call `todo!()` methods and will panic — that's expected and correct.
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -24,6 +23,41 @@ fn make_options(f: impl FnOnce(&mut ClaudeAgentOptions)) -> ClaudeAgentOptions {
     opts
 }
 
+/// CLI falso executável para os testes que realmente dão `spawn`.
+///
+/// `DEFAULT_CLI_PATH` continua sendo `/usr/bin/claude` para os testes de
+/// construção de comando (eles só olham a string), mas quem chama `connect()`
+/// precisa de um binário que exista na máquina — senão o teste vira um teste do
+/// ambiente, não do transporte.
+fn fake_cli_path() -> PathBuf {
+    static CLI: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    CLI.get_or_init(|| {
+        // A checagem de versão spawnaria o stub de novo sem ganho nenhum.
+        std::env::set_var("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "1");
+        let dir =
+            std::env::temp_dir().join(format!("rust-agent-sdk-fake-cli-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir do CLI falso");
+        let path = dir.join("fake-claude");
+        // Consome o stdin e sai: o suficiente para exercitar spawn, write e close.
+        std::fs::write(&path, "#!/bin/sh\nexec cat >/dev/null\n").expect("script do CLI falso");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("permissão de execução");
+        }
+        path
+    })
+    .clone()
+}
+
+/// Como `make_options`, mas com um `cli_path` que dá para executar.
+fn spawnable_options(f: impl FnOnce(&mut ClaudeAgentOptions)) -> ClaudeAgentOptions {
+    let mut opts = make_options(f);
+    opts.cli_path = Some(fake_cli_path());
+    opts
+}
+
 fn make_default_options() -> ClaudeAgentOptions {
     ClaudeAgentOptions {
         cli_path: Some(PathBuf::from(DEFAULT_CLI_PATH)),
@@ -41,8 +75,7 @@ mod test_command_building {
     // 1. test_build_command_basic
     #[test]
     fn test_build_command_basic() {
-        let transport =
-            SubprocessCLITransport::new("Hello", make_default_options());
+        let transport = SubprocessCLITransport::new("Hello", make_default_options());
         let cmd = transport.build_command();
         assert_eq!(cmd[0], "/usr/bin/claude");
         assert!(cmd.contains(&"--output-format".to_string()));
@@ -57,10 +90,8 @@ mod test_command_building {
     // 2. test_build_command_strict_mcp_config
     #[test]
     fn test_build_command_strict_mcp_config_enabled() {
-        let transport = SubprocessCLITransport::new(
-            "test",
-            make_options(|o| o.strict_mcp_config = true),
-        );
+        let transport =
+            SubprocessCLITransport::new("test", make_options(|o| o.strict_mcp_config = true));
         let cmd = transport.build_command();
         assert!(cmd.contains(&"--strict-mcp-config".to_string()));
     }
@@ -92,13 +123,11 @@ mod test_command_building {
         let transport = SubprocessCLITransport::new(
             "test",
             make_options(|o| {
-                o.system_prompt = Some(SystemPromptConfig::Structured(
-                    SystemPrompt::Preset {
-                        preset: "claude_code".into(),
-                        append: None,
-                        exclude_dynamic_sections: None,
-                    },
-                ));
+                o.system_prompt = Some(SystemPromptConfig::Structured(SystemPrompt::Preset {
+                    preset: "claude_code".into(),
+                    append: None,
+                    exclude_dynamic_sections: None,
+                }));
             }),
         );
         let cmd = transport.build_command();
@@ -112,13 +141,11 @@ mod test_command_building {
         let transport = SubprocessCLITransport::new(
             "test",
             make_options(|o| {
-                o.system_prompt = Some(SystemPromptConfig::Structured(
-                    SystemPrompt::Preset {
-                        preset: "claude_code".into(),
-                        append: Some("Be concise.".into()),
-                        exclude_dynamic_sections: None,
-                    },
-                ));
+                o.system_prompt = Some(SystemPromptConfig::Structured(SystemPrompt::Preset {
+                    preset: "claude_code".into(),
+                    append: Some("Be concise.".into()),
+                    exclude_dynamic_sections: None,
+                }));
             }),
         );
         let cmd = transport.build_command();
@@ -133,11 +160,9 @@ mod test_command_building {
         let transport = SubprocessCLITransport::new(
             "test",
             make_options(|o| {
-                o.system_prompt = Some(SystemPromptConfig::Structured(
-                    SystemPrompt::File {
-                        path: "/path/to/prompt.md".into(),
-                    },
-                ));
+                o.system_prompt = Some(SystemPromptConfig::Structured(SystemPrompt::File {
+                    path: "/path/to/prompt.md".into(),
+                }));
             }),
         );
         let cmd = transport.build_command();
@@ -303,10 +328,7 @@ mod test_command_building {
             }),
         );
         let cmd = transport.build_command();
-        let idx = cmd
-            .iter()
-            .position(|x| x == "--thinking-display")
-            .unwrap();
+        let idx = cmd.iter().position(|x| x == "--thinking-display").unwrap();
         assert_eq!(cmd[idx..idx + 2], ["--thinking-display", "summarized"]);
     }
 
@@ -323,10 +345,7 @@ mod test_command_building {
             }),
         );
         let cmd = transport.build_command();
-        let idx = cmd
-            .iter()
-            .position(|x| x == "--thinking-display")
-            .unwrap();
+        let idx = cmd.iter().position(|x| x == "--thinking-display").unwrap();
         assert_eq!(cmd[idx..idx + 2], ["--thinking-display", "omitted"]);
     }
 
@@ -364,10 +383,7 @@ mod test_command_building {
             cmd[budget_idx..budget_idx + 2],
             ["--max-thinking-tokens", "20000"]
         );
-        let display_idx = cmd
-            .iter()
-            .position(|x| x == "--thinking-display")
-            .unwrap();
+        let display_idx = cmd.iter().position(|x| x == "--thinking-display").unwrap();
         assert_eq!(
             cmd[display_idx..display_idx + 2],
             ["--thinking-display", "omitted"]
@@ -474,8 +490,7 @@ mod test_command_building {
         let transport = SubprocessCLITransport::new(
             "test",
             make_options(|o| {
-                o.setting_sources =
-                    Some(vec![SettingSource::User, SettingSource::Project]);
+                o.setting_sources = Some(vec![SettingSource::User, SettingSource::Project]);
             }),
         );
         let cmd = transport.build_command();
@@ -501,9 +516,7 @@ mod test_command_building {
         assert!(cmd_str.contains("--another-option test-value"));
         assert!(cmd.contains(&"--boolean-flag".to_string()));
         let boolean_idx = cmd.iter().position(|x| x == "--boolean-flag").unwrap();
-        assert!(
-            boolean_idx == cmd.len() - 1 || cmd[boolean_idx + 1].starts_with("--")
-        );
+        assert!(boolean_idx == cmd.len() - 1 || cmd[boolean_idx + 1].starts_with("--"));
     }
 
     // 28. test_build_command_with_mcp_servers
@@ -578,8 +591,7 @@ mod test_command_building {
         let transport = SubprocessCLITransport::new(
             "test",
             make_options(|o| {
-                o.session_id =
-                    Some("550e8400-e29b-41d4-a716-446655440000".into());
+                o.session_id = Some("550e8400-e29b-41d4-a716-446655440000".into());
             }),
         );
         let cmd = transport.build_command();
@@ -602,8 +614,11 @@ mod test_command_building {
         let transport = SubprocessCLITransport::new(
             "test",
             make_options(|o| {
-                o.tools =
-                    Some(ToolsConfig::List(vec!["Read".into(), "Edit".into(), "Bash".into()]));
+                o.tools = Some(ToolsConfig::List(vec![
+                    "Read".into(),
+                    "Edit".into(),
+                    "Bash".into(),
+                ]));
             }),
         );
         let cmd = transport.build_command();
@@ -633,7 +648,10 @@ mod test_command_building {
         let transport = SubprocessCLITransport::new(
             "test",
             make_options(|o| {
-                o.tools = Some(ToolsConfig::Preset(rust_agent_sdk::ToolsPreset { type_: "preset".into(), preset: "claude_code".into() }));
+                o.tools = Some(ToolsConfig::Preset(rust_agent_sdk::ToolsPreset {
+                    type_: "preset".into(),
+                    preset: "claude_code".into(),
+                }));
             }),
         );
         let cmd = transport.build_command();
@@ -727,10 +745,7 @@ mod test_cli_discovery {
     // 41. test_find_cli_not_found
     #[test]
     fn test_find_cli_not_found() {
-        let transport = SubprocessCLITransport::new(
-            "test",
-            ClaudeAgentOptions::default(),
-        );
+        let transport = SubprocessCLITransport::new("test", ClaudeAgentOptions::default());
         // In Python this tests connect() raising CLINotFoundError.
         // Here, find_cli() panics from todo!().
         let _ = transport.find_cli();
@@ -740,10 +755,7 @@ mod test_cli_discovery {
     #[test]
     fn test_init_does_not_call_find_cli() {
         // Construction should not panic — find_cli() is deferred.
-        let transport = SubprocessCLITransport::new(
-            "test",
-            ClaudeAgentOptions::default(),
-        );
+        let transport = SubprocessCLITransport::new("test", ClaudeAgentOptions::default());
         assert_eq!(transport.options.cli_path, None);
     }
 
@@ -780,10 +792,7 @@ mod test_cli_discovery {
     // 45. test_find_bundled_cli
     #[test]
     fn test_find_bundled_cli() {
-        let transport = SubprocessCLITransport::new(
-            "test",
-            ClaudeAgentOptions::default(),
-        );
+        let transport = SubprocessCLITransport::new("test", ClaudeAgentOptions::default());
         let _ = transport.find_bundled_cli();
     }
 }
@@ -922,8 +931,7 @@ mod test_skills {
             "test",
             make_options(|o| {
                 o.allowed_tools = vec!["Skill".into(), "Read".into()];
-                o.setting_sources =
-                    Some(vec![SettingSource::User, SettingSource::Project]);
+                o.setting_sources = Some(vec![SettingSource::User, SettingSource::Project]);
             }),
         );
         let cmd = transport.build_command();
@@ -1022,9 +1030,7 @@ mod test_sandbox {
                     auto_allow_bash_if_sandboxed: Some(true),
                     network: Some(SandboxNetworkConfig {
                         allow_local_binding: Some(true),
-                        allow_unix_sockets: Some(vec![
-                            "/var/run/docker.sock".into(),
-                        ]),
+                        allow_unix_sockets: Some(vec!["/var/run/docker.sock".into()]),
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -1035,14 +1041,10 @@ mod test_sandbox {
         assert!(cmd.contains(&"--settings".to_string()));
         let settings_idx = cmd.iter().position(|x| x == "--settings").unwrap();
         let settings_value = &cmd[settings_idx + 1];
-        let parsed: serde_json::Value =
-            serde_json::from_str(settings_value).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(settings_value).unwrap();
         assert!(parsed.get("sandbox").is_some());
         assert_eq!(parsed["sandbox"]["enabled"], json!(true));
-        assert_eq!(
-            parsed["sandbox"]["autoAllowBashIfSandboxed"],
-            json!(true)
-        );
+        assert_eq!(parsed["sandbox"]["autoAllowBashIfSandboxed"], json!(true));
         assert_eq!(
             parsed["sandbox"]["network"]["allowLocalBinding"],
             json!(true)
@@ -1056,8 +1058,7 @@ mod test_sandbox {
     // 62. test_build_command_with_sandbox_and_settings_json
     #[test]
     fn test_build_command_with_sandbox_and_settings_json() {
-        let existing_settings =
-            r#"{"permissions": {"allow": ["Bash(ls:*)"]}, "verbose": true}"#;
+        let existing_settings = r#"{"permissions": {"allow": ["Bash(ls:*)"]}, "verbose": true}"#;
         let transport = SubprocessCLITransport::new(
             "test",
             make_options(|o| {
@@ -1073,12 +1074,8 @@ mod test_sandbox {
         assert!(cmd.contains(&"--settings".to_string()));
         let settings_idx = cmd.iter().position(|x| x == "--settings").unwrap();
         let settings_value = &cmd[settings_idx + 1];
-        let parsed: serde_json::Value =
-            serde_json::from_str(settings_value).unwrap();
-        assert_eq!(
-            parsed["permissions"],
-            json!({"allow": ["Bash(ls:*)"]})
-        );
+        let parsed: serde_json::Value = serde_json::from_str(settings_value).unwrap();
+        assert_eq!(parsed["permissions"], json!({"allow": ["Bash(ls:*)"]}));
         assert_eq!(parsed["verbose"], json!(true));
         assert!(parsed.get("sandbox").is_some());
         assert_eq!(parsed["sandbox"]["enabled"], json!(true));
@@ -1104,8 +1101,7 @@ mod test_sandbox {
         assert!(cmd.contains(&"--settings".to_string()));
         let settings_idx = cmd.iter().position(|x| x == "--settings").unwrap();
         let settings_value = &cmd[settings_idx + 1];
-        let parsed: serde_json::Value =
-            serde_json::from_str(settings_value).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(settings_value).unwrap();
         assert_eq!(parsed, json!({"sandbox": {"enabled": true}}));
     }
 
@@ -1118,9 +1114,7 @@ mod test_sandbox {
                 o.sandbox = Some(SandboxSettings {
                     enabled: Some(true),
                     network: Some(SandboxNetworkConfig {
-                        allow_unix_sockets: Some(vec![
-                            "/tmp/ssh-agent.sock".into(),
-                        ]),
+                        allow_unix_sockets: Some(vec!["/tmp/ssh-agent.sock".into()]),
                         allow_all_unix_sockets: Some(false),
                         allow_local_binding: Some(true),
                         http_proxy_port: Some(8080),
@@ -1134,13 +1128,9 @@ mod test_sandbox {
         let cmd = transport.build_command();
         let settings_idx = cmd.iter().position(|x| x == "--settings").unwrap();
         let settings_value = &cmd[settings_idx + 1];
-        let parsed: serde_json::Value =
-            serde_json::from_str(settings_value).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(settings_value).unwrap();
         let network = &parsed["sandbox"]["network"];
-        assert_eq!(
-            network["allowUnixSockets"],
-            json!(["/tmp/ssh-agent.sock"])
-        );
+        assert_eq!(network["allowUnixSockets"], json!(["/tmp/ssh-agent.sock"]));
         assert_eq!(network["allowAllUnixSockets"], json!(false));
         assert_eq!(network["allowLocalBinding"], json!(true));
         assert_eq!(network["httpProxyPort"], json!(8080));
@@ -1172,8 +1162,7 @@ mod test_transport_lifecycle {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport =
-                SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
     }
@@ -1186,7 +1175,7 @@ mod test_transport_lifecycle {
             use rust_agent_sdk::Transport;
             let mut transport = SubprocessCLITransport::new(
                 "test",
-                make_options(|o| {
+                spawnable_options(|o| {
                     o.cwd = Some(PathBuf::from("/this/directory/does/not/exist"));
                 }),
             );
@@ -1203,8 +1192,7 @@ mod test_transport_lifecycle {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport =
-                SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
             transport.close().await.unwrap();
         });
@@ -1216,8 +1204,7 @@ mod test_transport_lifecycle {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport =
-                SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
             transport.close().await.unwrap();
         });
@@ -1229,8 +1216,7 @@ mod test_transport_lifecycle {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport =
-                SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
             transport.close().await.unwrap();
         });
@@ -1245,7 +1231,7 @@ mod test_transport_lifecycle {
             let mut transport = SubprocessCLITransport::new(
                 "test",
                 ClaudeAgentOptions {
-                    cli_path: Some(PathBuf::from("/usr/bin/claude")),
+                    cli_path: Some(fake_cli_path()),
                     ..Default::default()
                 },
             );
@@ -1263,7 +1249,7 @@ mod test_transport_lifecycle {
             let mut transport = SubprocessCLITransport::new(
                 "test",
                 ClaudeAgentOptions {
-                    cli_path: Some(PathBuf::from("/usr/bin/claude")),
+                    cli_path: Some(fake_cli_path()),
                     ..Default::default()
                 },
             );
@@ -1289,7 +1275,7 @@ mod test_env_vars {
             env.insert("MY_TEST_VAR".into(), "test-value".into());
             let mut transport = SubprocessCLITransport::new(
                 "test",
-                make_options(|o| {
+                spawnable_options(|o| {
                     o.env = env;
                 }),
             );
@@ -1307,7 +1293,7 @@ mod test_env_vars {
             env.insert("CLAUDE_CODE_ENTRYPOINT".into(), "custom-caller".into());
             let mut transport = SubprocessCLITransport::new(
                 "test",
-                make_options(|o| {
+                spawnable_options(|o| {
                     o.env = env;
                 }),
             );
@@ -1321,8 +1307,7 @@ mod test_env_vars {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport =
-                SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
     }
@@ -1337,7 +1322,7 @@ mod test_env_vars {
             env.insert("TRACEPARENT".into(), "custom".into());
             let mut transport = SubprocessCLITransport::new(
                 "test",
-                make_options(|o| {
+                spawnable_options(|o| {
                     o.env = env;
                 }),
             );
@@ -1351,8 +1336,7 @@ mod test_env_vars {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport =
-                SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
     }
@@ -1363,8 +1347,7 @@ mod test_env_vars {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport =
-                SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
     }
@@ -1375,8 +1358,7 @@ mod test_env_vars {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport =
-                SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
     }
@@ -1387,8 +1369,7 @@ mod test_env_vars {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport =
-                SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
     }
@@ -1399,8 +1380,7 @@ mod test_env_vars {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport =
-                SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
     }
@@ -1411,8 +1391,7 @@ mod test_env_vars {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport =
-                SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
     }
@@ -1427,7 +1406,7 @@ mod test_env_vars {
             env.insert("CLAUDECODE".into(), "1".into());
             let mut transport = SubprocessCLITransport::new(
                 "test",
-                make_options(|o| {
+                spawnable_options(|o| {
                     o.env = env;
                 }),
             );
@@ -1443,7 +1422,7 @@ mod test_env_vars {
             use rust_agent_sdk::Transport;
             let mut transport = SubprocessCLITransport::new(
                 "test",
-                make_options(|o| {
+                spawnable_options(|o| {
                     o.user = Some("claude".into());
                 }),
             );
@@ -1465,8 +1444,7 @@ mod test_version_checks {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport =
-                SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             // connect() triggers version check, which is todo!()
             transport.connect().await.unwrap();
         });
@@ -1478,8 +1456,7 @@ mod test_version_checks {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport =
-                SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
     }
@@ -1515,8 +1492,7 @@ mod test_atexit_child_cleanup {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             use rust_agent_sdk::Transport;
-            let mut transport =
-                SubprocessCLITransport::new("test", make_default_options());
+            let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
             // Would test child process cleanup here once implemented
         });

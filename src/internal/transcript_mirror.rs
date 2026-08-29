@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::errors::Result;
-use crate::types::{SessionKey, SessionStore, SessionStoreEntry};
 use crate::internal::session_store::file_path_to_session_key;
+use crate::types::{SessionKey, SessionStore, SessionStoreEntry};
 
 /// Maximum pending entries before triggering an eager flush.
 pub const MAX_PENDING_ENTRIES: usize = 500;
@@ -19,14 +19,11 @@ const MIRROR_APPEND_BACKOFF_S: &[f64] = &[0.2, 0.8];
 struct MirrorEntry {
     file_path: String,
     entries: Vec<SessionStoreEntry>,
-    bytes: usize,
 }
 
 /// On-error callback type: receives the session key (if resolvable) and error message.
 pub type OnErrorCallback = Box<
-    dyn Fn(Option<SessionKey>, String) -> futures::future::BoxFuture<'static, ()>
-        + Send
-        + Sync,
+    dyn Fn(Option<SessionKey>, String) -> futures::future::BoxFuture<'static, ()> + Send + Sync,
 >;
 
 struct BatcherInner {
@@ -100,15 +97,13 @@ impl TranscriptMirrorBatcher {
             pending.push(MirrorEntry {
                 file_path: file_path.to_string(),
                 entries: entries.to_vec(),
-                bytes: size,
             });
             let mut ec = self.inner.pending_entry_count.lock().unwrap();
             *ec += entries.len();
             let mut bc = self.inner.pending_byte_count.lock().unwrap();
             *bc += size;
 
-            should_eager_flush =
-                *ec > self.max_pending_entries || *bc > self.max_pending_bytes;
+            should_eager_flush = *ec > self.max_pending_entries || *bc > self.max_pending_bytes;
         }
 
         if should_eager_flush {

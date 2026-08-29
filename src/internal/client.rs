@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::pin::Pin;
 
@@ -7,15 +8,19 @@ use futures::Stream;
 use crate::errors::{ClaudeSDKError, Result};
 use crate::internal::message_parser::parse_message;
 use crate::internal::query::Query;
-use crate::internal::session_resume::{
-    apply_materialized_options, materialize_resume_session,
-};
+use crate::internal::session_resume::{apply_materialized_options, materialize_resume_session};
 use crate::internal::session_store_validation::validate_session_store_options;
 use crate::internal::transport::Transport;
 use crate::types::{ClaudeAgentOptions, Message};
 
 /// Internal client that manages the query lifecycle.
 pub struct InternalClient;
+
+impl Default for InternalClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl InternalClient {
     pub fn new() -> Self {
@@ -90,6 +95,35 @@ impl InternalClient {
             });
             let skills = options.skills.clone();
 
+            // Hooks desta chamada, extraídos ANTES de `options` ir para o
+            // transporte. Sem isto o caminho one-shot aceitava hooks e não
+            // registrava nenhum: o CLI nunca era informado no initialize e a
+            // closure morria com as options.
+            let hooks: Option<HashMap<String, Vec<crate::types::HookMatcher>>> =
+                options.hooks.as_ref().map(|hooks| {
+                    hooks
+                        .iter()
+                        .map(|(event, matchers)| {
+                            let matchers = matchers
+                                .iter()
+                                .map(|matcher| crate::types::HookMatcher {
+                                    matcher: matcher.matcher.clone(),
+                                    hooks: matcher.hooks.clone(),
+                                    timeout: matcher.timeout,
+                                })
+                                .collect();
+                            (format!("{event:?}"), matchers)
+                        })
+                        .collect()
+                });
+
+            // Servidores MCP in-process declarados nas opções desta chamada.
+            // Clonado aqui porque `options` some dentro do transporte logo
+            // abaixo, e o `Query` precisa saber a quem entregar os
+            // `mcp_message` que o CLI vai mandar. O clone é um mapa próprio de
+            // `Arc`s — nada é compartilhado com outra sessão.
+            let sdk_mcp_servers = options.sdk_mcp_servers.clone();
+
             // Use provided transport or create subprocess transport
             let mut chosen_transport: Box<dyn Transport> = match transport {
                 Some(t) => t,
@@ -124,6 +158,10 @@ impl InternalClient {
             }
             if let Some(ref sk) = skills {
                 query.set_skills(sk.clone());
+            }
+            query.set_sdk_mcp_servers(sdk_mcp_servers);
+            if let Some(hooks) = hooks {
+                query.set_hooks(hooks);
             }
 
             // Start, initialize, write user message, spawn end_input handler

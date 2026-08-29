@@ -28,10 +28,7 @@ fn project_key() -> String {
 }
 
 fn default_key() -> SessionKey {
-    SessionKey::new(
-        project_key(),
-        "11111111-1111-4111-8111-111111111111",
-    )
+    SessionKey::new(project_key(), "11111111-1111-4111-8111-111111111111")
 }
 
 fn user_entry(text: &str, ts: &str, extra: serde_json::Value) -> SessionStoreEntry {
@@ -231,8 +228,16 @@ fn test_first_prompt_skips_meta_tool_result_and_compact() {
         None,
         &key,
         &[
-            user_entry("ignored meta", "2024-01-01T00:00:00.000Z", json!({"isMeta": true})),
-            user_entry("ignored compact", "2024-01-01T00:00:00.000Z", json!({"isCompactSummary": true})),
+            user_entry(
+                "ignored meta",
+                "2024-01-01T00:00:00.000Z",
+                json!({"isMeta": true}),
+            ),
+            user_entry(
+                "ignored compact",
+                "2024-01-01T00:00:00.000Z",
+                json!({"isCompactSummary": true}),
+            ),
             json!({
                 "type": "user",
                 "timestamp": "2024-01-01T00:00:00.000Z",
@@ -302,7 +307,11 @@ fn test_prev_is_not_mutated() {
         data: json!({}),
     };
     let prev_clone = prev.clone();
-    fold_session_summary(Some(&prev), &key, &[json!({"type": "x", "customTitle": "t"})]);
+    fold_session_summary(
+        Some(&prev),
+        &key,
+        &[json!({"type": "x", "customTitle": "t"})],
+    );
     assert_eq!(prev.session_id, prev_clone.session_id);
     assert_eq!(prev.mtime, prev_clone.mtime);
     assert_eq!(prev.data, prev_clone.data);
@@ -362,30 +371,50 @@ fn test_precedence_chain() {
     assert_eq!(info.custom_title, Some("ct".to_string()));
 
     data.as_object_mut().unwrap().remove("custom_title");
-    let base = SessionSummaryEntry { session_id: "s".to_string(), mtime: 1, data: data.clone() };
+    let base = SessionSummaryEntry {
+        session_id: "s".to_string(),
+        mtime: 1,
+        data: data.clone(),
+    };
     let info = summary_entry_to_sdk_info(&base, None).unwrap();
     assert_eq!(info.summary, "ai");
     assert_eq!(info.custom_title, Some("ai".to_string()));
 
     data.as_object_mut().unwrap().remove("ai_title");
-    let base = SessionSummaryEntry { session_id: "s".to_string(), mtime: 1, data: data.clone() };
+    let base = SessionSummaryEntry {
+        session_id: "s".to_string(),
+        mtime: 1,
+        data: data.clone(),
+    };
     let info = summary_entry_to_sdk_info(&base, None).unwrap();
     assert_eq!(info.summary, "lp");
     assert!(info.custom_title.is_none());
 
     data.as_object_mut().unwrap().remove("last_prompt");
-    let base = SessionSummaryEntry { session_id: "s".to_string(), mtime: 1, data: data.clone() };
+    let base = SessionSummaryEntry {
+        session_id: "s".to_string(),
+        mtime: 1,
+        data: data.clone(),
+    };
     let info = summary_entry_to_sdk_info(&base, None).unwrap();
     assert_eq!(info.summary, "sh");
 
     data.as_object_mut().unwrap().remove("summary_hint");
-    let base = SessionSummaryEntry { session_id: "s".to_string(), mtime: 1, data: data.clone() };
+    let base = SessionSummaryEntry {
+        session_id: "s".to_string(),
+        mtime: 1,
+        data: data.clone(),
+    };
     let info = summary_entry_to_sdk_info(&base, None).unwrap();
     assert_eq!(info.summary, "fp");
     assert_eq!(info.first_prompt, Some("fp".to_string()));
 
     data["first_prompt_locked"] = json!(false);
-    let base = SessionSummaryEntry { session_id: "s".to_string(), mtime: 1, data: data.clone() };
+    let base = SessionSummaryEntry {
+        session_id: "s".to_string(),
+        mtime: 1,
+        data: data.clone(),
+    };
     let info = summary_entry_to_sdk_info(&base, None).unwrap();
     assert_eq!(info.summary, "/cmd");
     assert_eq!(info.first_prompt, Some("/cmd".to_string()));
@@ -453,9 +482,18 @@ async fn test_tracks_appends() {
     let a = SessionKey::new(&pk, "a");
     let b = SessionKey::new(&pk, "b");
 
-    store.append(&a, &[user_ts("hello a", "2024-01-01T00:00:00Z")]).await.unwrap();
-    store.append(&a, &[json!({"type": "x", "customTitle": "Title A"})]).await.unwrap();
-    store.append(&b, &[user_ts("hello b", "2024-01-02T00:00:00Z")]).await.unwrap();
+    store
+        .append(&a, &[user_ts("hello a", "2024-01-01T00:00:00Z")])
+        .await
+        .unwrap();
+    store
+        .append(&a, &[json!({"type": "x", "customTitle": "Title A"})])
+        .await
+        .unwrap();
+    store
+        .append(&b, &[user_ts("hello b", "2024-01-02T00:00:00Z")])
+        .await
+        .unwrap();
 
     let summaries_vec = store.list_session_summaries(&pk).await.unwrap();
     let summaries: std::collections::HashMap<String, SessionSummaryEntry> = summaries_vec
@@ -482,11 +520,17 @@ async fn test_subpath_appends_ignored() {
         subpath: Some("subagents/agent-1".to_string()),
     };
 
-    store.append(&main_key, &[user_simple("main prompt")]).await.unwrap();
+    store
+        .append(&main_key, &[user_simple("main prompt")])
+        .await
+        .unwrap();
     store
         .append(
             &sub_key,
-            &[user_simple("sub prompt"), json!({"type": "x", "customTitle": "sub"})],
+            &[
+                user_simple("sub prompt"),
+                json!({"type": "x", "customTitle": "sub"}),
+            ],
         )
         .await
         .unwrap();
@@ -544,14 +588,22 @@ async fn test_fast_path_skips_load() {
     store
         .append(
             &SessionKey::new(&pk, &sid_a),
-            &[user_entry("first a", "2024-01-01T00:00:00Z", json!({"cwd": DIR}))],
+            &[user_entry(
+                "first a",
+                "2024-01-01T00:00:00Z",
+                json!({"cwd": DIR}),
+            )],
         )
         .await
         .unwrap();
     store
         .append(
             &SessionKey::new(&pk, &sid_b),
-            &[user_entry("first b", "2024-01-02T00:00:00Z", json!({"cwd": DIR}))],
+            &[user_entry(
+                "first b",
+                "2024-01-02T00:00:00Z",
+                json!({"cwd": DIR}),
+            )],
         )
         .await
         .unwrap();
@@ -624,7 +676,10 @@ async fn test_fast_path_limit_offset() {
         store
             .append(
                 &SessionKey::new(&pk, &sid),
-                &[user_ts(&format!("p{i}"), &format!("2024-01-0{}T00:00:00Z", i + 1))],
+                &[user_ts(
+                    &format!("p{i}"),
+                    &format!("2024-01-0{}T00:00:00Z", i + 1),
+                )],
             )
             .await
             .unwrap();
@@ -924,7 +979,11 @@ fn test_incremental_equals_batch() {
             "2024-01-01T00:00:00.000Z",
             json!({"cwd": "/work", "gitBranch": "main"}),
         ),
-        user_entry("ignored", "2024-01-01T00:00:01.000Z", json!({"isMeta": true})),
+        user_entry(
+            "ignored",
+            "2024-01-01T00:00:01.000Z",
+            json!({"isMeta": true}),
+        ),
         user_ts("real prompt here", "2024-01-01T00:00:02.000Z"),
         json!({
             "type": "assistant",
@@ -960,7 +1019,10 @@ fn test_incremental_equals_batch() {
     assert_eq!(incremental.session_id, sid);
     assert_eq!(incremental.summary, "User Named");
     assert_eq!(incremental.custom_title, Some("User Named".to_string()));
-    assert_eq!(incremental.first_prompt, Some("real prompt here".to_string()));
+    assert_eq!(
+        incremental.first_prompt,
+        Some("real prompt here".to_string())
+    );
     assert_eq!(incremental.git_branch, Some("feature".to_string()));
     assert_eq!(incremental.cwd, Some("/work".to_string()));
     assert_eq!(incremental.tag, Some("wip".to_string()));

@@ -132,7 +132,10 @@ async fn test_exception_propagates_via_wait_asyncio() {
 
     let err = result.unwrap_err();
     let err_str = format!("{}", err);
-    assert!(err_str.contains("boom"), "Expected 'boom' in error: {err_str}");
+    assert!(
+        err_str.contains("boom"),
+        "Expected 'boom' in error: {err_str}"
+    );
 }
 
 /// Exception propagates via wait (trio variant).
@@ -147,7 +150,10 @@ async fn test_exception_propagates_via_wait_trio() {
 
     let err = result.unwrap_err();
     let err_str = format!("{}", err);
-    assert!(err_str.contains("boom"), "Expected 'boom' in error: {err_str}");
+    assert!(
+        err_str.contains("boom"),
+        "Expected 'boom' in error: {err_str}"
+    );
 }
 
 /// A non-Cancelled exception with no .wait() must still be logged.

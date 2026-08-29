@@ -1,15 +1,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-
 use crate::errors::{ClaudeSDKError, Result};
-use crate::types::{
-    ClaudeAgentOptions, SessionKey, SessionStore, SessionStoreFlushMode,
-};
 use crate::internal::sessions::{get_projects_dir, project_key_for_directory, validate_uuid};
-use crate::internal::transcript_mirror::{
-    OnErrorCallback, TranscriptMirrorBatcher,
-};
+use crate::internal::transcript_mirror::{OnErrorCallback, TranscriptMirrorBatcher};
+use crate::types::{ClaudeAgentOptions, SessionKey, SessionStore, SessionStoreFlushMode};
 
 /// Result of materializing a resume session.
 #[derive(Debug)]
@@ -78,9 +73,8 @@ pub async fn materialize_resume_session(
     }
 
     let timeout_s = options.load_timeout_ms as f64 / 1000.0;
-    let project_key = project_key_for_directory(
-        options.cwd.as_ref().map(|p| p.to_str().unwrap_or(""))
-    )?;
+    let project_key =
+        project_key_for_directory(options.cwd.as_ref().map(|p| p.to_str().unwrap_or("")))?;
 
     let resolved = if let Some(resume_id) = &options.resume {
         if validate_uuid(resume_id).is_none() {
@@ -143,78 +137,87 @@ async fn materialize_inner(
 
     // Materialize subagent transcripts (only if the store implements list_subkeys)
     if store.has_list_subkeys() {
-    let key = crate::types::SessionListSubkeysKey {
-        project_key: project_key.to_string(),
-        session_id: session_id.to_string(),
-    };
-    let subkeys = with_timeout(store.list_subkeys(&key), timeout_s, &format!("SessionStore.list_subkeys() for session {session_id}")).await?;
-    {
-        let session_dir = project_dir.join(session_id);
-        for subpath in subkeys {
-            if !is_safe_subpath(&subpath, &session_dir) {
-                continue;
-            }
-            let sub_key = SessionKey {
-                project_key: project_key.to_string(),
-                session_id: session_id.to_string(),
-                subpath: Some(subpath.clone()),
-            };
-            let sub_entries = match with_timeout(store.load(&sub_key), timeout_s, &format!("SessionStore.load() for session {session_id} subpath {subpath}")).await {
-                Ok(Some(e)) => e,
-                _ => continue,
-            };
-            if sub_entries.is_empty() {
-                continue;
-            }
-
-            let mut metadata = Vec::new();
-            let mut transcript = Vec::new();
-            for e in &sub_entries {
-                if e.get("type").and_then(|v| v.as_str()) == Some("agent_metadata") {
-                    metadata.push(e.clone());
-                } else {
-                    transcript.push(e.clone());
+        let key = crate::types::SessionListSubkeysKey {
+            project_key: project_key.to_string(),
+            session_id: session_id.to_string(),
+        };
+        let subkeys = with_timeout(
+            store.list_subkeys(&key),
+            timeout_s,
+            &format!("SessionStore.list_subkeys() for session {session_id}"),
+        )
+        .await?;
+        {
+            let session_dir = project_dir.join(session_id);
+            for subpath in subkeys {
+                if !is_safe_subpath(&subpath, &session_dir) {
+                    continue;
                 }
-            }
-
-            let sub_target = session_dir.join(&subpath);
-            let sub_file = sub_target.with_file_name(
-                format!("{}.jsonl", sub_target.file_name().unwrap_or_default().to_string_lossy()),
-            );
-
-            if !transcript.is_empty() {
-                write_jsonl(&sub_file, &transcript)?;
-            }
-
-            if !metadata.is_empty() {
-                let last = metadata.last().unwrap();
-                let meta_content: serde_json::Map<String, serde_json::Value> = last
-                    .as_object()
-                    .map(|obj| {
-                        obj.iter()
-                            .filter(|(k, _)| k.as_str() != "type")
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let meta_file_name = format!(
-                    "{}.meta.json",
-                    sub_file
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                );
-                let meta_file = sub_file.with_file_name(meta_file_name);
-                if let Some(parent) = meta_file.parent() {
-                    let _ = std::fs::create_dir_all(parent);
+                let sub_key = SessionKey {
+                    project_key: project_key.to_string(),
+                    session_id: session_id.to_string(),
+                    subpath: Some(subpath.clone()),
+                };
+                let sub_entries = match with_timeout(
+                    store.load(&sub_key),
+                    timeout_s,
+                    &format!("SessionStore.load() for session {session_id} subpath {subpath}"),
+                )
+                .await
+                {
+                    Ok(Some(e)) => e,
+                    _ => continue,
+                };
+                if sub_entries.is_empty() {
+                    continue;
                 }
-                let _ = std::fs::write(
-                    &meta_file,
-                    serde_json::to_string(&meta_content).unwrap_or_default(),
-                );
+
+                let mut metadata = Vec::new();
+                let mut transcript = Vec::new();
+                for e in &sub_entries {
+                    if e.get("type").and_then(|v| v.as_str()) == Some("agent_metadata") {
+                        metadata.push(e.clone());
+                    } else {
+                        transcript.push(e.clone());
+                    }
+                }
+
+                let sub_target = session_dir.join(&subpath);
+                let sub_file = sub_target.with_file_name(format!(
+                    "{}.jsonl",
+                    sub_target.file_name().unwrap_or_default().to_string_lossy()
+                ));
+
+                if !transcript.is_empty() {
+                    write_jsonl(&sub_file, &transcript)?;
+                }
+
+                if !metadata.is_empty() {
+                    let last = metadata.last().unwrap();
+                    let meta_content: serde_json::Map<String, serde_json::Value> = last
+                        .as_object()
+                        .map(|obj| {
+                            obj.iter()
+                                .filter(|(k, _)| k.as_str() != "type")
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let meta_file_name = format!(
+                        "{}.meta.json",
+                        sub_file.file_stem().unwrap_or_default().to_string_lossy()
+                    );
+                    let meta_file = sub_file.with_file_name(meta_file_name);
+                    if let Some(parent) = meta_file.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = std::fs::write(
+                        &meta_file,
+                        serde_json::to_string(&meta_content).unwrap_or_default(),
+                    );
+                }
             }
         }
-    }
     } // has_list_subkeys
 
     Ok(())
@@ -246,7 +249,12 @@ async fn load_candidate(
     timeout_s: f64,
 ) -> Result<Option<(String, Vec<serde_json::Value>)>> {
     let key = SessionKey::new(project_key, session_id);
-    let entries = with_timeout(store.load(&key), timeout_s, &format!("SessionStore.load() for session {session_id}")).await?;
+    let entries = with_timeout(
+        store.load(&key),
+        timeout_s,
+        &format!("SessionStore.load() for session {session_id}"),
+    )
+    .await?;
     match entries {
         Some(e) if !e.is_empty() => Ok(Some((session_id.to_string(), e))),
         _ => Ok(None),
@@ -258,14 +266,23 @@ async fn resolve_continue_candidate(
     project_key: &str,
     timeout_s: f64,
 ) -> Result<Option<(String, Vec<serde_json::Value>)>> {
-    let mut sessions = with_timeout(store.list_sessions(project_key), timeout_s, "SessionStore.list_sessions()").await?;
+    let mut sessions = with_timeout(
+        store.list_sessions(project_key),
+        timeout_s,
+        "SessionStore.list_sessions()",
+    )
+    .await?;
     if sessions.is_empty() {
         return Ok(None);
     }
     // Sort by mtime descending; tie-break by session_id ascending for
     // deterministic results when mtimes are equal (Rust HashMap iteration
     // order is arbitrary, unlike Python dict which preserves insertion order).
-    sessions.sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.session_id.cmp(&b.session_id)));
+    sessions.sort_by(|a, b| {
+        b.mtime
+            .cmp(&a.mtime)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
 
     for cand in sessions {
         if validate_uuid(&cand.session_id).is_none() {
@@ -288,12 +305,7 @@ async fn with_timeout<T>(
     timeout_s: f64,
     what: &str,
 ) -> Result<T> {
-    match tokio::time::timeout(
-        std::time::Duration::from_secs_f64(timeout_s),
-        future,
-    )
-    .await
-    {
+    match tokio::time::timeout(std::time::Duration::from_secs_f64(timeout_s), future).await {
         Ok(Ok(val)) => Ok(val),
         Ok(Err(e)) => Err(ClaudeSDKError::sdk(format!(
             "{what} failed during resume materialization: {e}"
@@ -369,7 +381,10 @@ fn write_redacted_credentials(creds_json: Option<&str>, dst: &Path) {
     };
     let out = match serde_json::from_str::<serde_json::Value>(creds) {
         Ok(mut data) => {
-            if let Some(oauth) = data.get_mut("claudeAiOauth").and_then(|v| v.as_object_mut()) {
+            if let Some(oauth) = data
+                .get_mut("claudeAiOauth")
+                .and_then(|v| v.as_object_mut())
+            {
                 oauth.remove("refreshToken");
             }
             serde_json::to_string(&data).unwrap_or_else(|_| creds.to_string())
@@ -392,7 +407,10 @@ fn is_safe_subpath(subpath: &str, session_dir: &Path) -> bool {
         return false;
     }
     // Reject drive-prefixed paths (C:foo)
-    if subpath.len() >= 2 && subpath.as_bytes()[1] == b':' && subpath.as_bytes()[0].is_ascii_alphabetic() {
+    if subpath.len() >= 2
+        && subpath.as_bytes()[1] == b':'
+        && subpath.as_bytes()[0].is_ascii_alphabetic()
+    {
         return false;
     }
     // Reject . and .. components
@@ -406,9 +424,19 @@ fn is_safe_subpath(subpath: &str, session_dir: &Path) -> bool {
     }
     // Verify resolved path stays under session_dir
     let target = session_dir.join(subpath);
-    let sub_file_name = format!("{}.jsonl", target.file_name().unwrap_or_default().to_string_lossy());
+    let sub_file_name = format!(
+        "{}.jsonl",
+        target.file_name().unwrap_or_default().to_string_lossy()
+    );
     let sub_file = target.with_file_name(sub_file_name);
-    match (sub_file.canonicalize().or_else(|_| Ok::<_, std::io::Error>(sub_file.clone())), session_dir.canonicalize().or_else(|_| Ok::<_, std::io::Error>(session_dir.to_path_buf()))) {
+    match (
+        sub_file
+            .canonicalize()
+            .or_else(|_| Ok::<_, std::io::Error>(sub_file.clone())),
+        session_dir
+            .canonicalize()
+            .or_else(|_| Ok::<_, std::io::Error>(session_dir.to_path_buf())),
+    ) {
         (Ok(resolved), Ok(base)) => resolved.starts_with(&base),
         _ => false,
     }

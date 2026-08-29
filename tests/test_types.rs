@@ -1,8 +1,8 @@
 use rust_agent_sdk::{
     AgentDefinition, AssistantMessage, ClaudeAgentOptions, ContentBlock, HookInput,
-    HookSpecificOutput, McpServerConnectionStatus, McpServerConfig, McpServerInfo,
-    McpServerStatus, McpStatusResponse, McpToolAnnotations, McpToolInfo, MessageContent,
-    PermissionMode, ResultMessage, SystemPromptConfig, TextBlock, ThinkingBlock, ToolResultBlock,
+    HookSpecificOutput, McpServerConfig, McpServerConnectionStatus, McpServerInfo, McpServerStatus,
+    McpStatusResponse, McpToolAnnotations, McpToolInfo, MessageContent, PermissionMode,
+    ResultMessage, SystemPromptConfig, TextBlock, ThinkingBlock, ToolResultBlock,
     ToolResultContent, ToolUseBlock, UserMessage,
 };
 use serde_json::json;
@@ -106,10 +106,7 @@ mod test_options {
             disallowed_tools: vec!["Bash".into()],
             ..Default::default()
         };
-        assert_eq!(
-            options.allowed_tools,
-            vec!["Read", "Write", "Edit"]
-        );
+        assert_eq!(options.allowed_tools, vec!["Read", "Write", "Edit"]);
         assert_eq!(options.disallowed_tools, vec!["Bash"]);
     }
 
@@ -119,7 +116,10 @@ mod test_options {
             permission_mode: Some(PermissionMode::BypassPermissions),
             ..Default::default()
         };
-        assert_eq!(options.permission_mode, Some(PermissionMode::BypassPermissions));
+        assert_eq!(
+            options.permission_mode,
+            Some(PermissionMode::BypassPermissions)
+        );
 
         let options_plan = ClaudeAgentOptions {
             permission_mode: Some(PermissionMode::Plan),
@@ -131,19 +131,28 @@ mod test_options {
             permission_mode: Some(PermissionMode::Default),
             ..Default::default()
         };
-        assert_eq!(options_default.permission_mode, Some(PermissionMode::Default));
+        assert_eq!(
+            options_default.permission_mode,
+            Some(PermissionMode::Default)
+        );
 
         let options_accept = ClaudeAgentOptions {
             permission_mode: Some(PermissionMode::AcceptEdits),
             ..Default::default()
         };
-        assert_eq!(options_accept.permission_mode, Some(PermissionMode::AcceptEdits));
+        assert_eq!(
+            options_accept.permission_mode,
+            Some(PermissionMode::AcceptEdits)
+        );
 
         let options_dont_ask = ClaudeAgentOptions {
             permission_mode: Some(PermissionMode::DontAsk),
             ..Default::default()
         };
-        assert_eq!(options_dont_ask.permission_mode, Some(PermissionMode::DontAsk));
+        assert_eq!(
+            options_dont_ask.permission_mode,
+            Some(PermissionMode::DontAsk)
+        );
 
         let options_auto = ClaudeAgentOptions {
             permission_mode: Some(PermissionMode::Auto),
@@ -573,7 +582,10 @@ mod test_hook_specific_output_types {
             "hookEventName": "PostToolUse",
             "updatedMCPToolOutput": {"result": "modified"},
         });
-        assert_eq!(output["updatedMCPToolOutput"], json!({"result": "modified"}));
+        assert_eq!(
+            output["updatedMCPToolOutput"],
+            json!({"result": "modified"})
+        );
 
         let parsed: HookSpecificOutput = serde_json::from_value(output).unwrap();
         match &parsed {
@@ -762,7 +774,10 @@ mod test_agent_definition {
     fn test_minimal_definition_omits_unset_fields() {
         let agent = AgentDefinition::new("test", "You are a test");
         let payload = serialize(&agent);
-        assert_eq!(payload, json!({"description": "test", "prompt": "You are a test"}));
+        assert_eq!(
+            payload,
+            json!({"description": "test", "prompt": "You are a test"})
+        );
     }
 
     #[test]

@@ -230,8 +230,12 @@ mod test_string_prompt_with_sdk_mcp_servers {
 
     #[async_trait::async_trait]
     impl Transport for InitMockTransport {
-        async fn connect(&mut self) -> rust_agent_sdk::errors::Result<()> { Ok(()) }
-        async fn close(&mut self) -> rust_agent_sdk::errors::Result<()> { Ok(()) }
+        async fn connect(&mut self) -> rust_agent_sdk::errors::Result<()> {
+            Ok(())
+        }
+        async fn close(&mut self) -> rust_agent_sdk::errors::Result<()> {
+            Ok(())
+        }
         async fn write(&mut self, data: &str) -> rust_agent_sdk::errors::Result<()> {
             self.written.lock().unwrap().push(data.to_string());
             Ok(())
@@ -240,14 +244,22 @@ mod test_string_prompt_with_sdk_mcp_servers {
             *self.end_input_called.lock().unwrap() = true;
             Ok(())
         }
-        fn is_ready(&self) -> bool { true }
-        async fn read_message(&mut self) -> rust_agent_sdk::errors::Result<Option<serde_json::Value>> {
+        fn is_ready(&self) -> bool {
+            true
+        }
+        async fn read_message(
+            &mut self,
+        ) -> rust_agent_sdk::errors::Result<Option<serde_json::Value>> {
             if !self.init_responded {
                 let written = self.written.lock().unwrap();
                 for w in written.iter().rev() {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(w.trim()) {
                         if v.get("type").and_then(|t| t.as_str()) == Some("control_request") {
-                            let req_id = v.get("request_id").and_then(|r| r.as_str()).unwrap_or("req_1").to_string();
+                            let req_id = v
+                                .get("request_id")
+                                .and_then(|r| r.as_str())
+                                .unwrap_or("req_1")
+                                .to_string();
                             drop(written);
                             self.init_responded = true;
                             return Ok(Some(json!({
@@ -275,7 +287,8 @@ mod test_string_prompt_with_sdk_mcp_servers {
     #[tokio::test]
     async fn test_string_prompt_waits_for_result_with_sdk_mcp_servers() {
         let transport = InitMockTransport::new(assistant_and_result());
-        let messages = rust_agent_sdk::query_collect("Hello", None, Some(Box::new(transport))).await;
+        let messages =
+            rust_agent_sdk::query_collect("Hello", None, Some(Box::new(transport))).await;
         assert!(messages.is_ok());
         let msgs = messages.unwrap();
         assert_eq!(msgs.len(), 2);
@@ -288,7 +301,8 @@ mod test_string_prompt_with_sdk_mcp_servers {
     #[tokio::test]
     async fn test_string_prompt_without_mcp_servers_closes_immediately() {
         let transport = InitMockTransport::new(assistant_and_result());
-        let messages = rust_agent_sdk::query_collect("Hello", None, Some(Box::new(transport))).await;
+        let messages =
+            rust_agent_sdk::query_collect("Hello", None, Some(Box::new(transport))).await;
         assert!(messages.is_ok());
         let msgs = messages.unwrap();
         assert_eq!(msgs.len(), 2);
@@ -302,7 +316,8 @@ mod test_string_prompt_with_sdk_mcp_servers {
         all_messages.extend(assistant_and_result());
         let transport = InitMockTransport::new(all_messages);
 
-        let messages = rust_agent_sdk::query_collect("Greet Alice", None, Some(Box::new(transport))).await;
+        let messages =
+            rust_agent_sdk::query_collect("Greet Alice", None, Some(Box::new(transport))).await;
         assert!(messages.is_ok());
         let msgs = messages.unwrap();
         assert_eq!(msgs.len(), 2);
@@ -314,8 +329,8 @@ mod test_string_prompt_with_sdk_mcp_servers {
     /// even without SDK MCP servers.
     #[tokio::test]
     async fn test_string_prompt_with_hooks_waits_for_result() {
-        let noop_hook: rust_agent_sdk::types::HookCallbackFn = Arc::new(
-            |_input, _tool_use_id, _context| {
+        let noop_hook: rust_agent_sdk::types::HookCallbackFn =
+            Arc::new(|_input, _tool_use_id, _context| {
                 Box::pin(async move {
                     rust_agent_sdk::HookJSONOutput::Sync {
                         continue_: Some(true),
@@ -327,8 +342,7 @@ mod test_string_prompt_with_sdk_mcp_servers {
                         hook_specific_output: None,
                     }
                 })
-            },
-        );
+            });
 
         let mut hooks_map = std::collections::HashMap::new();
         hooks_map.insert(
@@ -346,7 +360,9 @@ mod test_string_prompt_with_sdk_mcp_servers {
         };
 
         let transport = InitMockTransport::new(assistant_and_result());
-        let messages = rust_agent_sdk::query_collect("Do something", Some(options), Some(Box::new(transport))).await;
+        let messages =
+            rust_agent_sdk::query_collect("Do something", Some(options), Some(Box::new(transport)))
+                .await;
         assert!(messages.is_ok());
         let msgs = messages.unwrap();
         assert_eq!(msgs.len(), 2);
@@ -369,26 +385,46 @@ mod test_async_iterable_prompt_with_sdk_mcp_servers {
 
     impl InitMockTransport {
         fn new(messages: Vec<serde_json::Value>) -> Self {
-            Self { messages, read_index: 0, init_responded: false, written: Arc::new(Mutex::new(Vec::new())) }
+            Self {
+                messages,
+                read_index: 0,
+                init_responded: false,
+                written: Arc::new(Mutex::new(Vec::new())),
+            }
         }
     }
 
     #[async_trait::async_trait]
     impl Transport for InitMockTransport {
-        async fn connect(&mut self) -> rust_agent_sdk::errors::Result<()> { Ok(()) }
-        async fn close(&mut self) -> rust_agent_sdk::errors::Result<()> { Ok(()) }
-        async fn write(&mut self, data: &str) -> rust_agent_sdk::errors::Result<()> {
-            self.written.lock().unwrap().push(data.to_string()); Ok(())
+        async fn connect(&mut self) -> rust_agent_sdk::errors::Result<()> {
+            Ok(())
         }
-        async fn end_input(&mut self) -> rust_agent_sdk::errors::Result<()> { Ok(()) }
-        fn is_ready(&self) -> bool { true }
-        async fn read_message(&mut self) -> rust_agent_sdk::errors::Result<Option<serde_json::Value>> {
+        async fn close(&mut self) -> rust_agent_sdk::errors::Result<()> {
+            Ok(())
+        }
+        async fn write(&mut self, data: &str) -> rust_agent_sdk::errors::Result<()> {
+            self.written.lock().unwrap().push(data.to_string());
+            Ok(())
+        }
+        async fn end_input(&mut self) -> rust_agent_sdk::errors::Result<()> {
+            Ok(())
+        }
+        fn is_ready(&self) -> bool {
+            true
+        }
+        async fn read_message(
+            &mut self,
+        ) -> rust_agent_sdk::errors::Result<Option<serde_json::Value>> {
             if !self.init_responded {
                 let written = self.written.lock().unwrap();
                 for w in written.iter().rev() {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(w.trim()) {
                         if v.get("type").and_then(|t| t.as_str()) == Some("control_request") {
-                            let req_id = v.get("request_id").and_then(|r| r.as_str()).unwrap_or("req_1").to_string();
+                            let req_id = v
+                                .get("request_id")
+                                .and_then(|r| r.as_str())
+                                .unwrap_or("req_1")
+                                .to_string();
                             drop(written);
                             self.init_responded = true;
                             return Ok(Some(json!({
@@ -416,7 +452,8 @@ mod test_async_iterable_prompt_with_sdk_mcp_servers {
     #[tokio::test]
     async fn test_async_iterable_with_sdk_mcp_servers() {
         let transport = InitMockTransport::new(assistant_and_result());
-        let messages = rust_agent_sdk::query_collect("Hello", None, Some(Box::new(transport))).await;
+        let messages =
+            rust_agent_sdk::query_collect("Hello", None, Some(Box::new(transport))).await;
         assert!(messages.is_ok());
         let msgs = messages.unwrap();
         assert_eq!(msgs.len(), 2);
@@ -432,7 +469,8 @@ mod test_async_iterable_prompt_with_sdk_mcp_servers {
         all_messages.extend(assistant_and_result());
         let transport = InitMockTransport::new(all_messages);
 
-        let messages = rust_agent_sdk::query_collect("Greet Alice", None, Some(Box::new(transport))).await;
+        let messages =
+            rust_agent_sdk::query_collect("Greet Alice", None, Some(Box::new(transport))).await;
         assert!(messages.is_ok());
         let msgs = messages.unwrap();
         assert_eq!(msgs.len(), 2);

@@ -1,22 +1,94 @@
 //! Tests for subprocess transport buffering edge cases.
 //! Ported from Python: tests/test_subprocess_buffering.py
+//!
+//! O transporte é exercitado de verdade: um "CLI" falso (script sh que despeja
+//! um payload fixo no stdout) é apontado por `cli_path`, e os testes leem as
+//! mensagens por `read_message()`. Antes estes testes só chamavam `connect()`
+//! contra um `/usr/bin/claude` inexistente e morriam no `unwrap`.
 
+use std::io::Write;
 use std::path::PathBuf;
 
-use rust_agent_sdk::internal::transport::{SubprocessCLITransport, Transport, DEFAULT_MAX_BUFFER_SIZE};
-#[allow(unused_imports)]
+use rust_agent_sdk::internal::transport::{
+    SubprocessCLITransport, Transport, DEFAULT_MAX_BUFFER_SIZE,
+};
 use rust_agent_sdk::types::ClaudeAgentOptions;
 
 // -------------------------------------------------------------------------
-// Helper
+// Helpers
 // -------------------------------------------------------------------------
 
-/// Construct ClaudeAgentOptions with defaults suitable for transport tests.
-fn make_options(max_buffer_size: Option<usize>) -> ClaudeAgentOptions {
+/// CLI falso: ignora os argumentos e escreve `payload` no stdout.
+///
+/// O `TempDir` é devolvido junto porque ele apaga o script ao ser dropado.
+fn fake_cli(payload: &str) -> (tempfile::TempDir, PathBuf) {
+    // A checagem de versão spawnaria o script mais uma vez; desligar deixa o
+    // teste determinístico.
+    std::env::set_var("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "1");
+
+    let dir = tempfile::tempdir().expect("tempdir para o CLI falso");
+    let payload_path = dir.path().join("payload.txt");
+    std::fs::write(&payload_path, payload).expect("escrita do payload");
+
+    let script_path = dir.path().join("fake-claude");
+    let mut script = std::fs::File::create(&script_path).expect("criação do script");
+    write!(
+        script,
+        "#!/bin/sh\nexec cat {}\n",
+        payload_path.to_string_lossy()
+    )
+    .expect("escrita do script");
+    drop(script);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+            .expect("permissão de execução");
+    }
+
+    (dir, script_path)
+}
+
+fn make_options(cli_path: PathBuf, max_buffer_size: Option<usize>) -> ClaudeAgentOptions {
     ClaudeAgentOptions {
-        cli_path: Some(PathBuf::from("/usr/bin/claude")),
+        cli_path: Some(cli_path),
         max_buffer_size,
         ..Default::default()
+    }
+}
+
+/// Conecta ao CLI falso e drena todas as mensagens até o EOF.
+async fn read_all(payload: &str, max_buffer_size: Option<usize>) -> Vec<serde_json::Value> {
+    let (_dir, cli_path) = fake_cli(payload);
+    let mut transport =
+        SubprocessCLITransport::new("test", make_options(cli_path, max_buffer_size));
+    transport.connect().await.expect("spawn do CLI falso");
+
+    let mut messages = Vec::new();
+    while let Some(msg) = transport.read_message().await.expect("leitura sem erro") {
+        messages.push(msg);
+    }
+    let _ = transport.close().await;
+    messages
+}
+
+/// Conecta ao CLI falso e devolve o erro da primeira leitura que falhar.
+async fn read_until_error(payload: &str, max_buffer_size: Option<usize>) -> String {
+    let (_dir, cli_path) = fake_cli(payload);
+    let mut transport =
+        SubprocessCLITransport::new("test", make_options(cli_path, max_buffer_size));
+    transport.connect().await.expect("spawn do CLI falso");
+
+    loop {
+        match transport.read_message().await {
+            Ok(Some(_)) => continue,
+            Ok(None) => panic!("a leitura terminou sem o erro de buffer esperado"),
+            Err(e) => {
+                let _ = transport.close().await;
+                return format!("{e}");
+            }
+        }
     }
 }
 
@@ -30,28 +102,20 @@ fn make_options(max_buffer_size: Option<usize>) -> ClaudeAgentOptions {
 /// objects to be delivered as a single line with embedded newlines.
 #[tokio::test]
 async fn test_multiple_json_objects_on_single_line() {
-    let json_obj1 = serde_json::json!({"type": "message", "id": "msg1", "content": "First message"});
+    let json_obj1 =
+        serde_json::json!({"type": "message", "id": "msg1", "content": "First message"});
     let json_obj2 = serde_json::json!({"type": "result", "id": "res1", "status": "completed"});
 
-    let _buffered_line = format!("{}\n{}", json_obj1, json_obj2);
+    let buffered_line = format!("{}\n{}\n", json_obj1, json_obj2);
 
-    let transport = SubprocessCLITransport::new("test", make_options(None));
+    let messages = read_all(&buffered_line, None).await;
 
-    // SubprocessCLITransport::connect() is todo!(), so we can't call read_messages.
-    // After implementation, we'd feed the buffered_line into the transport's stdout
-    // stream and read parsed messages out.
-    //
-    // For now, verify the transport was constructed correctly then attempt connect.
-    assert_eq!(transport.prompt, "test");
-    assert!(!transport.is_ready());
-
-    // This will fail with todo!() — desired behavior.
-    let mut transport = transport;
-    transport.connect().await.unwrap();
-
-    // After implementation: read_messages() should yield 2 messages
-    // messages[0]["type"] == "message", messages[0]["id"] == "msg1"
-    // messages[1]["type"] == "result", messages[1]["id"] == "res1"
+    // Contrato: dois objetos entram, dois objetos saem, na ordem.
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["type"], "message");
+    assert_eq!(messages[0]["id"], "msg1");
+    assert_eq!(messages[1]["type"], "result");
+    assert_eq!(messages[1]["id"], "res1");
 }
 
 /// Test parsing JSON objects that contain newline characters in string values.
@@ -60,16 +124,15 @@ async fn test_json_with_embedded_newlines() {
     let json_obj1 = serde_json::json!({"type": "message", "content": "Line 1\nLine 2\nLine 3"});
     let json_obj2 = serde_json::json!({"type": "result", "data": "Some\nMultiline\nContent"});
 
-    let _buffered_line = format!("{}\n{}", json_obj1, json_obj2);
+    // `to_string` escapa os \n dentro das strings — cada objeto continua numa linha.
+    let buffered_line = format!("{}\n{}\n", json_obj1, json_obj2);
 
-    let mut transport = SubprocessCLITransport::new("test", make_options(None));
+    let messages = read_all(&buffered_line, None).await;
 
-    // connect() is todo!()
-    transport.connect().await.unwrap();
-
-    // After implementation:
-    // messages[0]["content"] == "Line 1\nLine 2\nLine 3"
-    // messages[1]["data"] == "Some\nMultiline\nContent"
+    // Contrato: as quebras de linha ESCAPADAS sobrevivem intactas ao parsing.
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["content"], "Line 1\nLine 2\nLine 3");
+    assert_eq!(messages[1]["data"], "Some\nMultiline\nContent");
 }
 
 /// Test parsing with multiple newlines between JSON objects.
@@ -78,17 +141,14 @@ async fn test_multiple_newlines_between_objects() {
     let json_obj1 = serde_json::json!({"type": "message", "id": "msg1"});
     let json_obj2 = serde_json::json!({"type": "result", "id": "res1"});
 
-    let _buffered_line = format!("{}\n\n\n{}", json_obj1, json_obj2);
+    let buffered_line = format!("{}\n\n\n{}\n", json_obj1, json_obj2);
 
-    let mut transport = SubprocessCLITransport::new("test", make_options(None));
+    let messages = read_all(&buffered_line, None).await;
 
-    // connect() is todo!()
-    transport.connect().await.unwrap();
-
-    // After implementation:
-    // len(messages) == 2
-    // messages[0]["id"] == "msg1"
-    // messages[1]["id"] == "res1"
+    // Contrato: linhas vazias entre objetos são ignoradas.
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["id"], "msg1");
+    assert_eq!(messages[1]["id"], "res1");
 }
 
 /// Test parsing when a single JSON object is split across multiple stream reads.
@@ -110,19 +170,24 @@ async fn test_split_json_across_multiple_reads() {
     });
 
     let complete_json = serde_json::to_string(&json_obj).unwrap();
-    let _part1 = &complete_json[..100];
-    let _part2 = &complete_json[100..250];
-    let _part3 = &complete_json[250..];
+    // Um único objeto partido em três leituras de linha.
+    let payload = format!(
+        "{}\n{}\n{}\n",
+        &complete_json[..100],
+        &complete_json[100..250],
+        &complete_json[250..]
+    );
 
-    let mut transport = SubprocessCLITransport::new("test", make_options(None));
+    let messages = read_all(&payload, None).await;
 
-    // connect() is todo!()
-    transport.connect().await.unwrap();
-
-    // After implementation:
-    // len(messages) == 1
-    // messages[0]["type"] == "assistant"
-    // len(messages[0]["message"]["content"]) == 2
+    // Contrato: os três pedaços viram UM objeto só, íntegro.
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["type"], "assistant");
+    assert_eq!(
+        messages[0]["message"]["content"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(messages[0]["message"]["content"][1]["id"], "tool_123");
 }
 
 /// Test parsing a large minified JSON (simulating the reported issue).
@@ -145,56 +210,56 @@ async fn test_large_minified_json() {
     });
 
     let complete_json = serde_json::to_string(&json_obj).unwrap();
-    let chunk_size = 64 * 1024;
-    let _chunks: Vec<&str> = complete_json
-        .as_bytes()
-        .chunks(chunk_size)
-        .map(|c| std::str::from_utf8(c).unwrap())
-        .collect();
+    let payload = format!("{}\n", complete_json);
 
-    let mut transport = SubprocessCLITransport::new("test", make_options(None));
+    let messages = read_all(&payload, None).await;
 
-    // connect() is todo!()
-    transport.connect().await.unwrap();
-
-    // After implementation:
-    // len(messages) == 1
-    // messages[0]["type"] == "user"
-    // messages[0]["message"]["content"][0]["tool_use_id"] == "toolu_016fed1NhiaMLqnEvrj5NUaj"
+    // Contrato: uma linha minificada de ~150 KB é lida inteira.
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["type"], "user");
+    assert_eq!(
+        messages[0]["message"]["content"][0]["tool_use_id"],
+        "toolu_016fed1NhiaMLqnEvrj5NUaj"
+    );
 }
 
 /// Test that exceeding buffer size raises an appropriate error.
 #[tokio::test]
 async fn test_buffer_size_exceeded() {
-    let _huge_incomplete = format!("{{\"data\": \"{}", "x".repeat(DEFAULT_MAX_BUFFER_SIZE + 1000));
+    // JSON incompleto partido em duas linhas: a acumulação passa do teto.
+    let half = "x".repeat(DEFAULT_MAX_BUFFER_SIZE / 2 + 1000);
+    let payload = format!("{{\"data\": \"{}\n{}\n", half, half);
 
-    let mut transport = SubprocessCLITransport::new("test", make_options(None));
+    let error = read_until_error(&payload, None).await;
 
-    // connect() is todo!()
-    // After implementation, reading from the stream with oversized incomplete JSON
-    // should produce a CLIJSONDecodeError with "exceeded maximum buffer size".
-    transport.connect().await.unwrap();
+    // Contrato: estourar o buffer é erro explícito, não travamento nem lixo.
+    assert!(
+        error.contains("exceeded maximum buffer size"),
+        "mensagem inesperada: {error}"
+    );
 }
 
 /// Test that the configurable buffer size option is respected.
 #[tokio::test]
 async fn test_buffer_size_option() {
     let custom_limit: usize = 512;
-    let _huge_incomplete = format!("{{\"data\": \"{}", "x".repeat(custom_limit + 10));
+    let chunk = "x".repeat(custom_limit);
+    let payload = format!("{{\"data\": \"{}\n{}\n", chunk, chunk);
 
-    let mut transport = SubprocessCLITransport::new("test", make_options(Some(custom_limit)));
+    let error = read_until_error(&payload, Some(custom_limit)).await;
 
-    // connect() is todo!()
-    // After implementation, reading should fail with:
-    // "maximum buffer size of 512 bytes" in the error message
-    transport.connect().await.unwrap();
+    // Contrato: o teto configurado é o que vale, e aparece na mensagem.
+    assert!(
+        error.contains("maximum buffer size of 512 bytes"),
+        "mensagem inesperada: {error}"
+    );
 }
 
 /// Test handling a mix of complete and split JSON messages.
 #[tokio::test]
 async fn test_mixed_complete_and_split_json() {
-    let msg1 = serde_json::to_string(&serde_json::json!({"type": "system", "subtype": "start"}))
-        .unwrap();
+    let msg1 =
+        serde_json::to_string(&serde_json::json!({"type": "system", "subtype": "start"})).unwrap();
 
     let large_msg = serde_json::json!({
         "type": "assistant",
@@ -202,27 +267,32 @@ async fn test_mixed_complete_and_split_json() {
     });
     let large_json = serde_json::to_string(&large_msg).unwrap();
 
-    let msg3 = serde_json::to_string(&serde_json::json!({"type": "system", "subtype": "end"}))
-        .unwrap();
+    let msg3 =
+        serde_json::to_string(&serde_json::json!({"type": "system", "subtype": "end"})).unwrap();
 
-    let _lines = vec![
-        format!("{}\n", msg1),
-        large_json[..1000].to_string(),
-        large_json[1000..3000].to_string(),
-        format!("{}\n{}", &large_json[3000..], msg3),
-    ];
+    let payload = format!(
+        "{}\n{}\n{}\n{}\n{}\n",
+        msg1,
+        &large_json[..1000],
+        &large_json[1000..3000],
+        &large_json[3000..],
+        msg3
+    );
 
-    let mut transport = SubprocessCLITransport::new("test", make_options(None));
+    let messages = read_all(&payload, None).await;
 
-    // connect() is todo!()
-    transport.connect().await.unwrap();
-
-    // After implementation:
-    // len(messages) == 3
-    // messages[0]["type"] == "system", messages[0]["subtype"] == "start"
-    // messages[1]["type"] == "assistant"
-    // messages[1]["message"]["content"][0]["text"].len() == 5000
-    // messages[2]["type"] == "system", messages[2]["subtype"] == "end"
+    // Contrato: objeto completo, objeto partido e objeto completo convivem.
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0]["subtype"], "start");
+    assert_eq!(messages[1]["type"], "assistant");
+    assert_eq!(
+        messages[1]["message"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .len(),
+        5000
+    );
+    assert_eq!(messages[2]["subtype"], "end");
 }
 
 /// Non-JSON lines (e.g. [SandboxDebug]) on stdout must not corrupt
@@ -230,54 +300,120 @@ async fn test_mixed_complete_and_split_json() {
 #[tokio::test]
 async fn test_non_json_debug_lines_skipped() {
     let debug = "[SandboxDebug] Seccomp filtering not available";
-    let msg1 = serde_json::to_string(&serde_json::json!({"type": "system", "subtype": "init"}))
+    let msg1 =
+        serde_json::to_string(&serde_json::json!({"type": "system", "subtype": "init"})).unwrap();
+    let msg2 = serde_json::to_string(&serde_json::json!({"type": "result", "subtype": "success"}))
         .unwrap();
-    let msg2 =
-        serde_json::to_string(&serde_json::json!({"type": "result", "subtype": "success"}))
-            .unwrap();
 
-    let _stream_data = format!("{}\n{}\n{}\n{}\n", debug, msg1, debug, msg2);
+    let payload = format!("{}\n{}\n{}\n{}\n", debug, msg1, debug, msg2);
 
-    let mut transport = SubprocessCLITransport::new("test", make_options(None));
+    let messages = read_all(&payload, None).await;
 
-    // connect() is todo!()
-    transport.connect().await.unwrap();
-
-    // After implementation:
-    // len(messages) == 2
-    // messages[0]["type"] == "system"
-    // messages[1]["type"] == "result"
+    // Contrato: linhas de debug somem sem contaminar o buffer.
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["type"], "system");
+    assert_eq!(messages[1]["type"], "result");
 }
 
 /// Debug/warning lines interleaved between valid JSON messages
 /// must be silently skipped.
 #[tokio::test]
 async fn test_interleaved_non_json_lines_skipped() {
-    let _lines = vec![
-        "[SandboxDebug] line 1\n".to_string(),
-        "[SandboxDebug] line 2\n".to_string(),
-        format!(
-            "{}\n",
-            serde_json::to_string(&serde_json::json!({"type": "system", "subtype": "init"}))
-                .unwrap()
-        ),
-        "WARNING: something\n".to_string(),
-        format!(
-            "{}\n",
-            serde_json::to_string(
-                &serde_json::json!({"type": "result", "subtype": "success"})
-            )
+    let payload = format!(
+        "[SandboxDebug] line 1\n[SandboxDebug] line 2\n{}\nWARNING: something\n{}\n",
+        serde_json::to_string(&serde_json::json!({"type": "system", "subtype": "init"})).unwrap(),
+        serde_json::to_string(&serde_json::json!({"type": "result", "subtype": "success"}))
             .unwrap()
-        ),
-    ];
+    );
 
-    let mut transport = SubprocessCLITransport::new("test", make_options(None));
+    let messages = read_all(&payload, None).await;
 
-    // connect() is todo!()
-    transport.connect().await.unwrap();
+    // Contrato: warnings e debug intercalados não quebram a sequência.
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["type"], "system");
+    assert_eq!(messages[1]["type"], "result");
+}
 
-    // After implementation:
-    // len(messages) == 2
-    // messages[0]["type"] == "system"
-    // messages[1]["type"] == "result"
+/// CLI falso que goteja o payload caractere a caractere.
+///
+/// Cada caractere vira um `printf` próprio com um sleep atrás, então uma linha
+/// leva centenas de milissegundos para completar — tempo de sobra para um
+/// `read_message()` ser cancelado no meio dela.
+fn dribbling_cli(payload: &str) -> (tempfile::TempDir, PathBuf) {
+    std::env::set_var("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "1");
+
+    let dir = tempfile::tempdir().expect("tempdir para o CLI falso");
+    let script_path = dir.path().join("fake-claude");
+    let mut script = String::from("#!/bin/sh\n");
+    for ch in payload.chars() {
+        assert!(
+            ch != '\'',
+            "o payload do gotejador não pode conter aspas simples"
+        );
+        if ch == '\n' {
+            script.push_str("printf '\\n'\nsleep 0.002\n");
+        } else {
+            script.push_str(&format!("printf %s '{ch}'\nsleep 0.002\n"));
+        }
+    }
+    std::fs::write(&script_path, script).expect("escrita do script");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+            .expect("permissão de execução");
+    }
+
+    (dir, script_path)
+}
+
+/// A canceled `read_message()` must not lose the line in flight.
+///
+/// É o contrato que permite pôr `read_message` num `select!` contra um sinal
+/// de interrupção: quem perde a corrida é o FUTURE, nunca os bytes. Antes
+/// deste contrato a linha em curso vivia num buffer local e o cancel a
+/// perdia — o resto dela chegava como fragmento não-JSON e era descartado.
+#[tokio::test]
+async fn a_canceled_read_does_not_lose_the_line_in_flight() {
+    let value = "a".repeat(120);
+    let payload = format!("{{\"type\":\"probe\",\"value\":\"{value}\"}}\n");
+    let (_dir, cli_path) = dribbling_cli(&payload);
+
+    let mut transport = SubprocessCLITransport::new("test", make_options(cli_path, None));
+    transport.connect().await.expect("spawn do CLI falso");
+
+    // Cancela a leitura no meio da linha, mais de uma vez — como um ator que
+    // perde o select para o botão de parar e volta a ler em seguida.
+    let mut early: Option<serde_json::Value> = None;
+    for _ in 0..3 {
+        let read = transport.read_message();
+        tokio::pin!(read);
+        tokio::select! {
+            result = &mut read => {
+                early = Some(result.expect("leitura sem erro").expect("houve mensagem"));
+            }
+            () = tokio::time::sleep(std::time::Duration::from_millis(30)) => {}
+        }
+        if early.is_some() {
+            break;
+        }
+    }
+
+    let message = match early {
+        Some(message) => message,
+        None => transport
+            .read_message()
+            .await
+            .expect("leitura sem erro")
+            .expect("a mensagem sobreviveu aos cancels"),
+    };
+    // Contrato: os bytes lidos pelos futures cancelados continuam na linha —
+    // a mensagem final é exatamente o payload, sem buracos.
+    assert_eq!(
+        message["value"],
+        serde_json::Value::String(value),
+        "a linha gotejada chega inteira depois de três cancels no meio dela"
+    );
+    let _ = transport.close().await;
 }

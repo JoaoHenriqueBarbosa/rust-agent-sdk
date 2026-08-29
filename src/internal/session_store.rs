@@ -4,9 +4,86 @@ use std::sync::Mutex;
 use crate::errors::ClaudeSDKError;
 use crate::internal::session_summary::fold_session_summary;
 use crate::types::{
-    SessionKey, SessionListSubkeysKey, SessionStore, SessionStoreEntry,
-    SessionStoreListEntry, SessionSummaryEntry,
+    SessionKey, SessionListSubkeysKey, SessionStore, SessionStoreEntry, SessionStoreListEntry,
+    SessionSummaryEntry,
 };
+
+/// Handle clonável para um `SessionStore` já existente.
+///
+/// `ClaudeAgentOptions::session_store` guarda um `Box<dyn SessionStore>`, que
+/// não é clonável — e a sessão precisa do mesmo store em dois lugares: nas
+/// options do transporte (é de lá que sai o flag `--session-mirror`) e no
+/// batcher que grava os frames espelhados. Este wrapper resolve isso sem mudar
+/// a assinatura pública do campo: o `Box` original é convertido uma vez em
+/// `Arc` e cada consumidor recebe um `SharedSessionStore` que delega tudo.
+#[derive(Clone)]
+pub struct SharedSessionStore(std::sync::Arc<dyn SessionStore>);
+
+impl SharedSessionStore {
+    /// Consome o `Box` do usuário e devolve um handle compartilhável.
+    pub fn from_boxed(store: Box<dyn SessionStore>) -> Self {
+        Self(std::sync::Arc::from(store))
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionStore for SharedSessionStore {
+    async fn append(
+        &self,
+        key: &SessionKey,
+        entries: &[SessionStoreEntry],
+    ) -> std::result::Result<(), ClaudeSDKError> {
+        self.0.append(key, entries).await
+    }
+
+    async fn load(
+        &self,
+        key: &SessionKey,
+    ) -> std::result::Result<Option<Vec<SessionStoreEntry>>, ClaudeSDKError> {
+        self.0.load(key).await
+    }
+
+    async fn list_sessions(
+        &self,
+        project_key: &str,
+    ) -> std::result::Result<Vec<SessionStoreListEntry>, ClaudeSDKError> {
+        self.0.list_sessions(project_key).await
+    }
+
+    async fn list_session_summaries(
+        &self,
+        project_key: &str,
+    ) -> std::result::Result<Vec<SessionSummaryEntry>, ClaudeSDKError> {
+        self.0.list_session_summaries(project_key).await
+    }
+
+    async fn delete(&self, key: &SessionKey) -> std::result::Result<(), ClaudeSDKError> {
+        self.0.delete(key).await
+    }
+
+    async fn list_subkeys(
+        &self,
+        key: &SessionListSubkeysKey,
+    ) -> std::result::Result<Vec<String>, ClaudeSDKError> {
+        self.0.list_subkeys(key).await
+    }
+
+    fn has_list_sessions(&self) -> bool {
+        self.0.has_list_sessions()
+    }
+
+    fn has_delete(&self) -> bool {
+        self.0.has_delete()
+    }
+
+    fn has_list_subkeys(&self) -> bool {
+        self.0.has_list_subkeys()
+    }
+
+    fn has_list_session_summaries(&self) -> bool {
+        self.0.has_list_session_summaries()
+    }
+}
 
 /// In-memory reference implementation of SessionStore for testing.
 pub struct InMemorySessionStore {
@@ -55,7 +132,10 @@ impl InMemorySessionStore {
 
     /// Manually set the mtime for a `project_key/session_id` composite key.
     pub fn set_mtime(&self, composite_key: &str, mtime: i64) {
-        self.mtimes.lock().unwrap().insert(composite_key.to_string(), mtime);
+        self.mtimes
+            .lock()
+            .unwrap()
+            .insert(composite_key.to_string(), mtime);
     }
 
     fn key_to_string(key: &SessionKey) -> String {
@@ -155,10 +235,7 @@ impl SessionStore for InMemorySessionStore {
             .collect())
     }
 
-    async fn delete(
-        &self,
-        key: &SessionKey,
-    ) -> Result<(), ClaudeSDKError> {
+    async fn delete(&self, key: &SessionKey) -> Result<(), ClaudeSDKError> {
         let key_str = Self::key_to_string(key);
         let mut data = self.data.lock().unwrap();
 
@@ -197,10 +274,18 @@ impl SessionStore for InMemorySessionStore {
         Ok(result)
     }
 
-    fn has_list_sessions(&self) -> bool { true }
-    fn has_delete(&self) -> bool { true }
-    fn has_list_subkeys(&self) -> bool { true }
-    fn has_list_session_summaries(&self) -> bool { true }
+    fn has_list_sessions(&self) -> bool {
+        true
+    }
+    fn has_delete(&self) -> bool {
+        true
+    }
+    fn has_list_subkeys(&self) -> bool {
+        true
+    }
+    fn has_list_session_summaries(&self) -> bool {
+        true
+    }
 }
 
 /// Convert a file path to a SessionKey.
@@ -208,10 +293,7 @@ impl SessionStore for InMemorySessionStore {
 /// Given a path like `<projects_dir>/<project_key>/<session_id>.jsonl`
 /// or `<projects_dir>/<project_key>/<session_id>/subagents/agent-abc.jsonl`,
 /// extracts the project_key, session_id, and optional subpath.
-pub fn file_path_to_session_key(
-    file_path: &str,
-    projects_dir: &str,
-) -> Option<SessionKey> {
+pub fn file_path_to_session_key(file_path: &str, projects_dir: &str) -> Option<SessionKey> {
     use std::path::Path;
 
     let file = Path::new(file_path);

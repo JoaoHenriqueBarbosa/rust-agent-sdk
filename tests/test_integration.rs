@@ -11,9 +11,7 @@ use std::sync::{Arc, Mutex};
 use rust_agent_sdk::errors::ClaudeSDKError;
 use rust_agent_sdk::internal::transport::Transport;
 use rust_agent_sdk::query::query_collect as query;
-use rust_agent_sdk::types::{
-    ClaudeAgentOptions, ContentBlock, Message,
-};
+use rust_agent_sdk::types::{ClaudeAgentOptions, ContentBlock, Message};
 use serde_json::json;
 
 // ---------------------------------------------------------------------------
@@ -66,7 +64,8 @@ impl Transport for MockTransport {
             for w in written.iter().rev() {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(w.trim()) {
                     if v.get("type").and_then(|t| t.as_str()) == Some("control_request") {
-                        let req_id = v.get("request_id")
+                        let req_id = v
+                            .get("request_id")
                             .and_then(|r| r.as_str())
                             .unwrap_or("req_1")
                             .to_string();
@@ -268,14 +267,12 @@ async fn test_continuation_option() {
     assert!(!messages.is_empty());
 
     match &messages[0] {
-        Message::Assistant(assistant) => {
-            match &assistant.content[0] {
-                ContentBlock::Text(tb) => {
-                    assert_eq!(tb.text, "Continuing from previous conversation");
-                }
-                other => panic!("expected TextBlock, got {:?}", other),
+        Message::Assistant(assistant) => match &assistant.content[0] {
+            ContentBlock::Text(tb) => {
+                assert_eq!(tb.text, "Continuing from previous conversation");
             }
-        }
+            other => panic!("expected TextBlock, got {:?}", other),
+        },
         other => panic!("expected AssistantMessage, got {:?}", other),
     }
 }

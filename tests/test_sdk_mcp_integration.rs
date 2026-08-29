@@ -9,7 +9,6 @@
 /// Since Rust doesn't have a Python `mcp.server.Server` equivalent, we mock MCP
 /// interactions by configuring `mcp_servers` in `ClaudeAgentOptions` and testing
 /// that `InternalClient.process_query_collect()` is called correctly with them.
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -26,7 +25,12 @@ const DEFAULT_CLI_PATH: &str = "/usr/bin/claude";
 /// Build a minimal `ClaudeAgentOptions` with an sdk-type MCP server configured.
 fn options_with_sdk_server(name: &str) -> ClaudeAgentOptions {
     let mut mcp_servers = HashMap::new();
-    mcp_servers.insert(name.to_string(), McpServerConfig::Sdk { name: name.to_string() });
+    mcp_servers.insert(
+        name.to_string(),
+        McpServerConfig::Sdk {
+            name: name.to_string(),
+        },
+    );
     ClaudeAgentOptions {
         cli_path: Some(PathBuf::from(DEFAULT_CLI_PATH)),
         mcp_servers: McpServersConfig::Dict(mcp_servers),
@@ -70,7 +74,9 @@ async fn test_sdk_mcp_server_handlers() {
 
     // process_query should handle SDK MCP servers — calls todo!()
     let client = InternalClient::new();
-    let _result = client.process_query_collect("test prompt", options, None).await;
+    let _result = client
+        .process_query_collect("test prompt", options, None)
+        .await;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -85,15 +91,14 @@ async fn test_tool_creation() {
     assert_eq!(tool["name"], "echo");
     assert_eq!(tool["description"], "Echo input");
     assert_eq!(tool["inputSchema"]["type"], "object");
-    assert_eq!(
-        tool["inputSchema"]["properties"]["input"]["type"],
-        "string"
-    );
+    assert_eq!(tool["inputSchema"]["properties"]["input"]["type"], "string");
 
     // Verify the tool schema is valid JSON that process_query can accept
     let options = options_with_sdk_server("echo-server");
     let client = InternalClient::new();
-    let _result = client.process_query_collect("echo test", options, None).await;
+    let _result = client
+        .process_query_collect("echo test", options, None)
+        .await;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -107,7 +112,9 @@ async fn test_error_handling() {
     // through the InternalClient.
     let options = options_with_sdk_server("error-test");
     let client = InternalClient::new();
-    let _result = client.process_query_collect("trigger error", options, None).await;
+    let _result = client
+        .process_query_collect("trigger error", options, None)
+        .await;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -119,7 +126,9 @@ async fn test_is_error_flag_propagated() {
     // Test that is_error flag from tool result dict is propagated to CallToolResult.
     let options = options_with_sdk_server("error-flag-test");
     let client = InternalClient::new();
-    let _result = client.process_query_collect("divide 1 by 0", options, None).await;
+    let _result = client
+        .process_query_collect("divide 1 by 0", options, None)
+        .await;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -132,7 +141,9 @@ async fn test_mixed_servers() {
     let mut mcp_servers = HashMap::new();
     mcp_servers.insert(
         "sdk".to_string(),
-        McpServerConfig::Sdk { name: "sdk-server".to_string() },
+        McpServerConfig::Sdk {
+            name: "sdk-server".to_string(),
+        },
     );
     mcp_servers.insert(
         "external".to_string(),
@@ -180,7 +191,9 @@ async fn test_mixed_servers() {
 #[tokio::test]
 async fn test_server_creation() {
     // Test that SDK MCP servers are created correctly.
-    let config = McpServerConfig::Sdk { name: "test-server".to_string() };
+    let config = McpServerConfig::Sdk {
+        name: "test-server".to_string(),
+    };
     match &config {
         McpServerConfig::Sdk { name } => assert_eq!(name, "test-server"),
         other => panic!("expected Sdk, got {:?}", other),
@@ -368,7 +381,9 @@ async fn test_embedded_resource_text_content_converted() {
 
     let options = options_with_sdk_server("embedded-resource-test");
     let client = InternalClient::new();
-    let _result = client.process_query_collect("get embedded", options, None).await;
+    let _result = client
+        .process_query_collect("get embedded", options, None)
+        .await;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -393,7 +408,9 @@ async fn test_binary_embedded_resource_skipped_with_warning() {
 
     let options = options_with_sdk_server("binary-resource-test");
     let client = InternalClient::new();
-    let _result = client.process_query_collect("get binary", options, None).await;
+    let _result = client
+        .process_query_collect("get binary", options, None)
+        .await;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -412,7 +429,9 @@ async fn test_unknown_content_type_skipped_with_warning() {
 
     let options = options_with_sdk_server("unknown-type-test");
     let client = InternalClient::new();
-    let _result = client.process_query_collect("get unknown", options, None).await;
+    let _result = client
+        .process_query_collect("get unknown", options, None)
+        .await;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -437,7 +456,9 @@ async fn test_mixed_content_types_with_resource_link() {
 
     let options = options_with_sdk_server("mixed-content-test");
     let client = InternalClient::new();
-    let _result = client.process_query_collect("get mixed", options, None).await;
+    let _result = client
+        .process_query_collect("get mixed", options, None)
+        .await;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -647,7 +668,10 @@ mod test_type_to_json_schema {
             },
             "required": ["limit", "query"]
         });
-        assert_eq!(schema["properties"]["query"]["description"], "The search query");
+        assert_eq!(
+            schema["properties"]["query"]["description"],
+            "The search query"
+        );
         assert_eq!(
             schema["properties"]["limit"]["description"],
             "Max results to return"
@@ -757,7 +781,10 @@ mod test_typeddict_to_json_schema {
             },
             "required": ["limit", "query", "verbose"]
         });
-        assert_eq!(schema["properties"]["query"]["description"], "The search query");
+        assert_eq!(
+            schema["properties"]["query"]["description"],
+            "The search query"
+        );
         assert_eq!(
             schema["properties"]["limit"]["description"],
             "Max results to return"
@@ -890,7 +917,9 @@ mod test_typeddict_mcp_integration {
 
         let options = options_with_sdk_server("typeddict-call-test");
         let client = InternalClient::new();
-        let _result = client.process_query_collect("multiply 6 7", options, None).await;
+        let _result = client
+            .process_query_collect("multiply 6 7", options, None)
+            .await;
     }
 
     // 46. test_dict_schema_still_works
@@ -908,7 +937,9 @@ mod test_typeddict_mcp_integration {
 
         let options = options_with_sdk_server("dict-schema-test");
         let client = InternalClient::new();
-        let _result = client.process_query_collect("echo hello", options, None).await;
+        let _result = client
+            .process_query_collect("echo hello", options, None)
+            .await;
     }
 
     // 47. test_json_schema_dict_passthrough
@@ -937,7 +968,9 @@ mod test_typeddict_mcp_integration {
 
         let options = options_with_sdk_server("passthrough-test");
         let client = InternalClient::new();
-        let _result = client.process_query_collect("validate input", options, None).await;
+        let _result = client
+            .process_query_collect("validate input", options, None)
+            .await;
     }
 
     // 48. test_cached_tool_list_is_stable
@@ -962,6 +995,8 @@ mod test_typeddict_mcp_integration {
 
         let options = options_with_sdk_server("cache-test");
         let client = InternalClient::new();
-        let _result = client.process_query_collect("test caching", options, None).await;
+        let _result = client
+            .process_query_collect("test caching", options, None)
+            .await;
     }
 }

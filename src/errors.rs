@@ -79,10 +79,7 @@ impl ClaudeSDKError {
         }
     }
 
-    pub fn message_parse(
-        message: impl Into<String>,
-        data: Option<serde_json::Value>,
-    ) -> Self {
+    pub fn message_parse(message: impl Into<String>, data: Option<serde_json::Value>) -> Self {
         Self::MessageParse {
             message: message.into(),
             data,

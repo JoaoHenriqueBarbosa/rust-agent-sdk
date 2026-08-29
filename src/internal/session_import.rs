@@ -38,7 +38,11 @@ pub async fn import_session_to_store(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    let batch_size = if batch_size <= 0 { MAX_PENDING_ENTRIES } else { batch_size };
+    let batch_size = if batch_size == 0 {
+        MAX_PENDING_ENTRIES
+    } else {
+        batch_size
+    };
 
     let main_key = SessionKey::new(&project_key, session_id);
     append_jsonl_file_in_batches(&resolved, &main_key, store, batch_size).await?;
@@ -74,10 +78,7 @@ pub async fn import_session_to_store(
 
         // Import .meta.json sidecar if it exists
         let stem = file_path.file_name().unwrap().to_string_lossy();
-        let meta_name = format!(
-            "{}.meta.json",
-            &stem[..stem.len() - ".jsonl".len()]
-        );
+        let meta_name = format!("{}.meta.json", &stem[..stem.len() - ".jsonl".len()]);
         let meta_path = file_path.with_file_name(meta_name);
         if let Ok(meta_content) = fs::read_to_string(&meta_path) {
             if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta_content) {
@@ -114,15 +115,13 @@ async fn append_jsonl_file_in_batches(
     let mut nbytes: usize = 0;
 
     for line_result in reader.lines() {
-        let line = line_result.map_err(|e| {
-            crate::errors::ClaudeSDKError::sdk(format!("Read error: {e}"))
-        })?;
+        let line = line_result
+            .map_err(|e| crate::errors::ClaudeSDKError::sdk(format!("Read error: {e}")))?;
         if line.is_empty() {
             continue;
         }
-        let entry: SessionStoreEntry = serde_json::from_str(&line).map_err(|e| {
-            crate::errors::ClaudeSDKError::sdk(format!("JSON parse error: {e}"))
-        })?;
+        let entry: SessionStoreEntry = serde_json::from_str(&line)
+            .map_err(|e| crate::errors::ClaudeSDKError::sdk(format!("JSON parse error: {e}")))?;
         nbytes += line.len();
         batch.push(entry);
 

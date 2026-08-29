@@ -5,8 +5,8 @@ use rust_agent_sdk::internal::client::InternalClient;
 use rust_agent_sdk::internal::query::Query;
 use rust_agent_sdk::internal::transport::Transport;
 use rust_agent_sdk::types::{
-    ClaudeAgentOptions, HookCallbackFn, HookContext, HookEvent, HookJSONOutput, HookMatcher,
-    HookSpecificOutput, PermissionResultAllow, PermissionResultDeny, ToolPermissionContext,
+    ClaudeAgentOptions, HookCallbackFn, HookEvent, HookJSONOutput, HookMatcher, HookSpecificOutput,
+    PermissionResultAllow, PermissionResultDeny, ToolPermissionContext,
 };
 use serde_json::json;
 
@@ -16,7 +16,6 @@ use serde_json::json;
 
 struct MockTransport {
     written_messages: Arc<Mutex<Vec<String>>>,
-    messages_to_read: Vec<serde_json::Value>,
     connected: bool,
 }
 
@@ -24,13 +23,8 @@ impl MockTransport {
     fn new() -> Self {
         Self {
             written_messages: Arc::new(Mutex::new(Vec::new())),
-            messages_to_read: Vec::new(),
             connected: false,
         }
-    }
-
-    fn written(&self) -> Vec<String> {
-        self.written_messages.lock().unwrap().clone()
     }
 }
 
@@ -74,7 +68,7 @@ mod test_tool_permission_callbacks {
         let callback_invoked_clone = callback_invoked.clone();
 
         let transport = MockTransport::new();
-        let written = transport.written_messages.clone();
+        let _written = transport.written_messages.clone();
 
         // The Query should accept a can_use_tool callback and invoke it
         // when a "can_use_tool" control_request arrives.
@@ -288,7 +282,7 @@ mod test_hook_callbacks {
         let hook_calls: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
         let hook_calls_clone = hook_calls.clone();
 
-        let test_hook: HookCallbackFn = Arc::new(move |input, tool_use_id, _context| {
+        let _test_hook: HookCallbackFn = Arc::new(move |input, tool_use_id, _context| {
             let calls = hook_calls_clone.clone();
             Box::pin(async move {
                 calls.lock().unwrap().push(json!({
@@ -331,7 +325,7 @@ mod test_hook_callbacks {
     /// Test that all SyncHookJSONOutput fields are properly handled.
     #[tokio::test]
     async fn test_hook_output_fields() {
-        let comprehensive_hook: HookCallbackFn = Arc::new(|_input, _tool_use_id, _context| {
+        let _comprehensive_hook: HookCallbackFn = Arc::new(|_input, _tool_use_id, _context| {
             Box::pin(async move {
                 HookJSONOutput::Sync {
                     continue_: Some(true),
@@ -342,9 +336,7 @@ mod test_hook_callbacks {
                     reason: Some("Test reason for blocking".to_string()),
                     hook_specific_output: Some(HookSpecificOutput::PreToolUse {
                         permission_decision: Some("deny".to_string()),
-                        permission_decision_reason: Some(
-                            "Security policy violation".to_string(),
-                        ),
+                        permission_decision_reason: Some("Security policy violation".to_string()),
                         updated_input: Some(json!({"modified": "input"})),
                         additional_context: None,
                     }),
@@ -386,8 +378,14 @@ mod test_hook_callbacks {
 
         let serialized = serde_json::to_string(&output).unwrap();
         // "continue_" must be serialized as "continue" (serde rename)
-        assert!(serialized.contains("\"continue\":true"), "continue_ should be renamed to continue");
-        assert!(!serialized.contains("\"continue_\""), "continue_ should not appear in serialized output");
+        assert!(
+            serialized.contains("\"continue\":true"),
+            "continue_ should be renamed to continue"
+        );
+        assert!(
+            !serialized.contains("\"continue_\""),
+            "continue_ should not appear in serialized output"
+        );
         assert!(serialized.contains("\"suppressOutput\":false"));
         assert!(serialized.contains("\"stopReason\":\"Test stop reason\""));
         assert!(serialized.contains("\"decision\":\"block\""));
@@ -434,8 +432,14 @@ mod test_hook_callbacks {
         };
         let serialized = serde_json::to_string(&output).unwrap();
         // "async_" must be serialized as "async"
-        assert!(serialized.contains("\"async\":true"), "async_ should be renamed to async");
-        assert!(!serialized.contains("\"async_\""), "async_ should not appear in serialized output");
+        assert!(
+            serialized.contains("\"async\":true"),
+            "async_ should be renamed to async"
+        );
+        assert!(
+            !serialized.contains("\"async_\""),
+            "async_ should not appear in serialized output"
+        );
         assert!(serialized.contains("\"asyncTimeout\":5000"));
     }
 
@@ -483,8 +487,14 @@ mod test_hook_callbacks {
             hook_specific_output: None,
         };
         let sync_serialized = serde_json::to_string(&sync_output).unwrap();
-        assert!(sync_serialized.contains("\"continue\":false"), "continue_ should be converted to continue");
-        assert!(!sync_serialized.contains("\"continue_\""), "continue_ should not appear in output");
+        assert!(
+            sync_serialized.contains("\"continue\":false"),
+            "continue_ should be converted to continue"
+        );
+        assert!(
+            !sync_serialized.contains("\"continue_\""),
+            "continue_ should not appear in output"
+        );
         assert!(sync_serialized.contains("\"stopReason\":\"Testing field conversion\""));
         assert!(sync_serialized.contains("\"systemMessage\":\"Fields should be converted\""));
 
@@ -494,8 +504,14 @@ mod test_hook_callbacks {
             async_timeout: Some(10000),
         };
         let async_serialized = serde_json::to_string(&async_output).unwrap();
-        assert!(async_serialized.contains("\"async\":true"), "async_ should be converted to async");
-        assert!(!async_serialized.contains("\"async_\""), "async_ should not appear in output");
+        assert!(
+            async_serialized.contains("\"async\":true"),
+            "async_ should be converted to async"
+        );
+        assert!(
+            !async_serialized.contains("\"async_\""),
+            "async_ should not appear in output"
+        );
         assert!(async_serialized.contains("\"asyncTimeout\":10000"));
     }
 }
@@ -562,7 +578,7 @@ mod test_hook_event_callbacks {
         let hook_calls: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
         let hook_calls_clone = hook_calls.clone();
 
-        let notification_hook: HookCallbackFn = Arc::new(move |_input, _tool_use_id, _context| {
+        let _notification_hook: HookCallbackFn = Arc::new(move |_input, _tool_use_id, _context| {
             let calls = hook_calls_clone.clone();
             Box::pin(async move {
                 calls.lock().unwrap().push(json!({"event": "notification"}));
@@ -662,22 +678,21 @@ mod test_hook_event_callbacks {
     /// Test that a SubagentStart hook callback works correctly.
     #[tokio::test]
     async fn test_subagent_start_hook_callback() {
-        let _subagent_start_hook: HookCallbackFn =
-            Arc::new(|_input, _tool_use_id, _context| {
-                Box::pin(async move {
-                    HookJSONOutput::Sync {
-                        continue_: None,
-                        suppress_output: None,
-                        stop_reason: None,
-                        decision: None,
-                        system_message: None,
-                        reason: None,
-                        hook_specific_output: Some(HookSpecificOutput::SubagentStart {
-                            additional_context: Some("Subagent approved".to_string()),
-                        }),
-                    }
-                })
-            });
+        let _subagent_start_hook: HookCallbackFn = Arc::new(|_input, _tool_use_id, _context| {
+            Box::pin(async move {
+                HookJSONOutput::Sync {
+                    continue_: None,
+                    suppress_output: None,
+                    stop_reason: None,
+                    decision: None,
+                    system_message: None,
+                    reason: None,
+                    hook_specific_output: Some(HookSpecificOutput::SubagentStart {
+                        additional_context: Some("Subagent approved".to_string()),
+                    }),
+                }
+            })
+        });
 
         let transport = MockTransport::new();
         let _q = Query::new(Box::new(transport), true, 30.0);

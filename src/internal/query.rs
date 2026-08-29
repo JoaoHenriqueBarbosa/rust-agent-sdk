@@ -2,14 +2,16 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
-use tokio::sync::{mpsc, Notify, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::errors::{ClaudeSDKError, Result};
 use crate::internal::task::{spawn_detached, TaskHandle};
-use crate::internal::transport::Transport;
 use crate::internal::transcript_mirror::TranscriptMirrorBatcher;
+use crate::internal::transport::Transport;
+use crate::sdk_mcp::SdkMcpRegistry;
 use crate::types::{
-    CanUseToolFn, HookCallbackFn, PermissionMode, PermissionResult, ToolPermissionContext,
+    CanUseToolFn, HookCallbackFn, HookMatcher, PermissionMode, PermissionResult,
+    ToolPermissionContext,
 };
 
 /// Convert Python-safe field names to CLI-expected field names.
@@ -18,9 +20,15 @@ fn convert_hook_output_for_cli(hook_output: serde_json::Value) -> serde_json::Va
         let mut converted = serde_json::Map::new();
         for (key, value) in map {
             match key.as_str() {
-                "async_" => { converted.insert("async".to_string(), value); }
-                "continue_" => { converted.insert("continue".to_string(), value); }
-                _ => { converted.insert(key, value); }
+                "async_" => {
+                    converted.insert("async".to_string(), value);
+                }
+                "continue_" => {
+                    converted.insert("continue".to_string(), value);
+                }
+                _ => {
+                    converted.insert(key, value);
+                }
             }
         }
         serde_json::Value::Object(converted)
@@ -28,6 +36,10 @@ fn convert_hook_output_for_cli(hook_output: serde_json::Value) -> serde_json::Va
         hook_output
     }
 }
+
+/// Canal de resposta de um control_request em voo, indexado por request_id.
+type ControlResponseSender = oneshot::Sender<std::result::Result<serde_json::Value, String>>;
+type PendingControlResponses = Arc<Mutex<HashMap<String, ControlResponseSender>>>;
 
 /// Query — bidirectional control protocol handler.
 ///
@@ -44,7 +56,7 @@ pub struct Query {
 
     // Control protocol state
     request_counter: u64,
-    pending_control_responses: Arc<Mutex<HashMap<String, oneshot::Sender<std::result::Result<serde_json::Value, String>>>>>,
+    pending_control_responses: PendingControlResponses,
 
     // Callbacks
     can_use_tool: Option<CanUseToolFn>,
@@ -71,8 +83,8 @@ pub struct Query {
     transcript_mirror_batcher: Option<Arc<TranscriptMirrorBatcher>>,
 
     // Hooks and SDK MCP servers (stored for wait_for_result logic)
-    hooks: HashMap<String, Vec<serde_json::Value>>,
-    sdk_mcp_servers: HashMap<String, serde_json::Value>,
+    hooks: HashMap<String, Vec<HookMatcher>>,
+    sdk_mcp_servers: SdkMcpRegistry,
 
     // Agent definitions and skills for initialize
     agents: Option<serde_json::Value>,
@@ -111,7 +123,7 @@ impl Query {
             first_result_fired: Arc::new(Mutex::new(false)),
             transcript_mirror_batcher: None,
             hooks: HashMap::new(),
-            sdk_mcp_servers: HashMap::new(),
+            sdk_mcp_servers: SdkMcpRegistry::new(),
             agents: None,
             exclude_dynamic_sections: None,
             skills: None,
@@ -123,8 +135,27 @@ impl Query {
         self.can_use_tool = Some(callback);
     }
 
-    pub fn set_hooks(&mut self, hooks: HashMap<String, Vec<serde_json::Value>>) {
+    /// Hooks desta sessão, **por handle**, indexados pelo nome do evento
+    /// (`"PostToolUse"`, `"PreToolUse"`, …).
+    ///
+    /// Recebe os `HookMatcher` inteiros, e não uma descrição JSON deles, porque
+    /// o callback é a metade que importa: o `initialize` gera um `hook_N` por
+    /// closure e o CLI devolve esse mesmo id no `control_request` de subtype
+    /// `hook_callback`. Enquanto isto tomava só JSON, as closures eram
+    /// descartadas na fronteira e todo `hook_callback` era respondido com
+    /// "No hook callback found for ID" — hook declarado, hook nunca executado.
+    pub fn set_hooks(&mut self, hooks: HashMap<String, Vec<HookMatcher>>) {
         self.hooks = hooks;
+    }
+
+    /// Registry de servidores MCP in-process desta sessão.
+    ///
+    /// É a ÚNICA fonte que `handle_control_request` consulta para `mcp_message`,
+    /// e é um clone do `ClaudeAgentOptions::sdk_mcp_servers` da sessão. Não
+    /// existe depósito global: uma sessão nunca alcança o servidor de outra, nem
+    /// por engano de nome.
+    pub fn set_sdk_mcp_servers(&mut self, servers: SdkMcpRegistry) {
+        self.sdk_mcp_servers = servers;
     }
 
     pub fn set_agents(&mut self, agents: serde_json::Value) {
@@ -141,6 +172,16 @@ impl Query {
 
     pub fn set_transcript_mirror_batcher(&mut self, batcher: TranscriptMirrorBatcher) {
         self.transcript_mirror_batcher = Some(Arc::new(batcher));
+    }
+
+    /// Clone do lado de escrita do canal interno de mensagens.
+    ///
+    /// Existe para que quem constrói a `Query` (o cliente) possa injetar
+    /// mensagens sintéticas — hoje só erros do espelho de transcript — na mesma
+    /// fila que o consumidor drena em `next_message`. Sem isso, o callback de
+    /// erro do batcher não teria como falar com o consumidor.
+    pub fn message_sender(&self) -> Option<mpsc::Sender<serde_json::Value>> {
+        self.message_tx.clone()
     }
 
     pub fn report_mirror_error(&self, key: Option<crate::types::SessionKey>, error: String) {
@@ -162,25 +203,41 @@ impl Query {
             return Ok(None);
         }
 
-        // Build hooks configuration for initialization
+        // Build hooks configuration for initialization.
+        //
+        // O id gerado aqui é o contrato com o CLI: ele volta em
+        // `control_request{subtype:"hook_callback", callback_id}`. Por isso a
+        // closure é REGISTRADA no mesmo passo em que o id é criado — id sem
+        // callback registrado é hook que o CLI acha que existe e que a sessão
+        // não sabe executar.
         let mut hooks_config = serde_json::Map::new();
         for (event, matchers) in &self.hooks {
             if !matchers.is_empty() {
                 let mut event_matchers = Vec::new();
                 for matcher in matchers {
                     let mut callback_ids = Vec::new();
-                    if let Some(hooks_arr) = matcher.get("hooks").and_then(|h| h.as_array()) {
-                        for _ in hooks_arr {
-                            let callback_id = format!("hook_{}", self.next_callback_id);
-                            self.next_callback_id += 1;
-                            callback_ids.push(serde_json::Value::String(callback_id));
+                    for callback in &matcher.hooks {
+                        let callback_id = format!("hook_{}", self.next_callback_id);
+                        self.next_callback_id += 1;
+                        if let Ok(mut callbacks) = self.hook_callbacks.lock() {
+                            callbacks.insert(callback_id.clone(), callback.clone());
                         }
+                        callback_ids.push(serde_json::Value::String(callback_id));
                     }
                     let mut hook_matcher_config = serde_json::Map::new();
-                    hook_matcher_config.insert("matcher".to_string(), matcher.get("matcher").cloned().unwrap_or(serde_json::Value::Null));
-                    hook_matcher_config.insert("hookCallbackIds".to_string(), serde_json::Value::Array(callback_ids));
-                    if let Some(timeout) = matcher.get("timeout") {
-                        hook_matcher_config.insert("timeout".to_string(), timeout.clone());
+                    hook_matcher_config.insert(
+                        "matcher".to_string(),
+                        match &matcher.matcher {
+                            Some(pattern) => serde_json::Value::String(pattern.clone()),
+                            None => serde_json::Value::Null,
+                        },
+                    );
+                    hook_matcher_config.insert(
+                        "hookCallbackIds".to_string(),
+                        serde_json::Value::Array(callback_ids),
+                    );
+                    if let Some(timeout) = matcher.timeout {
+                        hook_matcher_config.insert("timeout".to_string(), json!(timeout));
                     }
                     event_matchers.push(serde_json::Value::Object(hook_matcher_config));
                 }
@@ -195,14 +252,23 @@ impl Query {
         });
 
         if let Some(ref agents) = self.agents {
-            request.as_object_mut().unwrap().insert("agents".to_string(), agents.clone());
+            request
+                .as_object_mut()
+                .unwrap()
+                .insert("agents".to_string(), agents.clone());
         }
         if let Some(eds) = self.exclude_dynamic_sections {
-            request.as_object_mut().unwrap().insert("excludeDynamicSections".to_string(), json!(eds));
+            request
+                .as_object_mut()
+                .unwrap()
+                .insert("excludeDynamicSections".to_string(), json!(eds));
         }
         if let Some(ref skills) = self.skills {
             if skills.is_array() {
-                request.as_object_mut().unwrap().insert("skills".to_string(), skills.clone());
+                request
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("skills".to_string(), skills.clone());
             }
         }
 
@@ -322,7 +388,14 @@ impl Query {
         }
 
         loop {
-            let msg = self.transport.read_message().await?;
+            // Mensagens que chegaram enquanto esperávamos um control_response
+            // ficaram bufferizadas em `message_tx`; elas são cronologicamente
+            // anteriores a qualquer coisa ainda no transporte, então saem
+            // primeiro. Sem esta drenagem elas se perdiam de vez.
+            let msg = match self.take_buffered_message() {
+                Some(buffered) => Some(buffered),
+                None => self.transport.read_message().await?,
+            };
             match msg {
                 None => {
                     self.finalize_stream().await;
@@ -333,29 +406,36 @@ impl Query {
                         return Ok(None);
                     }
 
-                    let msg_type = message
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let msg_type = message.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
                     match msg_type {
                         "control_response" => {
                             if let Some(response) = message.get("response") {
-                                let request_id = response.get("request_id")
+                                let request_id = response
+                                    .get("request_id")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("")
                                     .to_string();
                                 let sender = {
-                                    let mut pending = self.pending_control_responses.lock().unwrap();
+                                    let mut pending =
+                                        self.pending_control_responses.lock().unwrap();
                                     pending.remove(&request_id)
                                 };
                                 if let Some(sender) = sender {
-                                    let subtype = response.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
+                                    let subtype = response
+                                        .get("subtype")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
                                     if subtype == "error" {
-                                        let error = response.get("error").and_then(|v| v.as_str()).unwrap_or("Unknown error").to_string();
+                                        let error = response
+                                            .get("error")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("Unknown error")
+                                            .to_string();
                                         let _ = sender.send(Err(error));
                                     } else {
-                                        let resp_data = response.get("response").cloned().unwrap_or(json!({}));
+                                        let resp_data =
+                                            response.get("response").cloned().unwrap_or(json!({}));
                                         let _ = sender.send(Ok(resp_data));
                                     }
                                 }
@@ -417,6 +497,11 @@ impl Query {
         }
     }
 
+    /// Retira, sem bloquear, a próxima mensagem já bufferizada no canal interno.
+    fn take_buffered_message(&mut self) -> Option<serde_json::Value> {
+        self.message_rx.as_mut().and_then(|rx| rx.try_recv().ok())
+    }
+
     /// Finalize the message stream: flush mirror, notify waiters, end input.
     async fn finalize_stream(&mut self) {
         if let Some(ref batcher) = self.transcript_mirror_batcher {
@@ -446,7 +531,8 @@ impl Query {
 
     /// Handle an incoming control request from the CLI (#9, #10).
     async fn handle_control_request(&mut self, request: &serde_json::Value) {
-        let request_id = request.get("request_id")
+        let request_id = request
+            .get("request_id")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -454,7 +540,8 @@ impl Query {
             Some(r) => r.clone(),
             None => return,
         };
-        let subtype = request_data.get("subtype")
+        let subtype = request_data
+            .get("subtype")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -464,20 +551,29 @@ impl Query {
                 // Handle tool permission request (#10)
                 match &self.can_use_tool {
                     Some(callback) => {
-                        let tool_name = request_data.get("tool_name")
+                        let tool_name = request_data
+                            .get("tool_name")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        let input: HashMap<String, serde_json::Value> = request_data.get("input")
+                        let input: HashMap<String, serde_json::Value> = request_data
+                            .get("input")
                             .and_then(|v| v.as_object())
                             .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                             .unwrap_or_default();
-                        let original_input = request_data.get("input").cloned().unwrap_or(json!({}));
+                        let original_input =
+                            request_data.get("input").cloned().unwrap_or(json!({}));
                         let context = ToolPermissionContext {
                             signal: None,
                             suggestions: Vec::new(),
-                            tool_use_id: request_data.get("tool_use_id").and_then(|v| v.as_str()).map(String::from),
-                            agent_id: request_data.get("agent_id").and_then(|v| v.as_str()).map(String::from),
+                            tool_use_id: request_data
+                                .get("tool_use_id")
+                                .and_then(|v| v.as_str())
+                                .map(String::from),
+                            agent_id: request_data
+                                .get("agent_id")
+                                .and_then(|v| v.as_str())
+                                .map(String::from),
                         };
 
                         let cb = callback.clone();
@@ -501,10 +597,9 @@ impl Query {
                                     "message": deny.message,
                                 });
                                 if deny.interrupt {
-                                    resp.as_object_mut().unwrap().insert(
-                                        "interrupt".to_string(),
-                                        json!(true),
-                                    );
+                                    resp.as_object_mut()
+                                        .unwrap()
+                                        .insert("interrupt".to_string(), json!(true));
                                 }
                                 Ok(resp)
                             }
@@ -515,7 +610,8 @@ impl Query {
             }
             "hook_callback" => {
                 // Handle hook callback (#9)
-                let callback_id = request_data.get("callback_id")
+                let callback_id = request_data
+                    .get("callback_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
@@ -526,17 +622,26 @@ impl Query {
                 match callback {
                     Some(cb) => {
                         let input_val = request_data.get("input").cloned().unwrap_or(json!(null));
-                        let tool_use_id = request_data.get("tool_use_id").and_then(|v| v.as_str()).map(String::from);
+                        let tool_use_id = request_data
+                            .get("tool_use_id")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
                         let context = crate::types::HookContext { signal: None };
 
                         // Parse input into HookInput
-                        let hook_input: crate::types::HookInput = match serde_json::from_value(input_val) {
-                            Ok(hi) => hi,
-                            Err(e) => {
-                                let _ = self.send_control_response_error(&request_id, &format!("Failed to parse hook input: {e}")).await;
-                                return;
-                            }
-                        };
+                        let hook_input: crate::types::HookInput =
+                            match serde_json::from_value(input_val) {
+                                Ok(hi) => hi,
+                                Err(e) => {
+                                    let _ = self
+                                        .send_control_response_error(
+                                            &request_id,
+                                            &format!("Failed to parse hook input: {e}"),
+                                        )
+                                        .await;
+                                    return;
+                                }
+                            };
 
                         let output = cb(hook_input, tool_use_id, context).await;
                         let output_value = serde_json::to_value(&output).unwrap_or(json!({}));
@@ -545,6 +650,7 @@ impl Query {
                     None => Err(format!("No hook callback found for ID: {callback_id}")),
                 }
             }
+            "mcp_message" => self.handle_mcp_message(&request_data).await,
             _ => Err(format!("Unsupported control request subtype: {subtype}")),
         };
 
@@ -565,6 +671,51 @@ impl Query {
                 let _ = self.send_control_response_error(&request_id, &error).await;
             }
         }
+    }
+
+    /// Serve um `control_request` de subtype `mcp_message` com um servidor MCP
+    /// in-process.
+    ///
+    /// O CLI conversa com servidores `{"type": "sdk"}` por este canal: manda o
+    /// JSON-RPC do MCP dentro de `request.message`, com o servidor destino em
+    /// `request.server_name`, e espera a resposta embrulhada em
+    /// `{"mcp_response": ...}` dentro do `control_response` de sucesso — o
+    /// envelope está no bundle do CLI 2.1.220 (`sendMcpMessage`).
+    async fn handle_mcp_message(
+        &self,
+        request_data: &serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, String> {
+        let server_name = request_data
+            .get("server_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        // SÓ o registry da sessão. Não existe fallback, e não existe mais
+        // registry global algum para servir de fallback.
+        //
+        // Errar alto ("No SDK MCP server found") é melhor do que executar a tool
+        // de outra sessão. E não se perde nenhum caso legítimo: a
+        // disponibilidade que o CLI vê vem do `--mcp-config`, gerado das MESMAS
+        // opções que carregam os handles. Um `server_name` fora da declaração é o
+        // CLI roteando para algo que a sessão nunca expôs.
+        let server = self.sdk_mcp_servers.get(server_name);
+        let Some(server) = server else {
+            return Err(format!("No SDK MCP server found: {server_name}"));
+        };
+
+        let message = request_data
+            .get("message")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+
+        // Notificação (JSON-RPC sem `id`) não tem resposta, mas o
+        // control_request ainda precisa ser respondido — daí o envelope vazio.
+        let mcp_response = server
+            .handle_message(&message)
+            .await
+            .unwrap_or_else(|| json!({ "jsonrpc": "2.0", "result": {}, "id": 0 }));
+
+        Ok(json!({ "mcp_response": mcp_response }))
     }
 
     async fn send_control_response_error(&mut self, request_id: &str, error: &str) -> Result<()> {
@@ -712,50 +863,63 @@ impl Query {
         // Read from transport inline until we get our control_response or timeout.
         // Any non-control messages received during this wait are buffered in
         // message_tx for later consumption by receive_messages.
-        let deadline = tokio::time::Instant::now()
-            + std::time::Duration::from_secs_f64(timeout);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs_f64(timeout);
 
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 return Err(ClaudeSDKError::sdk(format!(
                     "Control request timeout: {}",
-                    request.get("subtype").and_then(|v| v.as_str()).unwrap_or("unknown")
+                    request
+                        .get("subtype")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
                 )));
             }
 
-            let read_result = tokio::time::timeout(
-                remaining,
-                self.transport.read_message(),
-            ).await;
+            let read_result = tokio::time::timeout(remaining, self.transport.read_message()).await;
 
             match read_result {
                 Err(_) => {
                     // Timeout
                     return Err(ClaudeSDKError::sdk(format!(
                         "Control request timeout: {}",
-                        request.get("subtype").and_then(|v| v.as_str()).unwrap_or("unknown")
+                        request
+                            .get("subtype")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
                     )));
                 }
                 Ok(Err(e)) => return Err(e),
                 Ok(Ok(None)) => {
                     // EOF before response
-                    return Err(ClaudeSDKError::sdk("Transport closed before control response"));
+                    return Err(ClaudeSDKError::sdk(
+                        "Transport closed before control response",
+                    ));
                 }
                 Ok(Ok(Some(message))) => {
                     let msg_type = message.get("type").and_then(|v| v.as_str()).unwrap_or("");
                     if msg_type == "control_response" {
                         if let Some(response) = message.get("response") {
-                            let resp_id = response.get("request_id")
+                            let resp_id = response
+                                .get("request_id")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("");
                             if resp_id == request_id {
-                                let subtype = response.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
+                                let subtype = response
+                                    .get("subtype")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
                                 if subtype == "error" {
-                                    let error = response.get("error").and_then(|v| v.as_str()).unwrap_or("Unknown error").to_string();
+                                    let error = response
+                                        .get("error")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("Unknown error")
+                                        .to_string();
                                     return Err(ClaudeSDKError::sdk(error));
                                 } else {
-                                    let resp_data = response.get("response").cloned().unwrap_or(json!({}));
+                                    let resp_data =
+                                        response.get("response").cloned().unwrap_or(json!({}));
                                     return Ok(resp_data);
                                 }
                             }
@@ -765,17 +929,34 @@ impl Query {
                                 pending.remove(resp_id)
                             };
                             if let Some(sender) = sender {
-                                let subtype = response.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
+                                let subtype = response
+                                    .get("subtype")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
                                 if subtype == "error" {
-                                    let error = response.get("error").and_then(|v| v.as_str()).unwrap_or("Unknown error").to_string();
+                                    let error = response
+                                        .get("error")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("Unknown error")
+                                        .to_string();
                                     let _ = sender.send(Err(error));
                                 } else {
-                                    let resp_data = response.get("response").cloned().unwrap_or(json!({}));
+                                    let resp_data =
+                                        response.get("response").cloned().unwrap_or(json!({}));
                                     let _ = sender.send(Ok(resp_data));
                                 }
                             }
                         }
-                    } else {
+                    } else if msg_type == "control_request" {
+                        // O CLI faz perguntas enquanto espera a nossa resposta —
+                        // notadamente o handshake MCP dos servidores in-process,
+                        // que começa durante o `initialize`. Bufferizar isso como
+                        // se fosse mensagem de sessão trava os dois lados: ele
+                        // espera resposta que ninguém vai mandar.
+                        if !self.closed {
+                            self.handle_control_request(&message).await;
+                        }
+                    } else if msg_type != "control_cancel_request" {
                         // Non-control message — buffer for receive_messages
                         if let Some(ref tx) = self.message_tx {
                             let _ = tx.try_send(message);

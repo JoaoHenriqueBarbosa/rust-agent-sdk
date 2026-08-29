@@ -90,6 +90,14 @@ pub struct SubprocessCLITransport {
     stdout_reader: Option<tokio::io::BufReader<tokio::process::ChildStdout>>,
     /// Accumulates partial JSON when a line doesn't parse on its own.
     json_buffer: String,
+    /// The line currently being read, kept across calls so that a
+    /// `read_message()` future canceled mid-line (e.g. losing a `select!`
+    /// against an interrupt signal) does not lose the bytes already read.
+    /// Bytes and not a String, and `read_until` and not `read_line`, on
+    /// purpose: `read_until` appends incrementally into the caller's buffer
+    /// (partial data survives the cancel), while `read_line` moves the
+    /// String's allocation into the future and drops it on cancel.
+    line_buffer: Vec<u8>,
     /// Write lock to serialize stdin writes and prevent TOCTOU with close()/end_input().
     write_lock: tokio::sync::Mutex<()>,
     /// Background task for reading stderr.
@@ -105,6 +113,7 @@ impl SubprocessCLITransport {
             child: None,
             stdout_reader: None,
             json_buffer: String::new(),
+            line_buffer: Vec::new(),
             write_lock: tokio::sync::Mutex::new(()),
             stderr_task: None,
         }
@@ -205,8 +214,7 @@ impl SubprocessCLITransport {
             }
         }
 
-        let (effective_allowed_tools, effective_setting_sources) =
-            self.apply_skills_defaults();
+        let (effective_allowed_tools, effective_setting_sources) = self.apply_skills_defaults();
 
         if !effective_allowed_tools.is_empty() {
             cmd.push("--allowedTools".into());
@@ -248,7 +256,13 @@ impl SubprocessCLITransport {
                 .options
                 .betas
                 .iter()
-                .map(|b| serde_json::to_value(b).unwrap().as_str().unwrap().to_string())
+                .map(|b| {
+                    serde_json::to_value(b)
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .to_string()
+                })
                 .collect();
             cmd.push("--betas".into());
             cmd.push(betas_str.join(","));
@@ -281,6 +295,10 @@ impl SubprocessCLITransport {
             cmd.push(resume.clone());
         }
 
+        if let Some(name) = &self.options.name {
+            cmd.push("--name".into());
+            cmd.push(name.clone());
+        }
         if let Some(session_id) = &self.options.session_id {
             cmd.push("--session-id".into());
             cmd.push(session_id.clone());
@@ -303,9 +321,7 @@ impl SubprocessCLITransport {
             McpServersConfig::Dict(servers) if !servers.is_empty() => {
                 let servers_for_cli: serde_json::Map<String, serde_json::Value> = servers
                     .iter()
-                    .map(|(name, config)| {
-                        (name.clone(), serde_json::to_value(config).unwrap())
-                    })
+                    .map(|(name, config)| (name.clone(), serde_json::to_value(config).unwrap()))
                     .collect();
 
                 let mcp_config = serde_json::json!({ "mcpServers": servers_for_cli });
@@ -472,7 +488,11 @@ impl SubprocessCLITransport {
     pub fn find_bundled_cli(&self) -> Option<String> {
         // Look for bundled CLI relative to the executable, matching Python's
         // Path(__file__).parent.parent.parent / "_bundled" / cli_name
-        let cli_name = if cfg!(windows) { "claude.exe" } else { "claude" };
+        let cli_name = if cfg!(windows) {
+            "claude.exe"
+        } else {
+            "claude"
+        };
 
         if let Ok(exe) = std::env::current_exe() {
             // Try a few common relative layouts
@@ -501,8 +521,7 @@ impl SubprocessCLITransport {
         }
 
         // If we have sandbox settings, we need to merge into a JSON object
-        let mut settings_obj: serde_json::Map<String, serde_json::Value> =
-            serde_json::Map::new();
+        let mut settings_obj: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
 
         if let Some(ref settings_str) = self.options.settings {
             let trimmed = settings_str.trim();
@@ -529,10 +548,7 @@ impl SubprocessCLITransport {
 
         // Merge sandbox settings
         if let Some(ref sandbox) = self.options.sandbox {
-            settings_obj.insert(
-                "sandbox".into(),
-                serde_json::to_value(sandbox).unwrap(),
-            );
+            settings_obj.insert("sandbox".into(), serde_json::to_value(sandbox).unwrap());
         }
 
         Some(serde_json::to_string(&serde_json::Value::Object(settings_obj)).unwrap())
@@ -560,9 +576,16 @@ impl SubprocessCLITransport {
             // Parse X.Y.Z
             let parts: Vec<&str> = version_str.split('.').collect();
             if parts.len() >= 3 {
-                let version: Vec<u32> = parts.iter().filter_map(|p| {
-                    p.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().ok()
-                }).collect();
+                let version: Vec<u32> = parts
+                    .iter()
+                    .filter_map(|p| {
+                        p.chars()
+                            .take_while(|c| c.is_ascii_digit())
+                            .collect::<String>()
+                            .parse()
+                            .ok()
+                    })
+                    .collect();
                 let min_parts: Vec<u32> = MINIMUM_CLAUDE_CODE_VERSION
                     .split('.')
                     .filter_map(|p| p.parse().ok())
@@ -677,14 +700,44 @@ impl Transport for SubprocessCLITransport {
         // User option passthrough (#20) — set via uid on unix
         #[cfg(unix)]
         if let Some(ref user) = self.options.user {
+            // `tokio::process::Command::uid` é inerente no unix — não precisa do
+            // trait `CommandExt` da std (importá-lo só gerava warning).
             if let Ok(uid) = user.parse::<u32>() {
-                use std::os::unix::process::CommandExt;
                 command.uid(uid);
             }
         }
 
+        // O CLI vai para um GRUPO DE PROCESSOS PRÓPRIO, e isto não é detalhe.
+        //
+        // Sem isto o filho herda o grupo de quem chamou. Quando o chamador roda
+        // no terminal, um Ctrl-C entrega SIGINT ao grupo INTEIRO — o processo
+        // que hospeda o SDK e, junto, todas as sessões `claude` em voo. Um host
+        // que implemente desligamento gracioso (para de aceitar trabalho novo e
+        // espera as sessões terminarem) fica esperando por sessões que o
+        // sistema operacional já matou: a espera é educada e inútil, e o
+        // trabalho da sessão — que só existe em memória até o fim do turno — vai
+        // embora inteiro.
+        //
+        // Isolar o grupo faz o sinal do terminal parar no host, que passa a ser
+        // o ÚNICO a decidir a morte do filho. Isso já existe e continua valendo:
+        // `close()` mata o filho e o guard de saída manda SIGTERM em todos os
+        // filhos vivos. Ou seja, isto não cria processo órfão — só tira o
+        // terminal do caminho.
+        #[cfg(unix)]
+        command.process_group(0);
+
         let mut child = command.spawn().map_err(|e| {
-            ClaudeSDKError::cli_connection(format!("Failed to spawn CLI process: {}", e))
+            // O erro cru do SO ("No such file or directory") não diz QUAL
+            // caminho faltou; sem o cwd e o binário na mensagem, diagnosticar
+            // um spawn falho vira adivinhação.
+            let cwd_note = match &self.options.cwd {
+                Some(cwd) => format!(" (cwd: {})", cwd.to_string_lossy()),
+                None => String::new(),
+            };
+            ClaudeSDKError::cli_connection(format!(
+                "Failed to spawn CLI process '{}'{}: {}",
+                program, cwd_note, e
+            ))
         })?;
 
         // Track child for atexit cleanup (#15)
@@ -750,7 +803,9 @@ impl Transport for SubprocessCLITransport {
         use tokio::io::AsyncWriteExt;
         let _guard = self.write_lock.lock().await;
         if !self.connected {
-            return Err(ClaudeSDKError::cli_connection("Transport is not ready for writing"));
+            return Err(ClaudeSDKError::cli_connection(
+                "Transport is not ready for writing",
+            ));
         }
         if let Some(ref mut child) = self.child {
             if let Some(ref mut stdin) = child.stdin {
@@ -783,20 +838,34 @@ impl Transport for SubprocessCLITransport {
     async fn read_message(&mut self) -> Result<Option<serde_json::Value>> {
         use tokio::io::AsyncBufReadExt;
 
-        let max_buffer_size = self.options.max_buffer_size.unwrap_or(DEFAULT_MAX_BUFFER_SIZE);
+        let max_buffer_size = self
+            .options
+            .max_buffer_size
+            .unwrap_or(DEFAULT_MAX_BUFFER_SIZE);
 
-        let reader = match &mut self.stdout_reader {
-            Some(r) => r,
-            None => return Ok(None),
-        };
+        if self.stdout_reader.is_none() {
+            return Ok(None);
+        }
 
         loop {
-            let mut line = String::new();
-            let bytes_read = reader.read_line(&mut line).await.map_err(|e| {
-                ClaudeSDKError::cli_connection(format!("Failed to read from stdout: {}", e))
-            })?;
+            // The in-flight line lives on `self`, not on the stack: a
+            // `read_message()` future canceled in a `select!` (e.g. losing to
+            // an interrupt signal) must not lose the bytes already read.
+            // `read_until` appends into this persistent buffer as data
+            // arrives, so the next call picks the SAME line up where the
+            // cancel left off.
+            let reader = match &mut self.stdout_reader {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            let bytes_read = reader
+                .read_until(b'\n', &mut self.line_buffer)
+                .await
+                .map_err(|e| {
+                    ClaudeSDKError::cli_connection(format!("Failed to read from stdout: {}", e))
+                })?;
 
-            if bytes_read == 0 {
+            if bytes_read == 0 && self.line_buffer.is_empty() {
                 // EOF — try to parse any remaining buffer
                 if !self.json_buffer.is_empty() {
                     let buf = std::mem::take(&mut self.json_buffer);
@@ -808,6 +877,10 @@ impl Transport for SubprocessCLITransport {
                 return Ok(None);
             }
 
+            // A tail read before EOF (stream died mid-line) still goes through
+            // the parser below: next iteration hits the empty-buffer EOF path.
+            let raw = std::mem::take(&mut self.line_buffer);
+            let line = String::from_utf8_lossy(&raw);
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -823,8 +896,14 @@ impl Transport for SubprocessCLITransport {
                 match serde_json::from_str::<serde_json::Value>(trimmed) {
                     Ok(val) => return Ok(Some(val)),
                     Err(_) => {
-                        // Incomplete JSON — start buffering
-                        self.json_buffer.push_str(trimmed);
+                        // Só um OBJETO pode estar partido ao meio: o protocolo
+                        // stream-json manda um objeto por linha. Linhas de
+                        // debug do CLI começam com '[' (ex.: "[SandboxDebug]…")
+                        // e nunca completam — bufferizá-las envenenava o parser
+                        // e engolia todas as mensagens seguintes (#347).
+                        if trimmed.starts_with('{') {
+                            self.json_buffer.push_str(trimmed);
+                        }
                     }
                 }
             } else {

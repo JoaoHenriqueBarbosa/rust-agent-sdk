@@ -17,13 +17,13 @@ use rust_agent_sdk::internal::session_resume::{
     apply_materialized_options, build_mirror_batcher, materialize_resume_session,
     MaterializedResume,
 };
-use rust_agent_sdk::internal::transcript_mirror::OnErrorCallback;
 use rust_agent_sdk::internal::session_store::InMemorySessionStore;
-use rust_agent_sdk::types::{
-    ClaudeAgentOptions, SessionKey, SessionListSubkeysKey, SessionStore,
-    SessionStoreEntry, SessionStoreFlushMode, SessionStoreListEntry,
-};
+use rust_agent_sdk::internal::transcript_mirror::OnErrorCallback;
 use rust_agent_sdk::project_key_for_directory;
+use rust_agent_sdk::types::{
+    ClaudeAgentOptions, SessionKey, SessionListSubkeysKey, SessionStore, SessionStoreEntry,
+    SessionStoreFlushMode, SessionStoreListEntry,
+};
 
 const SESSION_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 const SESSION_ID_2: &str = "660e8400-e29b-41d4-a716-446655440000";
@@ -188,7 +188,8 @@ mod test_happy_path {
         assert_eq!(m.resume_session_id, SESSION_ID);
         assert!(m.config_dir.is_dir());
 
-        let jsonl = m.config_dir
+        let jsonl = m
+            .config_dir
             .join("projects")
             .join(&project_key)
             .join(format!("{SESSION_ID}.jsonl"));
@@ -220,16 +221,18 @@ mod test_happy_path {
             config.join(".credentials.json"),
             serde_json::to_string(&json!({
                 "claudeAiOauth": {"accessToken": "at", "refreshToken": "SECRET"}
-            })).unwrap(),
-        ).unwrap();
-        std::fs::write(
-            home.join(".claude.json"),
-            r#"{"theme":"dark"}"#,
-        ).unwrap();
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(home.join(".claude.json"), r#"{"theme":"dark"}"#).unwrap();
 
         let store = InMemorySessionStore::new();
         let key = SessionKey::new(&project_key, SESSION_ID);
-        store.append(&key, &[json!({"type": "user", "uuid": "u1"})]).await.unwrap();
+        store
+            .append(&key, &[json!({"type": "user", "uuid": "u1"})])
+            .await
+            .unwrap();
 
         let opts = ClaudeAgentOptions {
             cwd: Some(cwd),
@@ -265,15 +268,23 @@ mod test_happy_path {
             custom.join(".credentials.json"),
             serde_json::to_string(&json!({
                 "claudeAiOauth": {"accessToken": "fromenv"}
-            })).unwrap(),
-        ).unwrap();
+            }))
+            .unwrap(),
+        )
+        .unwrap();
 
         let store = InMemorySessionStore::new();
         let key = SessionKey::new(&project_key, SESSION_ID);
-        store.append(&key, &[json!({"type": "user", "uuid": "u1"})]).await.unwrap();
+        store
+            .append(&key, &[json!({"type": "user", "uuid": "u1"})])
+            .await
+            .unwrap();
 
         let mut env = HashMap::new();
-        env.insert("CLAUDE_CONFIG_DIR".to_string(), custom.to_str().unwrap().to_string());
+        env.insert(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            custom.to_str().unwrap().to_string(),
+        );
 
         let opts = ClaudeAgentOptions {
             cwd: Some(cwd),
@@ -307,7 +318,10 @@ mod test_happy_path {
 
         let store = InMemorySessionStore::new();
         let key = SessionKey::new(&project_key, SESSION_ID);
-        store.append(&key, &[json!({"type": "user", "uuid": "u1"})]).await.unwrap();
+        store
+            .append(&key, &[json!({"type": "user", "uuid": "u1"})])
+            .await
+            .unwrap();
 
         let opts = ClaudeAgentOptions {
             cwd: Some(cwd),
@@ -341,11 +355,17 @@ mod test_happy_path {
         let store = InMemorySessionStore::new();
         // Older session first.
         let key1 = SessionKey::new(&project_key, SESSION_ID);
-        store.append(&key1, &[json!({"type": "user", "uuid": "old"})]).await.unwrap();
+        store
+            .append(&key1, &[json!({"type": "user", "uuid": "old"})])
+            .await
+            .unwrap();
         store.set_mtime(&format!("{project_key}/{SESSION_ID}"), 1000);
 
         let key2 = SessionKey::new(&project_key, SESSION_ID_2);
-        store.append(&key2, &[json!({"type": "user", "uuid": "new"})]).await.unwrap();
+        store
+            .append(&key2, &[json!({"type": "user", "uuid": "new"})])
+            .await
+            .unwrap();
         store.set_mtime(&format!("{project_key}/{SESSION_ID_2}"), 2000);
 
         let opts = ClaudeAgentOptions {
@@ -371,13 +391,20 @@ mod test_happy_path {
         let sidechain_sid = uuid::Uuid::new_v4().to_string();
 
         let key1 = SessionKey::new(&project_key, SESSION_ID);
-        store.append(&key1, &[json!({"type": "user", "uuid": "main"})]).await.unwrap();
+        store
+            .append(&key1, &[json!({"type": "user", "uuid": "main"})])
+            .await
+            .unwrap();
         store.set_mtime(&format!("{project_key}/{SESSION_ID}"), 1000);
 
         let key2 = SessionKey::new(&project_key, &sidechain_sid);
-        store.append(&key2, &[
-            json!({"type": "user", "uuid": "sc", "isSidechain": true}),
-        ]).await.unwrap();
+        store
+            .append(
+                &key2,
+                &[json!({"type": "user", "uuid": "sc", "isSidechain": true})],
+            )
+            .await
+            .unwrap();
         store.set_mtime(&format!("{project_key}/{sidechain_sid}"), 2000); // newer
 
         let opts = ClaudeAgentOptions {
@@ -402,9 +429,10 @@ mod test_happy_path {
         let store = InMemorySessionStore::new();
         let sc = uuid::Uuid::new_v4().to_string();
         let key = SessionKey::new(&project_key, &sc);
-        store.append(&key, &[
-            json!({"type": "user", "isSidechain": true}),
-        ]).await.unwrap();
+        store
+            .append(&key, &[json!({"type": "user", "isSidechain": true})])
+            .await
+            .unwrap();
 
         let opts = ClaudeAgentOptions {
             cwd: Some(cwd),
@@ -427,9 +455,10 @@ mod test_happy_path {
         let store = Arc::new(InMemorySessionStore::new());
         for sid in &[SESSION_ID, SESSION_ID_2] {
             let key = SessionKey::new(&project_key, *sid);
-            store.append(&key, &[
-                json!({"type": "user", "uuid": format!("u-{sid}")}),
-            ]).await.unwrap();
+            store
+                .append(&key, &[json!({"type": "user", "uuid": format!("u-{sid}")})])
+                .await
+                .unwrap();
             store.set_mtime(&format!("{project_key}/{sid}"), 5000); // identical mtimes
         }
 
@@ -438,18 +467,20 @@ mod test_happy_path {
         let store1 = InMemorySessionStore::new();
         for sid in &[SESSION_ID, SESSION_ID_2] {
             let key = SessionKey::new(&project_key, *sid);
-            store1.append(&key, &[
-                json!({"type": "user", "uuid": format!("u-{sid}")}),
-            ]).await.unwrap();
+            store1
+                .append(&key, &[json!({"type": "user", "uuid": format!("u-{sid}")})])
+                .await
+                .unwrap();
             store1.set_mtime(&format!("{project_key}/{sid}"), 5000);
         }
 
         let store2 = InMemorySessionStore::new();
         for sid in &[SESSION_ID, SESSION_ID_2] {
             let key = SessionKey::new(&project_key, *sid);
-            store2.append(&key, &[
-                json!({"type": "user", "uuid": format!("u-{sid}")}),
-            ]).await.unwrap();
+            store2
+                .append(&key, &[json!({"type": "user", "uuid": format!("u-{sid}")})])
+                .await
+                .unwrap();
             store2.set_mtime(&format!("{project_key}/{sid}"), 5000);
         }
 
@@ -507,7 +538,8 @@ mod test_happy_path {
         };
         let m = materialize_resume_session(&opts).await.unwrap().unwrap();
 
-        let jsonl = m.config_dir
+        let jsonl = m
+            .config_dir
             .join("projects")
             .join(&project_key)
             .join(format!("{SESSION_ID}.jsonl"));
@@ -551,15 +583,24 @@ mod test_subkey_materialization {
 
         let store = InMemorySessionStore::new();
         let main_key = SessionKey::new(&project_key, SESSION_ID);
-        store.append(&main_key, &[json!({"type": "user", "uuid": "u1"})]).await.unwrap();
+        store
+            .append(&main_key, &[json!({"type": "user", "uuid": "u1"})])
+            .await
+            .unwrap();
 
         let mut sub_key = SessionKey::new(&project_key, SESSION_ID);
         sub_key.subpath = Some("subagents/agent-abc".to_string());
-        store.append(&sub_key, &[
-            json!({"type": "user", "uuid": "su1"}),
-            json!({"type": "assistant", "uuid": "sa1"}),
-            json!({"type": "agent_metadata", "agentType": "general", "ver": 1}),
-        ]).await.unwrap();
+        store
+            .append(
+                &sub_key,
+                &[
+                    json!({"type": "user", "uuid": "su1"}),
+                    json!({"type": "assistant", "uuid": "sa1"}),
+                    json!({"type": "agent_metadata", "agentType": "general", "ver": 1}),
+                ],
+            )
+            .await
+            .unwrap();
 
         let opts = ClaudeAgentOptions {
             cwd: Some(cwd),
@@ -569,7 +610,8 @@ mod test_subkey_materialization {
         };
         let m = materialize_resume_session(&opts).await.unwrap().unwrap();
 
-        let session_dir = m.config_dir
+        let session_dir = m
+            .config_dir
             .join("projects")
             .join(&project_key)
             .join(SESSION_ID);
@@ -582,10 +624,13 @@ mod test_subkey_materialization {
             .lines()
             .map(|ln| serde_json::from_str(ln).unwrap())
             .collect();
-        assert_eq!(lines, vec![
-            json!({"type": "user", "uuid": "su1"}),
-            json!({"type": "assistant", "uuid": "sa1"}),
-        ]);
+        assert_eq!(
+            lines,
+            vec![
+                json!({"type": "user", "uuid": "su1"}),
+                json!({"type": "assistant", "uuid": "sa1"}),
+            ]
+        );
 
         assert!(meta.is_file());
         // 'type' field stripped from metadata.
@@ -628,7 +673,9 @@ mod test_subkey_materialization {
                 Ok(Some(vec![json!({"type": "user", "uuid": "main"})]))
             }
 
-            fn has_list_subkeys(&self) -> bool { true }
+            fn has_list_subkeys(&self) -> bool {
+                true
+            }
             async fn list_subkeys(
                 &self,
                 _key: &SessionListSubkeysKey,
@@ -667,15 +714,20 @@ mod test_subkey_materialization {
         };
         let m = materialize_resume_session(&opts).await.unwrap().unwrap();
 
-        let session_dir = m.config_dir
+        let session_dir = m
+            .config_dir
             .join("projects")
             .join(&project_key)
             .join(SESSION_ID);
         // Only the safe subpath was written.
-        assert!(session_dir.join("subagents").join("agent-ok.jsonl").is_file());
+        assert!(session_dir
+            .join("subagents")
+            .join("agent-ok.jsonl")
+            .is_file());
 
         // Main transcript was not overwritten by any subkey load.
-        let main_jsonl = m.config_dir
+        let main_jsonl = m
+            .config_dir
             .join("projects")
             .join(&project_key)
             .join(format!("{SESSION_ID}.jsonl"));
@@ -744,20 +796,18 @@ mod test_subkey_materialization {
         let m = materialize_resume_session(&opts).await.unwrap().unwrap();
 
         // Just the main transcript — no subagent dir created.
-        assert!(
-            m.config_dir
-                .join("projects")
-                .join(&project_key)
-                .join(format!("{SESSION_ID}.jsonl"))
-                .is_file()
-        );
-        assert!(
-            !m.config_dir
-                .join("projects")
-                .join(&project_key)
-                .join(SESSION_ID)
-                .exists()
-        );
+        assert!(m
+            .config_dir
+            .join("projects")
+            .join(&project_key)
+            .join(format!("{SESSION_ID}.jsonl"))
+            .is_file());
+        assert!(!m
+            .config_dir
+            .join("projects")
+            .join(&project_key)
+            .join(SESSION_ID)
+            .exists());
 
         m.cleanup().await.unwrap();
     }
@@ -805,7 +855,10 @@ mod test_timeouts_and_errors {
         };
         let err = materialize_resume_session(&opts).await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("timed out"), "expected 'timed out', got: {msg}");
+        assert!(
+            msg.contains("timed out"),
+            "expected 'timed out', got: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -880,7 +933,9 @@ mod test_timeouts_and_errors {
                 self.inner.load(key).await
             }
 
-            fn has_list_subkeys(&self) -> bool { true }
+            fn has_list_subkeys(&self) -> bool {
+                true
+            }
             async fn list_subkeys(
                 &self,
                 _key: &SessionListSubkeysKey,
@@ -899,7 +954,10 @@ mod test_timeouts_and_errors {
             inner: InMemorySessionStore::new(),
         };
         let key = SessionKey::new(&project_key, SESSION_ID);
-        store.append(&key, &[json!({"type": "user", "uuid": "u1"})]).await.unwrap();
+        store
+            .append(&key, &[json!({"type": "user", "uuid": "u1"})])
+            .await
+            .unwrap();
 
         let opts = ClaudeAgentOptions {
             cwd: Some(cwd),
@@ -943,7 +1001,9 @@ mod test_timeouts_and_errors {
                 self.inner.load(key).await
             }
 
-            fn has_list_subkeys(&self) -> bool { true }
+            fn has_list_subkeys(&self) -> bool {
+                true
+            }
             async fn list_subkeys(
                 &self,
                 _key: &SessionListSubkeysKey,
@@ -962,7 +1022,10 @@ mod test_timeouts_and_errors {
             inner: InMemorySessionStore::new(),
         };
         let key = SessionKey::new(&project_key, SESSION_ID);
-        store.append(&key, &[json!({"type": "user", "uuid": "u1"})]).await.unwrap();
+        store
+            .append(&key, &[json!({"type": "user", "uuid": "u1"})])
+            .await
+            .unwrap();
 
         let opts = ClaudeAgentOptions {
             cwd: Some(cwd),
@@ -971,9 +1034,7 @@ mod test_timeouts_and_errors {
             ..Default::default()
         };
 
-        let handle = tokio::spawn(async move {
-            materialize_resume_session(&opts).await
-        });
+        let handle = tokio::spawn(async move { materialize_resume_session(&opts).await });
         // Let it progress past mkdtemp into list_subkeys.
         tokio::task::yield_now().await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1067,7 +1128,10 @@ mod test_timeouts_and_errors {
         };
         let err = materialize_resume_session(&opts).await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("network down"), "expected 'network down', got: {msg}");
+        assert!(
+            msg.contains("network down"),
+            "expected 'network down', got: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -1094,7 +1158,9 @@ mod test_timeouts_and_errors {
                 self.inner.load(key).await
             }
 
-            fn has_list_subkeys(&self) -> bool { true }
+            fn has_list_subkeys(&self) -> bool {
+                true
+            }
             async fn list_subkeys(
                 &self,
                 _key: &SessionListSubkeysKey,
@@ -1112,7 +1178,10 @@ mod test_timeouts_and_errors {
             inner: InMemorySessionStore::new(),
         };
         let key = SessionKey::new(&project_key, SESSION_ID);
-        store.append(&key, &[json!({"type": "user", "uuid": "u1"})]).await.unwrap();
+        store
+            .append(&key, &[json!({"type": "user", "uuid": "u1"})])
+            .await
+            .unwrap();
 
         let opts = ClaudeAgentOptions {
             cwd: Some(cwd),
@@ -1266,7 +1335,10 @@ mod test_spawn_failure_cleanup {
 
         let store = InMemorySessionStore::new();
         let key = SessionKey::new(&project_key, SESSION_ID);
-        store.append(&key, &[json!({"type": "user", "uuid": "u1"})]).await.unwrap();
+        store
+            .append(&key, &[json!({"type": "user", "uuid": "u1"})])
+            .await
+            .unwrap();
 
         let opts = ClaudeAgentOptions {
             cwd: Some(cwd),
@@ -1307,7 +1379,9 @@ mod test_spawn_failure_cleanup {
                 self.inner.load(key).await
             }
 
-            fn has_list_subkeys(&self) -> bool { true }
+            fn has_list_subkeys(&self) -> bool {
+                true
+            }
             async fn list_subkeys(
                 &self,
                 _key: &SessionListSubkeysKey,
@@ -1325,7 +1399,10 @@ mod test_spawn_failure_cleanup {
             inner: InMemorySessionStore::new(),
         };
         let key = SessionKey::new(&project_key, SESSION_ID);
-        store.append(&key, &[json!({"type": "user", "uuid": "u1"})]).await.unwrap();
+        store
+            .append(&key, &[json!({"type": "user", "uuid": "u1"})])
+            .await
+            .unwrap();
 
         let opts = ClaudeAgentOptions {
             cwd: Some(cwd),
@@ -1351,7 +1428,10 @@ mod test_spawn_failure_cleanup {
 
         let store = InMemorySessionStore::new();
         let key = SessionKey::new(&project_key, SESSION_ID);
-        store.append(&key, &[json!({"type": "user", "uuid": "u1"})]).await.unwrap();
+        store
+            .append(&key, &[json!({"type": "user", "uuid": "u1"})])
+            .await
+            .unwrap();
 
         let opts = ClaudeAgentOptions {
             cwd: Some(cwd),
@@ -1381,7 +1461,10 @@ mod test_spawn_failure_cleanup {
 
         let store = InMemorySessionStore::new();
         let key = SessionKey::new(&project_key, SESSION_ID);
-        store.append(&key, &[json!({"type": "user", "uuid": "u1"})]).await.unwrap();
+        store
+            .append(&key, &[json!({"type": "user", "uuid": "u1"})])
+            .await
+            .unwrap();
 
         let opts = ClaudeAgentOptions {
             cwd: Some(cwd),
@@ -1409,7 +1492,10 @@ mod test_spawn_failure_cleanup {
 
         let store = InMemorySessionStore::new();
         let key = SessionKey::new(&project_key, SESSION_ID);
-        store.append(&key, &[json!({"type": "user", "uuid": "u1"})]).await.unwrap();
+        store
+            .append(&key, &[json!({"type": "user", "uuid": "u1"})])
+            .await
+            .unwrap();
 
         let opts = ClaudeAgentOptions {
             cwd: Some(cwd),
@@ -1465,9 +1551,7 @@ mod test_spawn_failure_cleanup {
             ..Default::default()
         };
 
-        let handle = tokio::spawn(async move {
-            materialize_resume_session(&opts).await
-        });
+        let handle = tokio::spawn(async move { materialize_resume_session(&opts).await });
         tokio::task::yield_now().await;
         handle.abort();
         let result = handle.await;
@@ -1485,7 +1569,10 @@ mod test_spawn_failure_cleanup {
 
         let store = InMemorySessionStore::new();
         let key = SessionKey::new(&project_key, SESSION_ID);
-        store.append(&key, &[json!({"type": "user", "uuid": "u1"})]).await.unwrap();
+        store
+            .append(&key, &[json!({"type": "user", "uuid": "u1"})])
+            .await
+            .unwrap();
 
         let opts = ClaudeAgentOptions {
             cwd: Some(cwd),
@@ -1514,7 +1601,10 @@ mod test_spawn_failure_cleanup {
 
         let store = InMemorySessionStore::new();
         let key = SessionKey::new(&project_key, SESSION_ID);
-        store.append(&key, &[json!({"type": "user", "uuid": "u1"})]).await.unwrap();
+        store
+            .append(&key, &[json!({"type": "user", "uuid": "u1"})])
+            .await
+            .unwrap();
 
         let opts = ClaudeAgentOptions {
             cwd: Some(cwd),
@@ -1550,7 +1640,10 @@ mod test_client_integration {
 
         let store = InMemorySessionStore::new();
         let key = SessionKey::new(&project_key, SESSION_ID);
-        store.append(&key, &[json!({"type": "user", "uuid": "u1"})]).await.unwrap();
+        store
+            .append(&key, &[json!({"type": "user", "uuid": "u1"})])
+            .await
+            .unwrap();
 
         let opts = ClaudeAgentOptions {
             cwd: Some(cwd.clone()),
@@ -1579,13 +1672,11 @@ mod test_client_integration {
         assert!(!transport_opts.continue_conversation);
         let config_dir = transport_opts.env.get("CLAUDE_CONFIG_DIR").unwrap();
         assert!(Path::new(config_dir).is_dir());
-        assert!(
-            Path::new(config_dir)
-                .join("projects")
-                .join(&project_key)
-                .join(format!("{SESSION_ID}.jsonl"))
-                .is_file()
-        );
+        assert!(Path::new(config_dir)
+            .join("projects")
+            .join(&project_key)
+            .join(format!("{SESSION_ID}.jsonl"))
+            .is_file());
 
         // Original options were not modified (Rust ownership prevents this by design,
         // but we verify the applied options are independent).
@@ -1637,7 +1728,10 @@ mod test_client_integration {
             load_calls: load_calls_clone,
         };
         let key = SessionKey::new(&project_key, SESSION_ID);
-        store.append(&key, &[json!({"type": "user", "uuid": "u1"})]).await.unwrap();
+        store
+            .append(&key, &[json!({"type": "user", "uuid": "u1"})])
+            .await
+            .unwrap();
 
         // With a custom transport, materialization should be skipped.
         // The test asserts the contract: load_calls must remain 0.
@@ -1685,7 +1779,10 @@ mod test_client_integration {
             load_calls: load_calls_clone,
         };
         let key = SessionKey::new(&project_key, SESSION_ID);
-        store.append(&key, &[json!({"type": "user", "uuid": "u1"})]).await.unwrap();
+        store
+            .append(&key, &[json!({"type": "user", "uuid": "u1"})])
+            .await
+            .unwrap();
 
         // With a custom transport, materialization is skipped.
         assert_eq!(load_calls.load(Ordering::SeqCst), 0);

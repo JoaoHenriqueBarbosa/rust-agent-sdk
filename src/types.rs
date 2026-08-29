@@ -1,7 +1,7 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::future::Future;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -207,24 +207,13 @@ pub struct PermissionUpdate {
     pub destination: Option<PermissionUpdateDestination>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ToolPermissionContext {
     pub signal: Option<serde_json::Value>,
     #[serde(default)]
     pub suggestions: Vec<PermissionUpdate>,
     pub tool_use_id: Option<String>,
     pub agent_id: Option<String>,
-}
-
-impl Default for ToolPermissionContext {
-    fn default() -> Self {
-        Self {
-            signal: None,
-            suggestions: Vec::new(),
-            tool_use_id: None,
-            agent_id: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -430,7 +419,10 @@ pub enum HookSpecificOutput {
     PreToolUse {
         #[serde(rename = "permissionDecision", skip_serializing_if = "Option::is_none")]
         permission_decision: Option<String>,
-        #[serde(rename = "permissionDecisionReason", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "permissionDecisionReason",
+            skip_serializing_if = "Option::is_none"
+        )]
         permission_decision_reason: Option<String>,
         #[serde(rename = "updatedInput", skip_serializing_if = "Option::is_none")]
         updated_input: Option<serde_json::Value>,
@@ -440,7 +432,10 @@ pub enum HookSpecificOutput {
     PostToolUse {
         #[serde(rename = "additionalContext", skip_serializing_if = "Option::is_none")]
         additional_context: Option<String>,
-        #[serde(rename = "updatedMCPToolOutput", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "updatedMCPToolOutput",
+            skip_serializing_if = "Option::is_none"
+        )]
         updated_mcp_tool_output: Option<serde_json::Value>,
     },
     PostToolUseFailure {
@@ -503,7 +498,11 @@ pub struct HookContext {
 
 /// Can-use-tool permission callback type.
 pub type CanUseToolFn = Arc<
-    dyn Fn(String, HashMap<String, serde_json::Value>, ToolPermissionContext) -> Pin<Box<dyn Future<Output = PermissionResult> + Send>>
+    dyn Fn(
+            String,
+            HashMap<String, serde_json::Value>,
+            ToolPermissionContext,
+        ) -> Pin<Box<dyn Future<Output = PermissionResult> + Send>>
         + Send
         + Sync,
 >;
@@ -513,7 +512,11 @@ pub type StderrCallbackFn = Arc<dyn Fn(String) + Send + Sync>;
 
 /// Hook callback function type.
 pub type HookCallbackFn = Arc<
-    dyn Fn(HookInput, Option<String>, HookContext) -> futures::future::BoxFuture<'static, HookJSONOutput>
+    dyn Fn(
+            HookInput,
+            Option<String>,
+            HookContext,
+        ) -> futures::future::BoxFuture<'static, HookJSONOutput>
         + Send
         + Sync,
 >;
@@ -788,11 +791,7 @@ pub struct ToolUseBlock {
 }
 
 impl ToolUseBlock {
-    pub fn new(
-        id: impl Into<String>,
-        name: impl Into<String>,
-        input: serde_json::Value,
-    ) -> Self {
+    pub fn new(id: impl Into<String>, name: impl Into<String>, input: serde_json::Value) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
@@ -1241,13 +1240,12 @@ pub trait SessionStore: Send + Sync {
         &self,
         _project_key: &str,
     ) -> std::result::Result<Vec<SessionSummaryEntry>, ClaudeSDKError> {
-        Err(ClaudeSDKError::sdk("list_session_summaries not implemented"))
+        Err(ClaudeSDKError::sdk(
+            "list_session_summaries not implemented",
+        ))
     }
 
-    async fn delete(
-        &self,
-        _key: &SessionKey,
-    ) -> std::result::Result<(), ClaudeSDKError> {
+    async fn delete(&self, _key: &SessionKey) -> std::result::Result<(), ClaudeSDKError> {
         Err(ClaudeSDKError::sdk("delete not implemented"))
     }
 
@@ -1277,6 +1275,79 @@ pub trait SessionStore: Send + Sync {
     /// Whether this store implements `list_session_summaries` beyond the default.
     fn has_list_session_summaries(&self) -> bool {
         false
+    }
+}
+
+/// A `SessionStore` behind an `Arc` is a `SessionStore`.
+///
+/// Without this, every caller that needs to keep its own handle to a store
+/// while also handing one to `ClaudeAgentOptions` had to write a newtype and
+/// forward all ten methods by hand — including the four `has_*` capability
+/// probes, whose defaults return `false`. Forgetting one of those is the worst
+/// kind of mistake here: the store works, but the crate silently avoids the
+/// code paths that depend on it (`continue_conversation` requires
+/// `list_sessions`), so the feature just stops happening with no error.
+///
+/// Found in ahamkara, which had exactly that newtype: `SharedTranscript(Arc<..>)`
+/// with ten forwarding methods.
+#[async_trait::async_trait]
+impl<T: SessionStore + ?Sized> SessionStore for std::sync::Arc<T> {
+    async fn append(
+        &self,
+        key: &SessionKey,
+        entries: &[SessionStoreEntry],
+    ) -> std::result::Result<(), ClaudeSDKError> {
+        (**self).append(key, entries).await
+    }
+
+    async fn load(
+        &self,
+        key: &SessionKey,
+    ) -> std::result::Result<Option<Vec<SessionStoreEntry>>, ClaudeSDKError> {
+        (**self).load(key).await
+    }
+
+    async fn list_sessions(
+        &self,
+        project_key: &str,
+    ) -> std::result::Result<Vec<SessionStoreListEntry>, ClaudeSDKError> {
+        (**self).list_sessions(project_key).await
+    }
+
+    async fn list_session_summaries(
+        &self,
+        project_key: &str,
+    ) -> std::result::Result<Vec<SessionSummaryEntry>, ClaudeSDKError> {
+        (**self).list_session_summaries(project_key).await
+    }
+
+    async fn delete(&self, key: &SessionKey) -> std::result::Result<(), ClaudeSDKError> {
+        (**self).delete(key).await
+    }
+
+    async fn list_subkeys(
+        &self,
+        key: &SessionListSubkeysKey,
+    ) -> std::result::Result<Vec<String>, ClaudeSDKError> {
+        (**self).list_subkeys(key).await
+    }
+
+    // The capability probes forward too: answering for the inner store instead
+    // of falling back to the trait defaults is the whole point.
+    fn has_list_sessions(&self) -> bool {
+        (**self).has_list_sessions()
+    }
+
+    fn has_delete(&self) -> bool {
+        (**self).has_delete()
+    }
+
+    fn has_list_subkeys(&self) -> bool {
+        (**self).has_list_subkeys()
+    }
+
+    fn has_list_session_summaries(&self) -> bool {
+        (**self).has_list_session_summaries()
     }
 }
 
@@ -1381,11 +1452,23 @@ pub struct ClaudeAgentOptions {
     pub allowed_tools: Vec<String>,
     pub system_prompt: Option<SystemPromptConfig>,
     pub mcp_servers: McpServersConfig,
+    /// Servidores MCP in-process desta sessão, **por handle**.
+    ///
+    /// `mcp_servers` só declara `{"type":"sdk","name":...}` para o CLI: é texto,
+    /// e nome não é identidade. Este campo é quem realmente atende os
+    /// `mcp_message` — o `Query` da sessão recebe um clone dele no `connect`.
+    ///
+    /// Preencha com [`ClaudeAgentOptions::with_sdk_mcp_server`] /
+    /// [`ClaudeAgentOptions::add_sdk_mcp_server`], que declaram e guardam o
+    /// handle na mesma chamada. Antes disto existia um registry global por nome,
+    /// e duas sessões concorrentes com servidores homônimos colidiam.
+    pub sdk_mcp_servers: crate::sdk_mcp::SdkMcpRegistry,
     pub strict_mcp_config: bool,
     pub permission_mode: Option<PermissionMode>,
     pub continue_conversation: bool,
     pub resume: Option<String>,
     pub session_id: Option<String>,
+    pub name: Option<String>,
     pub max_turns: Option<i64>,
     pub max_budget_usd: Option<f64>,
     pub disallowed_tools: Vec<String>,
@@ -1441,11 +1524,13 @@ impl Default for ClaudeAgentOptions {
             allowed_tools: Vec::new(),
             system_prompt: None,
             mcp_servers: McpServersConfig::Dict(HashMap::new()),
+            sdk_mcp_servers: crate::sdk_mcp::SdkMcpRegistry::new(),
             strict_mcp_config: false,
             permission_mode: None,
             continue_conversation: false,
             resume: None,
             session_id: None,
+            name: None,
             max_turns: None,
             max_budget_usd: None,
             disallowed_tools: Vec::new(),
@@ -1481,6 +1566,44 @@ impl Default for ClaudeAgentOptions {
             task_budget: None,
             stderr: None,
         }
+    }
+}
+
+impl ClaudeAgentOptions {
+    /// Declara um servidor MCP in-process para ESTA sessão e devolve a config
+    /// que foi para `mcp_servers`.
+    ///
+    /// Faz as duas metades de uma vez, porque separá-las era a origem do bug:
+    ///
+    /// 1. põe `{"type":"sdk","name":<nome>}` em `mcp_servers` (é o que vira
+    ///    `--mcp-config` e o que faz o CLI expor `mcp__<nome>__<tool>`);
+    /// 2. guarda o **handle** em `sdk_mcp_servers` (é quem atende o
+    ///    `mcp_message` em runtime).
+    ///
+    /// A chave do dicionário é o próprio nome do servidor, que é o que o CLI
+    /// manda em `server_name` — e é por esse nome que o `Query` resolve.
+    ///
+    /// Se `mcp_servers` for [`McpServersConfig::Path`], a declaração fica por
+    /// conta do arquivo apontado e só o handle é guardado aqui.
+    pub fn add_sdk_mcp_server(
+        &mut self,
+        server: impl Into<Arc<crate::sdk_mcp::SdkMcpServer>>,
+    ) -> McpServerConfig {
+        let server = self.sdk_mcp_servers.insert(server);
+        let config = server.config();
+        if let McpServersConfig::Dict(servers) = &mut self.mcp_servers {
+            servers.insert(server.name().to_string(), config.clone());
+        }
+        config
+    }
+
+    /// Versão encadeável de [`ClaudeAgentOptions::add_sdk_mcp_server`].
+    pub fn with_sdk_mcp_server(
+        mut self,
+        server: impl Into<Arc<crate::sdk_mcp::SdkMcpServer>>,
+    ) -> Self {
+        self.add_sdk_mcp_server(server);
+        self
     }
 }
 
@@ -1556,10 +1679,7 @@ pub enum ControlResponseBody {
         response: Option<serde_json::Value>,
     },
     #[serde(rename = "error")]
-    Error {
-        request_id: String,
-        error: String,
-    },
+    Error { request_id: String, error: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

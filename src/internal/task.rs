@@ -37,7 +37,11 @@ impl TaskHandle {
         if self.done() {
             callback(self);
         } else {
-            self.state.lock().unwrap().callbacks.push(Box::new(callback));
+            self.state
+                .lock()
+                .unwrap()
+                .callbacks
+                .push(Box::new(callback));
         }
     }
 
@@ -59,7 +63,7 @@ impl TaskHandle {
                     } else {
                         "task panicked".to_string()
                     };
-                    Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, msg)))
+                    Err(Box::new(std::io::Error::other(msg)))
                 }
             }
         } else {
@@ -99,9 +103,8 @@ where
             tokio::task::yield_now().await;
         }
         // Fire all registered callbacks.
-        let cbs: Vec<DoneCallback> = {
-            std::mem::take(&mut watcher_state.lock().unwrap().callbacks)
-        };
+        let cbs: Vec<DoneCallback> =
+            { std::mem::take(&mut watcher_state.lock().unwrap().callbacks) };
         // Build a proxy handle for the callback signature.
         let proxy = TaskHandle {
             join_handle: None,

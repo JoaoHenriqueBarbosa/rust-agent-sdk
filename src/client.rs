@@ -1,470 +1,544 @@
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
+use crate::errors::{ClaudeSDKError, Result};
+use crate::internal::message_parser::parse_message;
+use crate::internal::query::Query;
+use crate::internal::session_store::SharedSessionStore;
+use crate::internal::transport::Transport;
+use crate::types::{
+    ClaudeAgentOptions, ContextUsageResponse, McpServersConfig, McpStatusResponse, Message,
+    PermissionMode, SystemPrompt, SystemPromptConfig,
+};
 
-use futures::stream::{Stream, StreamExt};
-
-use std::collections::HashMap;
-
-use crate::agentic::{AgenticEvent, AgenticLoop, AgenticLoopOptions, StopHookCallback};
-use crate::api::client::AnthropicClient;
-use crate::api::streaming::StreamUpdate;
-use crate::api::types::{ApiMessage, ContentBlock, SystemBlock};
-use crate::errors::Result;
-use crate::mcp::client::McpServerConfig;
-use crate::tools::framework::{Tool, ToolContext, ToolExecutor, ToolPermissionRequest, ToolRegistry};
-use crate::tools::permission::PermissionRules;
-use crate::types::PermissionMode;
-
-// ---------------------------------------------------------------------------
-// SDK client options
-// ---------------------------------------------------------------------------
-
-/// Callback type for permission prompts.
-/// Receives a ToolPermissionRequest, returns true to allow, false to deny.
-pub type PermissionCallbackFn = Arc<
-    dyn Fn(ToolPermissionRequest) -> Pin<Box<dyn Future<Output = bool> + Send>>
-        + Send
-        + Sync,
->;
-
-/// Options for configuring the SDK client.
-pub struct ClaudeSDKClientOptions {
-    /// Anthropic API key. Falls back to ANTHROPIC_API_KEY env var.
-    pub api_key: Option<String>,
-    /// Base URL for the API. Falls back to ANTHROPIC_BASE_URL env var.
-    pub base_url: Option<String>,
-    /// Model to use (default: claude-sonnet-4-20250514).
-    pub model: Option<String>,
-    /// Max tokens per response (default: 16384).
-    pub max_tokens: Option<u32>,
-    /// Max agentic loop turns (None = unlimited).
-    pub max_turns: Option<u32>,
-    /// System prompt text.
-    pub system_prompt: Option<String>,
-    /// Working directory for tool execution.
-    pub cwd: Option<std::path::PathBuf>,
-    /// Permission mode for tool execution.
-    pub permission_mode: Option<PermissionMode>,
-    /// Custom tools to register alongside the built-in ones.
-    /// Each tool is wrapped in Arc so it can be shared across loop iterations.
-    pub custom_tools: Vec<Arc<dyn Tool>>,
-    /// Whether to register the default built-in tools (default: true).
-    pub use_default_tools: bool,
-    /// Permission rules for tools.
-    pub permission_rules: Option<PermissionRules>,
-    /// Temperature for API calls.
-    pub temperature: Option<f64>,
-    /// Callback for tool permission prompts.
-    /// Called when permission_mode is not BypassPermissions and no explicit allow/deny rule matches.
-    pub permission_callback: Option<PermissionCallbackFn>,
-    /// Optional stop hook — called when the assistant ends a turn with no tool use.
-    /// Can prevent continuation or inject blocking error messages for retry.
-    pub stop_hook: Option<StopHookCallback>,
-    /// MCP servers to connect to. Keys are server names, values are configs.
-    /// Tools from these servers are registered as `mcp__{server}__{tool}`.
-    pub mcp_servers: HashMap<String, McpServerConfig>,
-    /// Resume a previous session by ID. Loads messages from the session
-    /// JSONL file and continues the conversation.
-    pub resume_session_id: Option<String>,
-}
-
-impl Default for ClaudeSDKClientOptions {
-    fn default() -> Self {
-        Self {
-            api_key: None,
-            base_url: None,
-            model: None,
-            max_tokens: None,
-            max_turns: None,
-            system_prompt: None,
-            cwd: None,
-            permission_mode: None,
-            custom_tools: Vec::new(),
-            use_default_tools: true,
-            permission_rules: None,
-            temperature: None,
-            permission_callback: None,
-            stop_hook: None,
-            mcp_servers: HashMap::new(),
-            resume_session_id: None,
-        }
-    }
-}
-
-impl std::fmt::Debug for ClaudeSDKClientOptions {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ClaudeSDKClientOptions")
-            .field("model", &self.model)
-            .field("max_tokens", &self.max_tokens)
-            .field("max_turns", &self.max_turns)
-            .field("permission_mode", &self.permission_mode)
-            .field("cwd", &self.cwd)
-            .finish_non_exhaustive()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SDK client
-// ---------------------------------------------------------------------------
-
-/// High-level client for interacting with Claude via the Anthropic API.
+/// Bidirectional client for sustained conversations with Claude Code.
 ///
-/// Uses the native HTTP transport — no CLI subprocess needed.
-///
-/// # Example
-/// ```no_run
-/// use rust_agent_sdk::client::{ClaudeSDKClient, ClaudeSDKClientOptions};
-///
-/// #[tokio::main]
-/// async fn main() {
-///     let client = ClaudeSDKClient::new(ClaudeSDKClientOptions::default()).await;
-///     let messages = client.send_message("Hello!").await.unwrap();
-/// }
-/// ```
+/// Provides full control over the conversation flow with support
+/// for streaming, interrupts, and dynamic message sending.
 pub struct ClaudeSDKClient {
-    anthropic_client: AnthropicClient,
-    options: AgenticLoopOptions,
-    tool_executor_factory: ToolExecutorFactory,
-    messages: Vec<ApiMessage>,
-    session_storage: Option<crate::session::SessionStorage>,
-}
-
-/// Factory to create fresh ToolExecutors (since they're consumed by AgenticLoop).
-struct ToolExecutorFactory {
-    cwd: std::path::PathBuf,
-    permission_mode: PermissionMode,
-    permission_rules: PermissionRules,
-    permission_callback: Option<PermissionCallbackFn>,
-    custom_tools: Vec<Arc<dyn Tool>>,
-    use_defaults: bool,
-}
-
-impl ToolExecutorFactory {
-    fn create(&self) -> ToolExecutor {
-        let mut registry = ToolRegistry::new();
-
-        if self.use_defaults {
-            registry.register_defaults();
-        }
-
-        for tool in &self.custom_tools {
-            registry.register_shared(tool.clone());
-        }
-
-        let context = ToolContext {
-            working_directory: self.cwd.clone(),
-            permission_mode: self.permission_mode.clone(),
-            permission_callback: self.permission_callback.clone(),
-        };
-
-        ToolExecutor::new(registry, context)
-            .with_permission_rules(self.permission_rules.clone())
-    }
+    pub _transport: Option<Box<dyn Transport>>,
+    pub _options: ClaudeAgentOptions,
+    _query: Option<Query>,
+    _custom_transport: Option<Box<dyn Transport>>,
+    _materialized: Option<crate::internal::session_resume::MaterializedResume>,
+    /// Handle compartilhado do `session_store` do usuário (ver `SharedSessionStore`).
+    _session_store: Option<SharedSessionStore>,
 }
 
 impl ClaudeSDKClient {
-    /// Create a new SDK client. Connects to MCP servers if configured.
-    pub async fn new(options: ClaudeSDKClientOptions) -> Self {
-        let api_key = options
-            .api_key
-            .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-            .unwrap_or_default();
-
-        let mut anthropic_client = AnthropicClient::new(api_key);
-
-        if let Some(base_url) = options.base_url.or_else(|| std::env::var("ANTHROPIC_BASE_URL").ok()) {
-            anthropic_client = anthropic_client.with_base_url(base_url);
+    pub fn new(options: ClaudeAgentOptions) -> Self {
+        Self {
+            _transport: None,
+            _options: options,
+            _query: None,
+            _custom_transport: None,
+            _materialized: None,
+            _session_store: None,
         }
+    }
 
-        let model = options
-            .model
-            .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
-        let max_tokens = options.max_tokens.unwrap_or(16384);
+    pub fn with_transport(mut self, transport: Box<dyn Transport>) -> Self {
+        self._custom_transport = Some(transport);
+        self
+    }
 
-        anthropic_client = anthropic_client
-            .with_model(model.clone())
-            .with_max_tokens(max_tokens);
+    /// Connect to Claude without a prompt (interactive mode).
+    /// Equivalent to Python's `__aenter__` / `connect()` with no args.
+    pub async fn connect(&mut self) -> Result<()> {
+        self.connect_with_prompt(None).await
+    }
 
-        let system_prompt = options
-            .system_prompt
-            .map(|s| vec![SystemBlock::text_cached(s)])
-            .unwrap_or_default();
+    /// Connect to Claude with an optional prompt (#5).
+    pub async fn connect_with_prompt(&mut self, prompt: Option<&str>) -> Result<()> {
+        use crate::internal::session_resume::{
+            apply_materialized_options, materialize_resume_session,
+        };
+        use crate::internal::session_store_validation::validate_session_store_options;
 
-        let permission_mode = options
-            .permission_mode
-            .unwrap_or(PermissionMode::BypassPermissions);
+        // Fail fast on invalid session_store option combinations
+        validate_session_store_options(&self._options)?;
 
-        let permission_rules = options
-            .permission_rules
-            .unwrap_or_else(PermissionRules::allow_all);
-
-        let cwd = options
-            .cwd
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
-
-        // Connect MCP servers and collect their tools
-        let mut mcp_tools: Vec<Arc<dyn Tool>> = Vec::new();
-        if !options.mcp_servers.is_empty() {
-            match crate::mcp::client::connect_mcp_servers(&options.mcp_servers).await {
-                Ok((_clients, tools)) => {
-                    mcp_tools = tools;
-                }
-                Err(e) => {
-                    eprintln!("Warning: Failed to connect MCP servers: {e}");
-                }
+        // Converte o store do usuário em handle compartilhável uma única vez.
+        // A partir daqui `self._options.session_store` guarda um
+        // `SharedSessionStore` equivalente, para que reconectar continue
+        // funcionando e o transporte ainda receba `--session-mirror`.
+        if self._session_store.is_none() {
+            if let Some(store) = self._options.session_store.take() {
+                let shared = SharedSessionStore::from_boxed(store);
+                self._options.session_store = Some(Box::new(shared.clone()));
+                self._session_store = Some(shared);
             }
         }
 
-        // Combine custom_tools + MCP tools
-        let mut all_custom_tools = options.custom_tools;
-        all_custom_tools.extend(mcp_tools);
+        // Validate and configure permission settings
+        if self._options.can_use_tool.is_some() {
+            if prompt.is_some() {
+                return Err(ClaudeSDKError::sdk(
+                    "can_use_tool callback requires streaming mode. \
+                     Please provide prompt as an AsyncIterable instead of a string.",
+                ));
+            }
+            if self._options.permission_prompt_tool_name.is_some() {
+                return Err(ClaudeSDKError::sdk(
+                    "can_use_tool callback cannot be used with permission_prompt_tool_name. \
+                     Please use one or the other.",
+                ));
+            }
+            self._options.permission_prompt_tool_name = Some("stdio".to_string());
+        }
 
-        let loop_options = AgenticLoopOptions {
-            model,
-            max_tokens,
-            system_prompt,
-            max_turns: options.max_turns,
-            initial_messages: Vec::new(),
-            temperature: options.temperature,
-            tool_choice: None,
-            thinking: None,
-            stop_sequences: None,
-            cache_last_n_messages: 2,
-            context_window_tokens: 200_000,
-            include_stream_events: true,
-            abort: None,
-            fallback_model: None,
-            stop_hook: options.stop_hook,
-            session_id: options.resume_session_id.clone(),
+        // resume/continue + session_store materialization
+        self._materialized = if self._custom_transport.is_none() {
+            materialize_resume_session(&self._options).await?
+        } else {
+            None
         };
 
-        // Set up session storage and load resume messages
-        let cwd_str = cwd.to_string_lossy().to_string();
-        let session_storage = crate::session::SessionStorage::for_cwd(&cwd_str).await.ok();
+        let mut materialized_options = self._options.clone_without_callbacks();
+        materialized_options.can_use_tool = self._options.can_use_tool.clone();
+        materialized_options.stderr = self._options.stderr.clone();
+        // Sem isto o transporte não passa `--session-mirror` e o CLI nunca emite
+        // os frames `transcript_mirror` que o batcher espera.
+        materialized_options.session_store = self
+            ._session_store
+            .as_ref()
+            .map(|s| Box::new(s.clone()) as Box<dyn crate::types::SessionStore>);
 
-        let mut initial_messages = Vec::new();
-        if let Some(ref resume_id) = options.resume_session_id {
-            if let Some(ref storage) = session_storage {
-                if let Ok(msgs) = storage.load(resume_id).await {
-                    initial_messages = msgs;
-                }
-            }
+        if let Some(ref m) = self._materialized {
+            materialized_options = apply_materialized_options(materialized_options, m);
         }
 
-        Self {
-            anthropic_client,
-            options: loop_options,
-            tool_executor_factory: ToolExecutorFactory {
-                cwd,
-                permission_mode,
-                permission_rules,
-                permission_callback: options.permission_callback,
-                custom_tools: all_custom_tools,
-                use_defaults: options.use_default_tools,
-            },
-            messages: initial_messages,
-            session_storage,
+        let result = self.connect_inner(prompt, materialized_options).await;
+        if result.is_err() {
+            // If connect fails after subprocess spawn, clean up before propagating
+            let _ = self.disconnect().await;
         }
+        result
     }
 
-    /// Send a message and collect all response events.
-    /// Returns the final text response.
-    pub async fn send_message(&self, prompt: &str) -> Result<String> {
-        let events = self.send_message_events(prompt).await?;
+    async fn connect_inner(
+        &mut self,
+        prompt: Option<&str>,
+        materialized_options: ClaudeAgentOptions,
+    ) -> Result<()> {
+        // Use provided transport or create subprocess transport
+        let mut transport: Box<dyn Transport> = if let Some(t) = self._custom_transport.take() {
+            t
+        } else {
+            Box::new(crate::internal::transport::SubprocessCLITransport::new(
+                "",
+                materialized_options,
+            ))
+        };
+        transport.connect().await?;
+        self._transport = Some(transport);
 
-        let mut text = String::new();
-        for event in events {
-            if let AgenticEvent::Assistant { ref message, .. } = event {
-                if let Some(content) = message.get("content").and_then(|c| c.as_array()) {
-                    let message_text: String = content.iter()
-                        .filter_map(|b| {
-                            if b.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                b.get("text").and_then(|t| t.as_str())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("");
-                    if !message_text.is_empty() {
-                        if !text.is_empty() {
-                            text.push('\n');
+        // Create Query
+        let initialize_timeout_ms: f64 = std::env::var("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(60000.0);
+        let initialize_timeout = (initialize_timeout_ms / 1000.0).max(60.0);
+
+        // Extract exclude_dynamic_sections from preset system prompt
+        let exclude_dynamic_sections = match &self._options.system_prompt {
+            Some(SystemPromptConfig::Structured(SystemPrompt::Preset {
+                exclude_dynamic_sections,
+                ..
+            })) => *exclude_dynamic_sections,
+            _ => None,
+        };
+
+        // Convert agents to JSON for initialize request
+        let agents_json = self._options.agents.as_ref().map(|agents| {
+            let map: serde_json::Map<String, serde_json::Value> = agents
+                .iter()
+                .map(|(name, def)| (name.clone(), serde_json::to_value(def).unwrap_or_default()))
+                .collect();
+            serde_json::Value::Object(map)
+        });
+
+        // We need to give transport to Query — take it temporarily
+        let transport = self._transport.take().unwrap();
+        let mut query = Query::new(transport, true, initialize_timeout);
+
+        // Registry de MCP in-process da SESSÃO: os handles que as próprias
+        // opções carregam.
+        //
+        // Não há resolução por nome contra nenhum depósito do processo. É isso
+        // que isola duas sessões concorrentes com servidores homônimos (cada
+        // `Query` tem o seu mapa) e é isso que faz o servidor morrer com a
+        // sessão (o `Arc` não fica pendurado em lugar nenhum estático).
+        query.set_sdk_mcp_servers(self._options.sdk_mcp_servers.clone());
+
+        // Set can_use_tool callback if provided
+        if let Some(ref callback) = self._options.can_use_tool {
+            query.set_can_use_tool(callback.clone());
+        }
+
+        // Configure hooks on the query.
+        //
+        // Os matchers vão inteiros — com as closures. Antes, esta fronteira
+        // convertia cada hook para `Value::Null` e só a FORMA chegava à
+        // `Query`: o CLI recebia os `hookCallbackIds` no initialize e, quando
+        // chamava um deles, ninguém atendia. Hook declarado nunca rodava.
+        if let Some(ref hooks) = self._options.hooks {
+            let mut internal_hooks = std::collections::HashMap::new();
+            for (event, matchers) in hooks {
+                let internal_matchers: Vec<crate::types::HookMatcher> = matchers
+                    .iter()
+                    .map(|matcher| crate::types::HookMatcher {
+                        matcher: matcher.matcher.clone(),
+                        hooks: matcher.hooks.clone(),
+                        timeout: matcher.timeout,
+                    })
+                    .collect();
+                internal_hooks.insert(format!("{:?}", event), internal_matchers);
+            }
+            query.set_hooks(internal_hooks);
+        }
+
+        // Set agents and exclude_dynamic_sections for initialize
+        if let Some(agents) = agents_json {
+            query.set_agents(agents);
+        }
+        if let Some(eds) = exclude_dynamic_sections {
+            query.set_exclude_dynamic_sections(eds);
+        }
+        if let Some(ref skills) = self._options.skills {
+            query.set_skills(skills.clone());
+        }
+
+        // Espelhamento de transcript para o SessionStore.
+        //
+        // O CLI só emite frames `transcript_mirror` quando recebe
+        // `--session-mirror`, e esse flag é derivado de `options.session_store`
+        // no transporte. Como `clone_without_callbacks` não consegue clonar o
+        // Box do store, o store é compartilhado via `SharedSessionStore`: uma
+        // cópia foi para as options do transporte (em `connect_with_prompt`) e
+        // outra vai para o batcher aqui.
+        if let Some(ref shared) = self._session_store {
+            let sender = query.message_sender();
+            let on_error: crate::internal::transcript_mirror::OnErrorCallback =
+                Box::new(move |key, error| {
+                    let sender = sender.clone();
+                    Box::pin(async move {
+                        // Erro de espelho não derruba a sessão: vira uma
+                        // mensagem `system/mirror_error` na fila do consumidor.
+                        if let Some(tx) = sender {
+                            let _ = tx
+                                .send(serde_json::json!({
+                                    "type": "system",
+                                    "subtype": "mirror_error",
+                                    "error": error,
+                                    "key": key,
+                                    "uuid": uuid::Uuid::new_v4().to_string(),
+                                    "session_id": key
+                                        .as_ref()
+                                        .map(|k| k.session_id.as_str())
+                                        .unwrap_or(""),
+                                }))
+                                .await;
                         }
-                        text.push_str(&message_text);
-                    }
-                }
-            }
+                    })
+                });
+            let batcher = crate::internal::session_resume::build_mirror_batcher(
+                Box::new(shared.clone()),
+                self._materialized.as_ref(),
+                Some(&self._options.env),
+                on_error,
+                self._options.session_store_flush.clone(),
+            );
+            query.set_transcript_mirror_batcher(batcher);
         }
 
-        Ok(text)
-    }
+        // Start reading messages and initialize
+        query.start().await?;
+        query.initialize().await?;
 
-    /// Send a message and collect all agentic events.
-    pub async fn send_message_events(&self, prompt: &str) -> Result<Vec<AgenticEvent>> {
-        let stream = self.send_message_stream(prompt);
-        tokio::pin!(stream);
-
-        let mut events = Vec::new();
-        while let Some(result) = stream.next().await {
-            events.push(result?);
+        // If we have an initial prompt, send it
+        if let Some(prompt_str) = prompt {
+            query.write_user_message(prompt_str).await?;
         }
-        Ok(events)
+
+        self._query = Some(query);
+        Ok(())
     }
 
-    /// Send a message and return a stream of agentic events.
-    /// Persists messages to session JSONL file (same format as Claude CLI)
-    /// so conversations can be resumed later.
+    /// Send a new query in streaming mode (#6).
+    pub async fn query(&mut self, prompt: &str) -> Result<()> {
+        if self._query.is_none() {
+            return Err(ClaudeSDKError::cli_connection(
+                "Not connected. Call connect() first.",
+            ));
+        }
+        if let Some(ref mut query) = self._query {
+            query.write_user_message(prompt).await?;
+        }
+        Ok(())
+    }
+
+    /// Lê a próxima mensagem da sessão, ou `None` quando o stream terminou.
     ///
-    /// Port of QueryEngine.submitMessage L281-360 from QueryEngine.js:
-    /// each assistant/user message from query() is pushed to messages[]
-    /// and recorded via recordTranscript().
-    pub fn send_message_stream(
-        &self,
-        prompt: &str,
-    ) -> Pin<Box<dyn Stream<Item = Result<AgenticEvent>> + Send>> {
-        let mut opts = self.options.clone();
-        opts.initial_messages = self.messages.clone();
-        let prompt_msg = ApiMessage::user(vec![ContentBlock::text(prompt)]);
-        opts.initial_messages.push(prompt_msg.clone());
+    /// É o primitivo do modo streaming: não fecha o stdin nem espera EOF, então
+    /// dá para consumir um turno e mandar outro `query()` na MESMA sessão.
+    /// Mensagens que o parser não reconhece são puladas (não terminam o stream).
+    pub async fn next_message(&mut self) -> Result<Option<Message>> {
+        let query = match self._query {
+            Some(ref mut q) => q,
+            None => {
+                return Err(ClaudeSDKError::cli_connection(
+                    "Not connected. Call connect() first.",
+                ))
+            }
+        };
 
-        let executor = self.tool_executor_factory.create();
-        let cwd_str = self.tool_executor_factory.cwd.to_string_lossy().to_string();
-        let agentic_loop = AgenticLoop::new(self.anthropic_client.clone(), executor, opts);
-        let session_id = agentic_loop.session_id().to_string();
-        let inner = agentic_loop.stream();
-        let session_storage = self.session_storage.clone();
-
-        Box::pin(async_stream::stream! {
-            let mut parent_uuid: Option<String> = None;
-
-            // Port L152-158: persist user prompt before query
-            if let Some(ref storage) = session_storage {
-                if let Ok(uuid) = storage.append_user(
-                    &session_id,
-                    &prompt_msg.content,
-                    parent_uuid.as_deref(),
-                    &cwd_str,
-                ).await {
-                    parent_uuid = Some(uuid);
+        loop {
+            match query.next_message().await? {
+                None => return Ok(None),
+                Some(data) => {
+                    if let Ok(Some(parsed)) = parse_message(&data) {
+                        return Ok(Some(parsed));
+                    }
                 }
             }
+        }
+    }
 
-            tokio::pin!(inner);
-            while let Some(event) = inner.next().await {
-                match &event {
-                    // Port L293-306: persist assistant and user messages
-                    Ok(AgenticEvent::Assistant { ref message, .. }) => {
-                        if let Some(ref storage) = session_storage {
-                            // Extract content, model, stop_reason from the nested message Value
-                            let content: Vec<ContentBlock> = message.get("content")
-                                .and_then(|c| serde_json::from_value(c.clone()).ok())
-                                .unwrap_or_default();
-                            let model = message.get("model")
-                                .and_then(|m| m.as_str())
-                                .unwrap_or_default();
-                            let stop_reason = message.get("stop_reason")
-                                .and_then(|s| s.as_str());
-                            // Port L303-304: assistant → recordTranscript (fire-and-forget)
-                            if let Ok(uuid) = storage.append_assistant(
-                                &session_id,
-                                &content,
-                                model,
-                                stop_reason,
-                                parent_uuid.as_deref(),
-                                &cwd_str,
-                            ).await {
-                                parent_uuid = Some(uuid);
-                            }
-                        }
-                    }
-                    Ok(AgenticEvent::User { ref message, .. }) => {
-                        if let Some(ref storage) = session_storage {
-                            // Port L305-306: user → await recordTranscript
-                            if let Ok(uuid) = storage.append_user(
-                                &session_id,
-                                &message.content,
-                                parent_uuid.as_deref(),
-                                &cwd_str,
-                            ).await {
-                                parent_uuid = Some(uuid);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                yield event;
+    /// Whether `connect()` succeeded and the session is still open.
+    pub fn is_connected(&self) -> bool {
+        self._query.is_some()
+    }
+
+    /// Receive all messages from Claude as a Vec (#5, #6).
+    ///
+    /// ATENÇÃO: drena até o EOF do transporte — é terminal. Numa sessão
+    /// streaming o CLI só manda EOF quando o stdin fecha, então use
+    /// `receive_response()`/`next_message()` para consumir turno a turno.
+    pub async fn receive_messages(&mut self) -> Result<Vec<Message>> {
+        if self._query.is_none() {
+            return Err(ClaudeSDKError::cli_connection(
+                "Not connected. Call connect() first.",
+            ));
+        }
+
+        let raw_messages = if let Some(ref mut query) = self._query {
+            query.receive_messages().await?
+        } else {
+            return Ok(Vec::new());
+        };
+
+        let mut messages = Vec::new();
+        for data in &raw_messages {
+            if let Ok(Some(parsed)) = parse_message(data) {
+                messages.push(parsed);
             }
-        })
+        }
+
+        Ok(messages)
     }
 
-    /// Send a message and stream only text deltas (for simple output).
-    pub fn send_message_text_stream(
-        &self,
-        prompt: &str,
-    ) -> Pin<Box<dyn Stream<Item = Result<String>> + Send>> {
-        let inner = self.send_message_stream(prompt);
-        Box::pin(async_stream::stream! {
-            tokio::pin!(inner);
-            while let Some(event) = inner.next().await {
-                match event {
-                    Ok(AgenticEvent::StreamEvent { event: StreamUpdate::TextDelta { text, .. }, .. }) => {
-                        yield Ok(text);
-                    }
-                    Err(e) => {
-                        yield Err(e);
-                        break;
-                    }
-                    _ => {}
-                }
+    /// Recebe as mensagens do turno atual, incluindo o `ResultMessage` final.
+    ///
+    /// Para de ler assim que o `result` chega — nunca espera EOF, nunca fecha o
+    /// stdin. A sessão continua viva, então o próximo `query()` é atendido no
+    /// mesmo processo do CLI (é isso que sustenta multi-turno e o `resume`).
+    ///
+    /// Se o transporte terminar antes de um `result`, devolve o que chegou.
+    pub async fn receive_response(&mut self) -> Result<Vec<Message>> {
+        let mut result = Vec::new();
+        while let Some(msg) = self.next_message().await? {
+            let is_result = matches!(&msg, Message::Result(_));
+            result.push(msg);
+            if is_result {
+                break;
             }
-        })
+        }
+        Ok(result)
     }
 
-    /// Get a reference to the underlying AnthropicClient.
-    pub fn anthropic_client(&self) -> &AnthropicClient {
-        &self.anthropic_client
+    /// Legacy send_message — combines query + receive_response.
+    pub async fn send_message(&mut self, message: &str) -> Result<Vec<Message>> {
+        self.query(message).await?;
+        self.receive_response().await
     }
 
-    /// Get accumulated messages from previous turns.
-    pub fn messages(&self) -> &[ApiMessage] {
-        &self.messages
+    /// Get server initialization info (#5).
+    pub fn get_server_info(&self) -> Option<&serde_json::Value> {
+        self._query.as_ref().and_then(|q| q.get_server_info())
     }
 
-    /// Set messages for session resume. Pass messages from a previous session
-    /// to continue the conversation from where it left off.
-    pub fn set_messages(&mut self, messages: Vec<ApiMessage>) {
-        self.messages = messages;
+    pub async fn disconnect(&mut self) -> Result<()> {
+        if let Some(ref mut query) = self._query {
+            let _ = query.close().await;
+        }
+        self._query = None;
+        self._transport = None;
+        if let Some(m) = self._materialized.take() {
+            let _ = m.cleanup().await;
+        }
+
+        Ok(())
     }
 
-    /// Append messages (e.g. after collecting events from a stream).
-    pub fn append_messages(&mut self, messages: Vec<ApiMessage>) {
-        self.messages.extend(messages);
+    pub async fn interrupt(&mut self) -> Result<()> {
+        if let Some(ref mut query) = self._query {
+            query.interrupt().await
+        } else {
+            Err(ClaudeSDKError::cli_connection(
+                "Not connected. Call connect() first.",
+            ))
+        }
+    }
+
+    pub async fn get_mcp_status(&mut self) -> Result<McpStatusResponse> {
+        if let Some(ref mut query) = self._query {
+            let result = query.get_mcp_status().await?;
+            serde_json::from_value(result)
+                .map_err(|e| ClaudeSDKError::sdk(format!("Failed to parse MCP status: {e}")))
+        } else {
+            Err(ClaudeSDKError::cli_connection(
+                "Not connected. Call connect() first.",
+            ))
+        }
+    }
+
+    pub async fn get_context_usage(&mut self) -> Result<ContextUsageResponse> {
+        if let Some(ref mut query) = self._query {
+            let result = query.get_context_usage().await?;
+            serde_json::from_value(result)
+                .map_err(|e| ClaudeSDKError::sdk(format!("Failed to parse context usage: {e}")))
+        } else {
+            Err(ClaudeSDKError::cli_connection(
+                "Not connected. Call connect() first.",
+            ))
+        }
+    }
+
+    pub async fn set_permission_mode(&mut self, mode: PermissionMode) -> Result<()> {
+        if let Some(ref mut query) = self._query {
+            query.set_permission_mode(mode).await
+        } else {
+            Err(ClaudeSDKError::cli_connection(
+                "Not connected. Call connect() first.",
+            ))
+        }
+    }
+
+    pub async fn set_model(&mut self, model: Option<&str>) -> Result<()> {
+        if let Some(ref mut query) = self._query {
+            query.set_model(model).await
+        } else {
+            Err(ClaudeSDKError::cli_connection(
+                "Not connected. Call connect() first.",
+            ))
+        }
+    }
+
+    pub async fn rewind_files(&mut self, user_message_id: &str) -> Result<()> {
+        if let Some(ref mut query) = self._query {
+            query.rewind_files(user_message_id).await
+        } else {
+            Err(ClaudeSDKError::cli_connection(
+                "Not connected. Call connect() first.",
+            ))
+        }
+    }
+
+    pub async fn reconnect_mcp_server(&mut self, server_name: &str) -> Result<()> {
+        if let Some(ref mut query) = self._query {
+            query.reconnect_mcp_server(server_name).await
+        } else {
+            Err(ClaudeSDKError::cli_connection(
+                "Not connected. Call connect() first.",
+            ))
+        }
+    }
+
+    pub async fn toggle_mcp_server(&mut self, server_name: &str, enabled: bool) -> Result<()> {
+        if let Some(ref mut query) = self._query {
+            query.toggle_mcp_server(server_name, enabled).await
+        } else {
+            Err(ClaudeSDKError::cli_connection(
+                "Not connected. Call connect() first.",
+            ))
+        }
+    }
+
+    pub async fn stop_task(&mut self, task_id: &str) -> Result<()> {
+        if let Some(ref mut query) = self._query {
+            query.stop_task(task_id).await
+        } else {
+            Err(ClaudeSDKError::cli_connection(
+                "Not connected. Call connect() first.",
+            ))
+        }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_client_default_options() {
-        let opts = ClaudeSDKClientOptions::default();
-        assert!(opts.api_key.is_none());
-        assert!(opts.model.is_none());
-        assert!(opts.max_turns.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_client_creation() {
-        let client = ClaudeSDKClient::new(ClaudeSDKClientOptions {
-            api_key: Some("test-key".to_string()),
-            model: Some("claude-haiku-3-20240307".to_string()),
-            max_tokens: Some(4096),
-            ..Default::default()
-        }).await;
-
-        assert_eq!(client.options.model, "claude-haiku-3-20240307");
-        assert_eq!(client.options.max_tokens, 4096);
+impl ClaudeAgentOptions {
+    /// Copia as options preservando tudo que é copiável.
+    ///
+    /// `ClaudeAgentOptions` não pode derivar `Clone`: `session_store` é um
+    /// `Box<dyn SessionStore>` (objeto de trait sem `Clone`) e `hooks` carrega
+    /// closures que o SDK precisa manter registradas em um único dono. Trocar
+    /// esses campos por `Arc` quebraria a API pública de quem já constrói as
+    /// options com `Box::new(...)`, então a saída foi expor este helper: quem
+    /// monta um transporte customizado deixa de precisar construir as options
+    /// duas vezes.
+    ///
+    /// O que NÃO vem junto (fica `None`): `can_use_tool`, `hooks`,
+    /// `session_store` e `stderr`. Reatribua-os na cópia se precisar.
+    pub fn clone_without_callbacks(&self) -> Self {
+        Self {
+            tools: self.tools.clone(),
+            allowed_tools: self.allowed_tools.clone(),
+            system_prompt: self.system_prompt.clone(),
+            mcp_servers: match &self.mcp_servers {
+                McpServersConfig::Dict(d) => McpServersConfig::Dict(d.clone()),
+                McpServersConfig::Path(p) => McpServersConfig::Path(p.clone()),
+            },
+            // Clone de `SdkMcpRegistry` é um mapa NOVO com os mesmos `Arc`: a
+            // cópia declara os mesmos servidores sem passar a compartilhar
+            // estado mutável com o original.
+            sdk_mcp_servers: self.sdk_mcp_servers.clone(),
+            strict_mcp_config: self.strict_mcp_config,
+            permission_mode: self.permission_mode.clone(),
+            continue_conversation: self.continue_conversation,
+            resume: self.resume.clone(),
+            session_id: self.session_id.clone(),
+            name: self.name.clone(),
+            max_turns: self.max_turns,
+            max_budget_usd: self.max_budget_usd,
+            disallowed_tools: self.disallowed_tools.clone(),
+            model: self.model.clone(),
+            fallback_model: self.fallback_model.clone(),
+            betas: self.betas.clone(),
+            permission_prompt_tool_name: self.permission_prompt_tool_name.clone(),
+            cwd: self.cwd.clone(),
+            cli_path: self.cli_path.clone(),
+            settings: self.settings.clone(),
+            add_dirs: self.add_dirs.clone(),
+            env: self.env.clone(),
+            extra_args: self.extra_args.clone(),
+            max_buffer_size: self.max_buffer_size,
+            can_use_tool: None,
+            hooks: None, // hooks contain Arc<dyn Fn> — not cloneable via simple Clone
+            user: self.user.clone(),
+            include_partial_messages: self.include_partial_messages,
+            fork_session: self.fork_session,
+            agents: self.agents.clone(),
+            setting_sources: self.setting_sources.clone(),
+            skills: self.skills.clone(),
+            sandbox: self.sandbox.clone(),
+            plugins: self.plugins.clone(),
+            max_thinking_tokens: self.max_thinking_tokens,
+            thinking: self.thinking.clone(),
+            effort: self.effort.clone(),
+            output_format: self.output_format.clone(),
+            enable_file_checkpointing: self.enable_file_checkpointing,
+            session_store: None, // SessionStore is not Clone
+            session_store_flush: self.session_store_flush.clone(),
+            load_timeout_ms: self.load_timeout_ms,
+            task_budget: self.task_budget.clone(),
+            stderr: None,
+        }
     }
 }
