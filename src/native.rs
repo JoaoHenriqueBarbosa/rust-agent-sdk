@@ -508,7 +508,18 @@ async fn engine_main(
                 .unwrap_or_else(|| crate::api::client::DEFAULT_MODEL.to_string())
         };
 
-        let executor = build_executor(&options, &shared, &config, &session_id, &transcript_path).await;
+        let tool_results_dir = storage
+            .session_path(&session_id)
+            .with_extension("tool-results");
+        let executor = build_executor(
+            &options,
+            &shared,
+            &config,
+            &session_id,
+            &transcript_path,
+            tool_results_dir,
+        )
+        .await;
         let loop_options = AgenticLoopOptions {
             model,
             system_prompt: system_prompt_blocks(&options),
@@ -683,6 +694,7 @@ async fn build_executor(
     config: &EngineConfig,
     session_id: &str,
     transcript_path: &str,
+    tool_results_dir: std::path::PathBuf,
 ) -> ToolExecutor {
     let mut registry = ToolRegistry::new();
     match &options.tools {
@@ -837,6 +849,7 @@ async fn build_executor(
         permission_mode: crate::types::PermissionMode::Default,
         permission_callback: Some(permission_callback),
         post_tool_use: Some(post_tool_use),
+        tool_results_dir: Some(tool_results_dir),
     };
     ToolExecutor::new(registry, context)
 }

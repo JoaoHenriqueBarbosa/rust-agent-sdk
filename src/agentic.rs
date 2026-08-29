@@ -580,6 +580,37 @@ impl AgenticLoop {
                     &self.tool_executor.registry.api_definitions(),
                     state.usage_anchor,
                 );
+                let mut context_token_count = context_token_count;
+                if state.auto_compact_tracking.consecutive_failures < 3
+                    && self.auto_compact.should_compact(context_token_count)
+                {
+                    // Primeiro o microcompact, que custa zero: limpa
+                    // tool_results antigos e reconta. Só se AINDA estourar o
+                    // threshold é que o compact completo (uma chamada de LLM
+                    // inteira) roda.
+                    let cleared = crate::compact::micro::microcompact_messages(
+                        &mut messages_for_query,
+                        crate::compact::micro::MICROCOMPACT_KEEP_RECENT,
+                    );
+                    if cleared > 0 {
+                        // O histórico mudou: a âncora de usage ficou obsoleta.
+                        state.usage_anchor = None;
+                        context_token_count = hybrid_token_count(
+                            &messages_for_query,
+                            &self.options.system_prompt,
+                            &self.tool_executor.registry.api_definitions(),
+                            None,
+                        );
+                        yield Ok(AgenticEvent::System {
+                            subtype: "microcompact".to_string(),
+                            data: serde_json::json!({
+                                "cleared_tool_results": cleared,
+                            }),
+                            uuid: new_uuid(),
+                            session_id: sid.clone(),
+                        });
+                    }
+                }
                 if state.auto_compact_tracking.consecutive_failures < 3
                     && self.auto_compact.should_compact(context_token_count)
                 {
@@ -703,6 +734,11 @@ impl AgenticLoop {
                 // Port: let attemptWithFallback = true;
                 //       while (attemptWithFallback) { attemptWithFallback = false; try { ... } }
                 let mut attempt_with_fallback = true;
+                // Erro no MEIO do stream (conexão caindo, gateway instável)
+                // re-tenta a chamada inteira em vez de perder o turno — um
+                // tool_use quase completo descartado custa um turno de LLM.
+                let mut stream_retries = 0u32;
+                const MAX_STREAM_RETRIES: u32 = 3;
 
                 while attempt_with_fallback {
                     attempt_with_fallback = false;
@@ -855,7 +891,23 @@ impl AgenticLoop {
                                 }
 
                                 if !attempt_with_fallback {
-                                    stream_error = Some(err_str);
+                                    if stream_retries < MAX_STREAM_RETRIES {
+                                        stream_retries += 1;
+                                        // Backoff curto e crescente; o retry
+                                        // de ABERTURA já mora no client — este
+                                        // cobre a conexão que morreu no meio.
+                                        tokio::time::sleep(std::time::Duration::from_millis(
+                                            500 * u64::from(stream_retries),
+                                        ))
+                                        .await;
+                                        assistant_messages.clear();
+                                        tool_use_blocks.clear();
+                                        needs_follow_up = false;
+                                        current_assistant_in_stream = None;
+                                        attempt_with_fallback = true;
+                                    } else {
+                                        stream_error = Some(err_str);
+                                    }
                                 }
                                 break;
                             }

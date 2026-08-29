@@ -75,6 +75,11 @@ pub struct ToolContext {
     pub permission_callback: Option<PermissionCallbackFn>,
     /// Observer called after each tool execution (PostToolUse hook channel).
     pub post_tool_use: Option<PostToolUseFn>,
+    /// Diretório onde resultados de tool GRANDES são persistidos por inteiro
+    /// (o maybePersistLargeToolResult do CLI): o bloco vira um
+    /// `<persisted-output>` com preview + caminho, e o modelo relê com Read.
+    /// `None` desliga a persistência e cai no truncamento.
+    pub tool_results_dir: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -84,6 +89,7 @@ impl std::fmt::Debug for ToolContext {
             .field("permission_mode", &self.permission_mode)
             .field("has_permission_callback", &self.permission_callback.is_some())
             .field("has_post_tool_use", &self.post_tool_use.is_some())
+            .field("tool_results_dir", &self.tool_results_dir)
             .finish()
     }
 }
@@ -95,6 +101,7 @@ impl Default for ToolContext {
             permission_mode: PermissionMode::Default,
             permission_callback: None,
             post_tool_use: None,
+            tool_results_dir: None,
         }
     }
 }
@@ -475,8 +482,15 @@ impl ToolExecutor {
 
         let result = tool.execute(tool_use.input.clone(), &self.context).await;
 
-        // Truncate large results
-        let result = truncate_result(result);
+        // Resultado grande: persiste por inteiro e entrega preview + caminho
+        // (o modelo relê com Read); sem diretório, trunca como antes. A
+        // decisão fica CONGELADA por construção — acontece uma vez, na
+        // execução, e o bloco persistido nunca muda entre turnos (é o que
+        // preserva o prompt cache).
+        let result = match &self.context.tool_results_dir {
+            Some(dir) => persist_large_result(result, &tool_use, dir).await,
+            None => truncate_result(result),
+        };
 
         self.observe_post_tool_use(ToolExecutionResult {
             tool_use_id: tool_use.id.clone(),
@@ -591,6 +605,64 @@ fn validate_tool_input(input: &serde_json::Value, schema: &serde_json::Value) ->
     Ok(())
 }
 
+/// Limiar de persistência em disco (DEFAULT_MAX_RESULT_SIZE_CHARS do CLI).
+const PERSIST_THRESHOLD: usize = 50_000;
+
+/// Tamanho do preview inline de um resultado persistido.
+const PERSIST_PREVIEW_BYTES: usize = 2_000;
+
+/// Persiste em disco o texto de um resultado acima do limiar e o substitui
+/// por um `<persisted-output>` com preview e o caminho do arquivo completo.
+/// Falha de I/O cai no truncamento — perder o miolo é pior que truncar, mas
+/// falhar a tool inteira por disco cheio seria pior ainda.
+async fn persist_large_result(
+    mut result: ToolResult,
+    tool_use: &crate::api::streaming::ToolUseBlock,
+    dir: &std::path::Path,
+) -> ToolResult {
+    for content in &mut result.content {
+        let ToolResultContent::Text(text) = content else {
+            continue;
+        };
+        if text.len() <= PERSIST_THRESHOLD {
+            continue;
+        }
+        let file_name = format!("{}.txt", sanitize_tool_use_id(&tool_use.id));
+        let path = dir.join(file_name);
+        let written = async {
+            tokio::fs::create_dir_all(dir).await?;
+            tokio::fs::write(&path, text.as_bytes()).await
+        }
+        .await;
+        match written {
+            Ok(()) => {
+                let mut cut = PERSIST_PREVIEW_BYTES.min(text.len());
+                while cut > 0 && !text.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                let preview = &text[..cut];
+                *text = format!(
+                    "<persisted-output>\nOutput too large ({} bytes). Full output saved to: {}\nUse the Read tool to access the complete output.\n\nPreview (first {} bytes):\n{preview}\n</persisted-output>",
+                    text.len(),
+                    path.display(),
+                    cut,
+                );
+            }
+            Err(_) => {
+                return truncate_result(result);
+            }
+        }
+    }
+    result
+}
+
+/// O id vira nome de arquivo: qualquer coisa fora de [A-Za-z0-9_-] cai fora.
+fn sanitize_tool_use_id(id: &str) -> String {
+    id.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect()
+}
+
 /// Truncate text results that exceed MAX_RESULT_SIZE.
 fn truncate_result(mut result: ToolResult) -> ToolResult {
     for content in &mut result.content {
@@ -642,6 +714,78 @@ mod tests {
         async fn execute(&self, _input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
             ToolResult::text(format!("executed {}", self.name))
         }
+    }
+
+    struct BigOutputTool;
+
+    #[async_trait]
+    impl Tool for BigOutputTool {
+        fn name(&self) -> &str { "Big" }
+        fn description(&self) -> &str { "Devolve um resultado enorme" }
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        async fn execute(&self, _input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+            ToolResult::text(format!("início-{}—fim", "é".repeat(80_000)))
+        }
+    }
+
+    #[tokio::test]
+    async fn large_result_is_persisted_with_preview_and_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(BigOutputTool));
+        let ctx = ToolContext {
+            permission_mode: PermissionMode::BypassPermissions,
+            tool_results_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let executor = ToolExecutor::new(registry, ctx);
+        let results = executor
+            .execute_all(vec![crate::api::streaming::ToolUseBlock {
+                id: "toolu_big1".to_string(),
+                name: "Big".to_string(),
+                input: serde_json::json!({}),
+            }])
+            .await;
+
+        let ToolResultContent::Text(text) = &results[0].result.content[0] else {
+            panic!("texto esperado");
+        };
+        // Contrato: o bloco vira um persisted-output com preview e o caminho
+        // do arquivo COMPLETO — o miolo não se perde, o modelo relê com Read.
+        assert!(text.contains("<persisted-output>"), "{text}");
+        assert!(text.contains("Preview"), "{text}");
+        let file = dir.path().join("toolu_big1.txt");
+        assert!(text.contains(&file.display().to_string()));
+        let full = std::fs::read_to_string(&file).unwrap();
+        assert!(full.starts_with("início-"));
+        assert!(full.ends_with("—fim"));
+        // Contrato: preview corta em fronteira de char mesmo com multibyte.
+        assert!(text.len() < 5_000);
+    }
+
+    #[tokio::test]
+    async fn without_a_dir_the_large_result_is_truncated() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(BigOutputTool));
+        let ctx = ToolContext {
+            permission_mode: PermissionMode::BypassPermissions,
+            ..Default::default()
+        };
+        let executor = ToolExecutor::new(registry, ctx);
+        let results = executor
+            .execute_all(vec![crate::api::streaming::ToolUseBlock {
+                id: "toolu_big2".to_string(),
+                name: "Big".to_string(),
+                input: serde_json::json!({}),
+            }])
+            .await;
+        let ToolResultContent::Text(text) = &results[0].result.content[0] else {
+            panic!("texto esperado");
+        };
+        // Contrato: 80k de 'é' (2 bytes) truncado sem pânico de UTF-8.
+        assert!(text.contains("truncated"));
     }
 
     #[test]

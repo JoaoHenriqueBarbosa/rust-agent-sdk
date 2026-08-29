@@ -205,10 +205,10 @@ impl StreamAccumulator {
 
             StreamEvent::ContentBlockDelta { index, delta } => {
                 if index >= self.blocks.len() {
-                    return Err(ClaudeSDKError::message_parse(
-                        format!("Delta for unknown block index {index}"),
-                        None,
-                    ));
+                    // Gateways não-oficiais pulam ou reordenam
+                    // content_block_start; um delta órfão não pode matar a
+                    // sessão — é ignorado, como o CLI tolera.
+                    return Ok(None);
                 }
 
                 let update = match (&mut self.blocks[index], delta) {
