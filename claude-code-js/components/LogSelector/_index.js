@@ -1,0 +1,22 @@
+// Split from: LogSelector.js
+// 18 declarations extracted
+
+// Shared: _shared.js (3 lines)
+// function normalizeAndTruncateToWidth: normalizeAndTruncateToWidth.js (4 lines)
+// function formatSnippet: formatSnippet.js (7 lines)
+// function extractSnippet: extractSnippet.js (11 lines)
+// function buildLogLabel: buildLogLabel.js (8 lines)
+// function buildLogMetadata: buildLogMetadata.js (7 lines)
+// function LogSelector: LogSelector.js (1019 lines)
+// function _temp714: _temp714.js (3 lines)
+// function _temp615: _temp615.js (3 lines)
+// function _temp518: _temp518.js (7 lines)
+// function _temp426: _temp426.js (7 lines)
+// function _temp332: _temp332.js (6 lines)
+// function _temp249: _temp249.js (12 lines)
+// function _temp130: _temp130.js (3 lines)
+// function extractSearchableText: extractSearchableText.js (18 lines)
+// function buildSearchableText: buildSearchableText.js (4 lines)
+// function groupLogsBySessionId: groupLogsBySessionId.js (14 lines)
+// function getUniqueTags: getUniqueTags.js (7 lines)
+// var init_LogSelector: init_LogSelector.js (28 lines)

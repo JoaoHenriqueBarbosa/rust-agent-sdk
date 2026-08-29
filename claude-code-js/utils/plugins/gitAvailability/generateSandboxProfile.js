@@ -1,0 +1,180 @@
+// function: generateSandboxProfile
+function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksProxyPort, needsNetworkRestriction, allowUnixSockets, allowAllUnixSockets, allowLocalBinding, allowMachLookup, allowPty, allowGitConfig = !1, enableWeakerNetworkIsolation = !1, logTag }) {
+  let profile7 = [
+    "(version 1)",
+    `(deny default (with message "${logTag}"))`,
+    "",
+    `; LogTag: ${logTag}`,
+    "",
+    "; Essential permissions - based on Chrome sandbox policy",
+    "; Process permissions",
+    "(allow process-exec)",
+    "(allow process-fork)",
+    "(allow process-info* (target same-sandbox))",
+    "(allow signal (target same-sandbox))",
+    "(allow mach-priv-task-port (target same-sandbox))",
+    "",
+    "; User preferences",
+    "(allow user-preference-read)",
+    "",
+    "; Mach IPC - specific services only (no wildcard)",
+    "(allow mach-lookup",
+    '  (global-name "com.apple.audio.systemsoundserver")',
+    '  (global-name "com.apple.distributed_notifications@Uv3")',
+    '  (global-name "com.apple.FontObjectsServer")',
+    '  (global-name "com.apple.fonts")',
+    '  (global-name "com.apple.logd")',
+    '  (global-name "com.apple.lsd.mapdb")',
+    '  (global-name "com.apple.PowerManagement.control")',
+    '  (global-name "com.apple.system.logger")',
+    '  (global-name "com.apple.system.notification_center")',
+    '  (global-name "com.apple.system.opendirectoryd.libinfo")',
+    '  (global-name "com.apple.system.opendirectoryd.membership")',
+    '  (global-name "com.apple.bsd.dirhelper")',
+    '  (global-name "com.apple.securityd.xpc")',
+    '  (global-name "com.apple.coreservices.launchservicesd")',
+    ")",
+    "",
+    ...enableWeakerNetworkIsolation ? [
+      "; trustd.agent - needed for Go TLS certificate verification (weaker network isolation)",
+      '(allow mach-lookup (global-name "com.apple.trustd.agent"))'
+    ] : [],
+    ...allowMachLookup && allowMachLookup.length > 0 ? [
+      "; User-specified XPC/Mach services",
+      ...allowMachLookup.map((name3) => name3.endsWith("*") ? `(allow mach-lookup (global-name-prefix ${escapePath(name3.slice(0, -1))}))` : `(allow mach-lookup (global-name ${escapePath(name3)}))`)
+    ] : [],
+    "",
+    "; POSIX IPC - shared memory",
+    "(allow ipc-posix-shm)",
+    "",
+    "; POSIX IPC - semaphores for Python multiprocessing",
+    "(allow ipc-posix-sem)",
+    "",
+    "; IOKit - specific operations only",
+    "(allow iokit-open",
+    '  (iokit-registry-entry-class "IOSurfaceRootUserClient")',
+    '  (iokit-registry-entry-class "RootDomainUserClient")',
+    '  (iokit-user-client-class "IOSurfaceSendRight")',
+    ")",
+    "",
+    "; IOKit properties",
+    "(allow iokit-get-properties)",
+    "",
+    "; Specific safe system-sockets, doesn't allow network access",
+    "(allow system-socket (require-all (socket-domain AF_SYSTEM) (socket-protocol 2)))",
+    "",
+    "; sysctl - specific sysctls only",
+    "(allow sysctl-read",
+    '  (sysctl-name "hw.activecpu")',
+    '  (sysctl-name "hw.busfrequency_compat")',
+    '  (sysctl-name "hw.byteorder")',
+    '  (sysctl-name "hw.cacheconfig")',
+    '  (sysctl-name "hw.cachelinesize_compat")',
+    '  (sysctl-name "hw.cpufamily")',
+    '  (sysctl-name "hw.cpufrequency")',
+    '  (sysctl-name "hw.cpufrequency_compat")',
+    '  (sysctl-name "hw.cputype")',
+    '  (sysctl-name "hw.l1dcachesize_compat")',
+    '  (sysctl-name "hw.l1icachesize_compat")',
+    '  (sysctl-name "hw.l2cachesize_compat")',
+    '  (sysctl-name "hw.l3cachesize_compat")',
+    '  (sysctl-name "hw.logicalcpu")',
+    '  (sysctl-name "hw.logicalcpu_max")',
+    '  (sysctl-name "hw.machine")',
+    '  (sysctl-name "hw.memsize")',
+    '  (sysctl-name "hw.ncpu")',
+    '  (sysctl-name "hw.nperflevels")',
+    '  (sysctl-name "hw.packages")',
+    '  (sysctl-name "hw.pagesize_compat")',
+    '  (sysctl-name "hw.pagesize")',
+    '  (sysctl-name "hw.physicalcpu")',
+    '  (sysctl-name "hw.physicalcpu_max")',
+    '  (sysctl-name "hw.tbfrequency_compat")',
+    '  (sysctl-name "hw.vectorunit")',
+    '  (sysctl-name "kern.argmax")',
+    '  (sysctl-name "kern.bootargs")',
+    '  (sysctl-name "kern.hostname")',
+    '  (sysctl-name "kern.maxfiles")',
+    '  (sysctl-name "kern.maxfilesperproc")',
+    '  (sysctl-name "kern.maxproc")',
+    '  (sysctl-name "kern.ngroups")',
+    '  (sysctl-name "kern.osproductversion")',
+    '  (sysctl-name "kern.osrelease")',
+    '  (sysctl-name "kern.ostype")',
+    '  (sysctl-name "kern.osvariant_status")',
+    '  (sysctl-name "kern.osversion")',
+    '  (sysctl-name "kern.secure_kernel")',
+    '  (sysctl-name "kern.tcsm_available")',
+    '  (sysctl-name "kern.tcsm_enable")',
+    '  (sysctl-name "kern.usrstack64")',
+    '  (sysctl-name "kern.version")',
+    '  (sysctl-name "kern.willshutdown")',
+    '  (sysctl-name "machdep.cpu.brand_string")',
+    '  (sysctl-name "machdep.ptrauth_enabled")',
+    '  (sysctl-name "security.mac.lockdown_mode_state")',
+    '  (sysctl-name "sysctl.proc_cputype")',
+    '  (sysctl-name "vm.loadavg")',
+    '  (sysctl-name-prefix "hw.optional.arm")',
+    '  (sysctl-name-prefix "hw.optional.arm.")',
+    '  (sysctl-name-prefix "hw.optional.armv8_")',
+    '  (sysctl-name-prefix "hw.perflevel")',
+    '  (sysctl-name-prefix "kern.proc.all")',
+    '  (sysctl-name-prefix "kern.proc.pgrp.")',
+    '  (sysctl-name-prefix "kern.proc.pid.")',
+    '  (sysctl-name-prefix "machdep.cpu.")',
+    '  (sysctl-name-prefix "net.routetable.")',
+    ")",
+    "",
+    "; V8 thread calculations",
+    "(allow sysctl-write",
+    '  (sysctl-name "kern.tcsm_enable")',
+    ")",
+    "",
+    "; Distributed notifications",
+    "(allow distributed-notification-post)",
+    "",
+    "; Specific mach-lookup permissions for security operations",
+    '(allow mach-lookup (global-name "com.apple.SecurityServer"))',
+    "",
+    "; File I/O on device files",
+    '(allow file-ioctl (literal "/dev/null"))',
+    '(allow file-ioctl (literal "/dev/zero"))',
+    '(allow file-ioctl (literal "/dev/random"))',
+    '(allow file-ioctl (literal "/dev/urandom"))',
+    '(allow file-ioctl (literal "/dev/dtracehelper"))',
+    '(allow file-ioctl (literal "/dev/tty"))',
+    "",
+    "(allow file-ioctl file-read-data file-write-data",
+    "  (require-all",
+    '    (literal "/dev/null")',
+    "    (vnode-type CHARACTER-DEVICE)",
+    "  )",
+    ")",
+    ""
+  ];
+  if (profile7.push("; Network"), !needsNetworkRestriction)
+    profile7.push("(allow network*)");
+  else {
+    if (allowLocalBinding)
+      profile7.push('(allow network-bind (local ip "*:*"))'), profile7.push('(allow network-inbound (local ip "*:*"))'), profile7.push('(allow network-outbound (local ip "*:*"))');
+    if (allowAllUnixSockets)
+      profile7.push("(allow system-socket (socket-domain AF_UNIX))"), profile7.push('(allow network-bind (local unix-socket (path-regex #"^/")))'), profile7.push('(allow network-outbound (remote unix-socket (path-regex #"^/")))');
+    else if (allowUnixSockets && allowUnixSockets.length > 0) {
+      profile7.push("(allow system-socket (socket-domain AF_UNIX))");
+      for (let socketPath of allowUnixSockets) {
+        let normalizedPath = normalizePathForSandbox(socketPath);
+        profile7.push(`(allow network-bind (local unix-socket (subpath ${escapePath(normalizedPath)})))`), profile7.push(`(allow network-outbound (remote unix-socket (subpath ${escapePath(normalizedPath)})))`);
+      }
+    }
+    if (httpProxyPort !== void 0)
+      profile7.push(`(allow network-bind (local ip "localhost:${httpProxyPort}"))`), profile7.push(`(allow network-inbound (local ip "localhost:${httpProxyPort}"))`), profile7.push(`(allow network-outbound (remote ip "localhost:${httpProxyPort}"))`);
+    if (socksProxyPort !== void 0)
+      profile7.push(`(allow network-bind (local ip "localhost:${socksProxyPort}"))`), profile7.push(`(allow network-inbound (local ip "localhost:${socksProxyPort}"))`), profile7.push(`(allow network-outbound (remote ip "localhost:${socksProxyPort}"))`);
+  }
+  profile7.push("");
+  let writeAllowPaths = writeConfig?.allowOnly;
+  if (profile7.push("; File read"), profile7.push(...generateReadRules(readConfig, logTag, writeAllowPaths)), profile7.push(""), profile7.push("; File write"), profile7.push(...generateWriteRules(writeConfig, logTag, allowGitConfig)), allowPty)
+    profile7.push(""), profile7.push("; Pseudo-terminal (pty) support"), profile7.push("(allow pseudo-tty)"), profile7.push("(allow file-ioctl"), profile7.push('  (literal "/dev/ptmx")'), profile7.push('  (regex #"^/dev/ttys")'), profile7.push(")"), profile7.push("(allow file-read* file-write*"), profile7.push('  (literal "/dev/ptmx")'), profile7.push('  (regex #"^/dev/ttys")'), profile7.push(")");
+  return profile7.join(`
+`);
+}

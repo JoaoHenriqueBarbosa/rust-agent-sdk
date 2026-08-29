@@ -1,0 +1,38 @@
+// var: init_dist_es48
+var init_dist_es48 = __esm(() => {
+  init_abort6();
+  init_auth10();
+  init_blob_payload_input_types5();
+  init_checksum13();
+  init_client11();
+  init_command11();
+  init_connection5();
+  init_crypto6();
+  init_encode5();
+  init_endpoint5();
+  init_endpoints5();
+  init_eventStream5();
+  init_extensions17();
+  init_http7();
+  init_httpHandlerInitialization5();
+  init_identity11();
+  init_logger5();
+  init_pagination8();
+  init_profile5();
+  init_response5();
+  init_retry5();
+  init_serde5();
+  init_shapes5();
+  init_signature5();
+  init_stream6();
+  init_streaming_blob_common_types5();
+  init_streaming_blob_payload_input_types5();
+  init_streaming_blob_payload_output_types5();
+  init_transfer5();
+  init_client_payload_blob_type_narrow5();
+  init_no_undefined5();
+  init_type_transform5();
+  init_uri5();
+  init_util6();
+  init_waiter5();
+});

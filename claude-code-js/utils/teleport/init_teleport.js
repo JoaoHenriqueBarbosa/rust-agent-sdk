@@ -1,0 +1,37 @@
+// var: init_teleport
+var init_teleport = __esm(() => {
+  init_axios2();
+  init_source();
+  init_state();
+  init_policyLimits();
+  init_v4();
+  init_TeleportError();
+  init_oauth();
+  init_KeybindingProviderSetup();
+  init_claude();
+  init_sessionIngress();
+  init_client8();
+  init_AppState();
+  init_auth14();
+  init_preconditions();
+  init_conversationRecovery();
+  init_cwd2();
+  init_debug();
+  init_detectRepository();
+  init_envUtils();
+  init_errors();
+  init_execFileNoThrow();
+  init_format();
+  init_git();
+  init_json();
+  init_log3();
+  init_messages3();
+  init_model();
+  init_sessionStorage();
+  init_settings2();
+  init_slowOperations();
+  init_api2();
+  init_environments();
+  init_gitBundle();
+  jsx_dev_runtime119 = __toESM(require_react_jsx_dev_runtime_development(), 1);
+});

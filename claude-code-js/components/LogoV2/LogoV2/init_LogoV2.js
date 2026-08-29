@@ -1,0 +1,33 @@
+// var: init_LogoV2
+var init_LogoV2 = __esm(() => {
+  init_ink2();
+  init_useTerminalSize();
+  init_stringWidth();
+  init_logoV2Utils();
+  init_format();
+  init_file();
+  init_Clawd();
+  init_FeedColumn();
+  init_feedConfigs();
+  init_config4();
+  init_settings2();
+  init_debug();
+  init_projectOnboardingState();
+  init_CondensedLogo();
+  init_OffscreenFreeze();
+  init_releaseNotes();
+  init_dumpPrompts();
+  init_envUtils();
+  init_startupProfiler();
+  init_EmergencyTip();
+  init_VoiceModeNotice();
+  init_Opus1mMergeNotice();
+  init_sandbox_adapter();
+  init_GuestPassesUpsell();
+  init_OverageCreditUpsell();
+  init_AppState();
+  init_effort();
+  init_useMainLoopModel();
+  init_model();
+  import_compiler_runtime205 = __toESM(require_react_compiler_runtime_development(), 1), import_react150 = __toESM(require_react_development(), 1), jsx_dev_runtime259 = __toESM(require_react_jsx_dev_runtime_development(), 1), ChannelsNoticeModule = (init_ChannelsNotice(), __toCommonJS(exports_ChannelsNotice));
+});

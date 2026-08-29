@@ -1,0 +1,34 @@
+// var: init_ExitPlanModePermissionRequest
+var init_ExitPlanModePermissionRequest = __esm(() => {
+  init_figures();
+  init_notifications();
+  init_AppState();
+  init_state();
+  init_generateSessionName();
+  init_ultraplan();
+  init_ink2();
+  init_constants3();
+  init_agentSwarmsEnabled();
+  init_context();
+  init_editor();
+  init_file();
+  init_ide();
+  init_log3();
+  init_messageQueueManager();
+  init_messages3();
+  init_model();
+  init_PermissionMode();
+  init_permissionSetup();
+  init_planModeV2();
+  init_plans();
+  init_promptEditor();
+  init_sessionStorage();
+  init_settings2();
+  init_CustomSelect();
+  init_Markdown();
+  init_PermissionDialog();
+  init_PermissionRuleExplanation();
+  init_imageResizer();
+  init_imageStore();
+  import_react216 = __toESM(require_react_development(), 1), jsx_dev_runtime388 = __toESM(require_react_jsx_dev_runtime_development(), 1);
+});

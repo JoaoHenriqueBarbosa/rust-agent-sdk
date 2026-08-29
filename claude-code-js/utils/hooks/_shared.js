@@ -1,0 +1,48 @@
+// Shared module state and imports
+// Original: src/utils/hooks.ts
+__export(exports_hooks2, {
+  shouldSkipHookDueToTrust: () => shouldSkipHookDueToTrust,
+  hasWorktreeCreateHook: () => hasWorktreeCreateHook,
+  hasInstructionsLoadedHook: () => hasInstructionsLoadedHook,
+  hasBlockingResult: () => hasBlockingResult,
+  getUserPromptSubmitHookBlockingMessage: () => getUserPromptSubmitHookBlockingMessage,
+  getTeammateIdleHookMessage: () => getTeammateIdleHookMessage,
+  getTaskCreatedHookMessage: () => getTaskCreatedHookMessage,
+  getTaskCompletedHookMessage: () => getTaskCompletedHookMessage,
+  getStopHookMessage: () => getStopHookMessage,
+  getSessionEndHookTimeoutMs: () => getSessionEndHookTimeoutMs,
+  getPreToolHookBlockingMessage: () => getPreToolHookBlockingMessage,
+  getMatchingHooks: () => getMatchingHooks,
+  executeWorktreeRemoveHook: () => executeWorktreeRemoveHook,
+  executeWorktreeCreateHook: () => executeWorktreeCreateHook,
+  executeUserPromptSubmitHooks: () => executeUserPromptSubmitHooks,
+  executeTeammateIdleHooks: () => executeTeammateIdleHooks,
+  executeTaskCreatedHooks: () => executeTaskCreatedHooks,
+  executeTaskCompletedHooks: () => executeTaskCompletedHooks,
+  executeSubagentStartHooks: () => executeSubagentStartHooks,
+  executeStopHooks: () => executeStopHooks,
+  executeStopFailureHooks: () => executeStopFailureHooks,
+  executeStatusLineCommand: () => executeStatusLineCommand,
+  executeSetupHooks: () => executeSetupHooks,
+  executeSessionStartHooks: () => executeSessionStartHooks,
+  executeSessionEndHooks: () => executeSessionEndHooks,
+  executePreToolHooks: () => executePreToolHooks,
+  executePreCompactHooks: () => executePreCompactHooks,
+  executePostToolUseFailureHooks: () => executePostToolUseFailureHooks,
+  executePostToolHooks: () => executePostToolHooks,
+  executePostCompactHooks: () => executePostCompactHooks,
+  executePermissionRequestHooks: () => executePermissionRequestHooks,
+  executePermissionDeniedHooks: () => executePermissionDeniedHooks,
+  executeNotificationHooks: () => executeNotificationHooks,
+  executeInstructionsLoadedHooks: () => executeInstructionsLoadedHooks,
+  executeFileSuggestionCommand: () => executeFileSuggestionCommand,
+  executeFileChangedHooks: () => executeFileChangedHooks,
+  executeElicitationResultHooks: () => executeElicitationResultHooks,
+  executeElicitationHooks: () => executeElicitationHooks,
+  executeCwdChangedHooks: () => executeCwdChangedHooks,
+  executeConfigChangeHooks: () => executeConfigChangeHooks,
+  createBaseHookInput: () => createBaseHookInput
+});
+import { basename as basename41 } from "path";
+import { spawn as spawn11 } from "child_process";
+import { randomUUID as randomUUID29 } from "crypto";

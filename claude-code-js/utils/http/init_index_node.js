@@ -1,0 +1,45 @@
+// var: init_index_node
+var init_index_node = __esm(() => {
+  init_AuthorizationCodeClient();
+  init_RefreshTokenClient();
+  init_SilentFlowClient();
+  init_ClientConfiguration();
+  init_CcsCredential();
+  init_Authority();
+  init_AuthorityOptions();
+  init_ProtocolMode();
+  init_CacheManager();
+  init_UrlString();
+  init_ICrypto();
+  init_Authorize();
+  init_Token();
+  init_BaseAuthRequest();
+  init_RequestParameterBuilder();
+  init_ResponseHandler();
+  init_ScopeSet();
+  init_Logger();
+  init_InteractionRequiredAuthError();
+  init_InteractionRequiredAuthErrorCodes();
+  init_AuthError();
+  init_AuthErrorCodes();
+  init_ServerError();
+  init_NetworkError();
+  init_ClientAuthError();
+  init_ClientAuthErrorCodes();
+  init_ClientConfigurationError();
+  init_ClientConfigurationErrorCodes();
+  init_Constants();
+  init_StringUtils();
+  init_ServerTelemetryManager();
+  init_AuthToken();
+  init_AuthorityFactory();
+  init_CacheHelpers();
+  init_TimeUtils();
+  init_UrlUtils();
+  init_AADServerParamKeys();
+  init_AccountEntityUtils();
+  init_TokenCacheContext();
+  init_ClientAssertionUtils();
+  init_StubPerformanceClient();
+  /*! @azure/msal-common v16.4.1 2026-04-01 */
+});

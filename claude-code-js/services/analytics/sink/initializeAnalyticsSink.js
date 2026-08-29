@@ -1,0 +1,2 @@
+// function: initializeAnalyticsSink
+function initializeAnalyticsSink() {}

@@ -1,0 +1,3 @@
+// class: SignalExitBase
+class SignalExitBase {
+}

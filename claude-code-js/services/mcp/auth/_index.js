@@ -1,0 +1,23 @@
+// Split from: auth.js
+// 19 declarations extracted
+
+// Shared: _shared.js (9 lines)
+// function redactSensitiveUrlParams: redactSensitiveUrlParams.js (11 lines)
+// function normalizeOAuthErrorBody: normalizeOAuthErrorBody.js (24 lines)
+// function createAuthFetch: createAuthFetch.js (22 lines)
+// function fetchAuthServerMetadata: fetchAuthServerMetadata.js (28 lines)
+// function getServerKey: getServerKey.js (8 lines)
+// function hasMcpDiscoveryButNoToken: hasMcpDiscoveryButNoToken.js (6 lines)
+// function revokeToken: revokeToken.js (37 lines)
+// function revokeServerTokens: revokeServerTokens.js (77 lines)
+// function clearServerTokensFromLocalStorage: clearServerTokensFromLocalStorage.js (8 lines)
+// function performMCPXaaAuth: performMCPXaaAuth.js (93 lines)
+// function performMCPOAuthFlow: performMCPOAuthFlow.js (200 lines)
+// function wrapFetchWithStepUpDetection: wrapFetchWithStepUpDetection.js (14 lines)
+// class ClaudeAuthProvider: ClaudeAuthProvider.js (462 lines)
+// function readClientSecret: readClientSecret.js (24 lines)
+// function saveMcpClientSecret: saveMcpClientSecret.js (10 lines)
+// function clearMcpClientConfig: clearMcpClientConfig.js (8 lines)
+// function getMcpClientConfig: getMcpClientConfig.js (4 lines)
+// function getScopeFromMetadata: getScopeFromMetadata.js (11 lines)
+// var init_auth17: init_auth17.js (37 lines)

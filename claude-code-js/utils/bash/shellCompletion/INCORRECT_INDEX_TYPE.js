@@ -1,0 +1,6 @@
+// var: INCORRECT_INDEX_TYPE
+var INCORRECT_INDEX_TYPE = "Incorrect 'index' type", LOGICAL_SEARCH_INVALID_QUERY_FOR_KEY = (key3) => `Invalid value for key ${key3}`, PATTERN_LENGTH_TOO_LARGE = (max2) => `Pattern length exceeds max of ${max2}.`, MISSING_KEY_PROPERTY = (name3) => `Missing ${name3} property in key`, INVALID_KEY_WEIGHT_VALUE = (key3) => `Property 'weight' in key '${key3}' must be a positive integer`, hasOwn4, MatchOptions, BasicOptions, FuzzyOptions, AdvancedOptions, Config2, SPACE, MAX_BITS = 32, NON_DECOMPOSABLE_MAP, NON_DECOMPOSABLE_RE, stripDiacritics, ExactMatch, InverseExactMatch, PrefixExactMatch, InversePrefixExactMatch, SuffixExactMatch, InverseSuffixExactMatch, FuzzyMatch, IncludeMatch, searchers, searchersLen, ESCAPED_PIPE = "\x00", OR_TOKEN = "|", MultiMatchSet, registeredSearchers, LogicalOperator, KeyType, isExpression = (query3) => !!(query3[LogicalOperator.AND] || query3[LogicalOperator.OR]), isPath = (query3) => !!query3[KeyType.PATH], isLeaf = (query3) => !isArray8(query3) && isObject6(query3) && !isExpression(query3), convertToExplicit = (query3) => ({
+  [LogicalOperator.AND]: Object.keys(query3).map((key3) => ({
+    [key3]: query3[key3]
+  }))
+}), WORD;

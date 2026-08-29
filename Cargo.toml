@@ -20,17 +20,26 @@ unicode-normalization = "0.1"
 libc = "0.2"
 tempfile = "3"
 
+# HTTP transport & API client
+reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
+eventsource-stream = "0.2"
+tokio-util = { version = "0.7", features = ["io", "rt"] }
+bytes = "1"
+pin-project-lite = "0.2"
+
+# Tools
+glob = "0.3"
+regex = "1"
+sha2 = "0.10"
+base64 = "0.22"
+
+# Retry
+rand = "0.8"
+
 # Optional session-store backends. Each is gated behind a feature so the
 # default build (and the published core) stays free of heavy transport deps.
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "json"], optional = true }
 redis = { version = "0.27", default-features = false, features = ["tokio-comp"], optional = true }
-
-[features]
-default = []
-# Postgres-backed SessionStore (src/stores/postgres.rs).
-postgres = ["dep:sqlx"]
-# Redis-backed SessionStore (src/stores/redis.rs).
-redis-store = ["dep:redis"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
@@ -38,3 +47,11 @@ tempfile = "3"
 pretty_assertions = "1"
 filetime = "0.2"
 serial_test = "3"
+
+[features]
+default = []
+integration-tests = []
+# Postgres-backed SessionStore (src/stores/postgres.rs).
+postgres = ["dep:sqlx"]
+# Redis-backed SessionStore (src/stores/redis.rs).
+redis-store = ["dep:redis"]

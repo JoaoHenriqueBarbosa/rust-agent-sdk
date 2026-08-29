@@ -1,0 +1,48 @@
+// Original: src/constants/tools.ts
+var ALL_AGENT_DISALLOWED_TOOLS, CUSTOM_AGENT_DISALLOWED_TOOLS, ASYNC_AGENT_ALLOWED_TOOLS, IN_PROCESS_TEAMMATE_ALLOWED_TOOLS;
+var init_tools = __esm(() => {
+  init_constants3();
+  init_prompt10();
+  init_prompt2();
+  init_prompt6();
+  init_prompt5();
+  init_prompt3();
+  init_shellToolUtils();
+  init_prompt4();
+  init_prompt8();
+  init_SyntheticOutputTool();
+  init_prompt11();
+  ALL_AGENT_DISALLOWED_TOOLS = /* @__PURE__ */ new Set([
+    TASK_OUTPUT_TOOL_NAME,
+    EXIT_PLAN_MODE_V2_TOOL_NAME,
+    ENTER_PLAN_MODE_TOOL_NAME,
+    AGENT_TOOL_NAME,
+    ASK_USER_QUESTION_TOOL_NAME,
+    TASK_STOP_TOOL_NAME
+  ]), CUSTOM_AGENT_DISALLOWED_TOOLS = /* @__PURE__ */ new Set([
+    ...ALL_AGENT_DISALLOWED_TOOLS
+  ]), ASYNC_AGENT_ALLOWED_TOOLS = /* @__PURE__ */ new Set([
+    FILE_READ_TOOL_NAME,
+    WEB_SEARCH_TOOL_NAME,
+    TODO_WRITE_TOOL_NAME,
+    GREP_TOOL_NAME,
+    WEB_FETCH_TOOL_NAME,
+    GLOB_TOOL_NAME,
+    ...SHELL_TOOL_NAMES,
+    FILE_EDIT_TOOL_NAME,
+    FILE_WRITE_TOOL_NAME,
+    NOTEBOOK_EDIT_TOOL_NAME,
+    SKILL_TOOL_NAME,
+    SYNTHETIC_OUTPUT_TOOL_NAME,
+    TOOL_SEARCH_TOOL_NAME,
+    ENTER_WORKTREE_TOOL_NAME,
+    EXIT_WORKTREE_TOOL_NAME
+  ]), IN_PROCESS_TEAMMATE_ALLOWED_TOOLS = /* @__PURE__ */ new Set([
+    TASK_CREATE_TOOL_NAME,
+    TASK_GET_TOOL_NAME,
+    TASK_LIST_TOOL_NAME,
+    TASK_UPDATE_TOOL_NAME,
+    SEND_MESSAGE_TOOL_NAME,
+    ...[]
+  ]);
+});

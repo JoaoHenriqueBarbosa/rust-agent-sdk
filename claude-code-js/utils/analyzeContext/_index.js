@@ -1,0 +1,21 @@
+// Split from: analyzeContext.js
+// 17 declarations extracted
+
+// Shared: _shared.js (2 lines)
+// function countTokensWithFallback: countTokensWithFallback.js (18 lines)
+// function countToolDefinitionTokens: countToolDefinitionTokens.js (13 lines)
+// function extractSectionName: extractSectionName.js (8 lines)
+// function countSystemTokens: countSystemTokens.js (13 lines)
+// function countMemoryFileTokens: countMemoryFileTokens.js (21 lines)
+// function countBuiltInToolTokens: countBuiltInToolTokens.js (47 lines)
+// function findSkillTool: findSkillTool.js (3 lines)
+// function countSlashCommandTokens: countSlashCommandTokens.js (15 lines)
+// function countSkillTokens: countSkillTokens.js (28 lines)
+// function countMcpToolTokens: countMcpToolTokens.js (39 lines)
+// function countCustomAgentTokens: countCustomAgentTokens.js (17 lines)
+// function processAssistantMessage: processAssistantMessage.js (11 lines)
+// function processUserMessage: processUserMessage.js (16 lines)
+// function processAttachment: processAttachment.js (6 lines)
+// function approximateMessageTokens: approximateMessageTokens.js (38 lines)
+// function analyzeContextUsage: analyzeContextUsage.js (213 lines)
+// var RESERVED_CATEGORY_NAME: RESERVED_CATEGORY_NAME.js (26 lines)

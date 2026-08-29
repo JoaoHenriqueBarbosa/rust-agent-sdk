@@ -1,0 +1,2 @@
+// function: Diff
+function Diff() {}

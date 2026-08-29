@@ -1,0 +1,20 @@
+// Split from: chromeNativeHost.js
+// 16 declarations extracted
+
+// Shared: _shared.js (39 lines)
+// var exports_chromeNativeHost: exports_chromeNativeHost.js (1 lines)
+// function log3: log3.js (8 lines)
+// function sendChromeMessage: sendChromeMessage.js (4 lines)
+// function runChromeNativeHost: runChromeNativeHost.js (12 lines)
+// class ChromeNativeHost: ChromeNativeHost.js (185 lines)
+// class ChromeMessageReader: ChromeMessageReader.js (47 lines)
+// var VERSION6: VERSION6.js (9 lines)
+// var require_error: require_error.js (17 lines)
+// var require_argument: require_argument.js (56 lines)
+// var require_help: require_help.js (302 lines)
+// var require_option: require_option.js (128 lines)
+// var require_suggestSimilar: require_suggestSimilar.js (51 lines)
+// var require_command: require_command.js (982 lines)
+// var require_commander: require_commander.js (14 lines)
+// var require_extra_typings: require_extra_typings.js (15 lines)
+// var init_esm35: init_esm35.js (15 lines)

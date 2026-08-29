@@ -1,0 +1,31 @@
+// var: SLOW_PHASE_LOG_THRESHOLD_MS
+var SLOW_PHASE_LOG_THRESHOLD_MS = 2000;
+var init_toolExecution = __esm(() => {
+  init_metadata();
+  init_state();
+  init_permissionLogging();
+  init_Tool();
+  init_bashPermissions();
+  init_prompt2();
+  init_prompt4();
+  init_gitOperationTracking();
+  init_prompt8();
+  init_tools2();
+  init_attachments2();
+  init_debug();
+  init_errors();
+  init_log3();
+  init_messages3();
+  init_sessionActivity();
+  init_slowOperations();
+  init_stream9();
+  init_events();
+  init_sessionTracing();
+  init_toolErrors();
+  init_toolResultStorage();
+  init_toolSearch();
+  init_client20();
+  init_mcpStringUtils();
+  init_utils7();
+  init_toolHooks();
+});
