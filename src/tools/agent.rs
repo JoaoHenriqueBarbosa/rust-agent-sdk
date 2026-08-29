@@ -41,8 +41,9 @@ impl Tool for AgentTool {
             Err(e) => return ToolResult::error(format!("Invalid input: {e}")),
         };
 
-        // Agent tool requires the agentic loop to be wired up.
+        // O subagente REAL é o NativeAgentTool do transporte nativo; este stub
+        // genérico só existe para registries montados à mão sem client.
         // This will be connected in the AgenticLoop implementation.
-        ToolResult::error("Agent tool requires integration with AgenticLoop (not yet wired)")
+        ToolResult::error("This generic Agent stub has no API client. In the native transport the Task/Agent tool is provided automatically; register it there instead.")
     }
 }

@@ -23,9 +23,10 @@
 //! é o canal de steering (commit forçado etc.). `PostToolUse` idem, via
 //! `hook_callback` com os ids registrados no `initialize`.
 //!
-//! Limitação declarada: a compactação automática acontece DENTRO de uma
-//! corrida do loop; o histórico que o transporte mantém entre turnos do
-//! usuário é o não-compactado (reconstruído dos eventos).
+//! Compactação SOBREVIVE entre turnos: o loop avisa cada reescrita de
+//! histórico (micro/auto/reactive) via `on_history_rewrite`, e o engine aplica
+//! o snapshot quando o evento de boundary chega — o próximo turno parte do
+//! contexto compactado, não do bruto.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -68,6 +69,16 @@ struct Shared {
     abort: Mutex<CancellationToken>,
     /// Override de modelo vindo de `set_model`.
     model_override: Mutex<Option<String>>,
+    /// Modo de permissão vigente — mutável por `set_permission_mode` e pelos
+    /// plan-mode tools; o `ToolContext` lê daqui.
+    permission_mode: Arc<std::sync::RwLock<crate::types::PermissionMode>>,
+    /// Resposta pré-computada do `mcp_status` (servidores in-process).
+    mcp_status: Mutex<Value>,
+    /// Última estimativa de uso de contexto, servida por `get_context_usage`.
+    context_usage: Mutex<Value>,
+    /// Snapshot de histórico REESCRITO pelo loop (compaction) — aplicado pelo
+    /// engine quando o evento de boundary correspondente chega.
+    rewritten_history: Arc<std::sync::Mutex<Option<Vec<ApiMessage>>>>,
     /// Gerador de request_id para os nossos control_requests.
     counter: AtomicU64,
     /// `end_input` já foi chamado — user frames novos são erro.
@@ -101,6 +112,42 @@ impl Shared {
                 None
             }
         }
+    }
+
+    /// Dispara todos os `hook_callback` registrados para um evento e devolve
+    /// as respostas (uma por callback id). `extra` completa o input padrão
+    /// (session_id/transcript_path/cwd ficam por conta do chamador).
+    async fn run_hooks(&self, event: &str, base_input: Value) -> Vec<Value> {
+        let ids = self
+            .hooks
+            .lock()
+            .await
+            .get(event)
+            .cloned()
+            .unwrap_or_default();
+        let mut responses = Vec::new();
+        for callback_id in ids {
+            let mut input = base_input.clone();
+            if let Some(obj) = input.as_object_mut() {
+                obj.insert("hook_event_name".to_string(), json!(event));
+            }
+            let tool_use_id = base_input
+                .get("tool_use_id")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let response = self
+                .control_roundtrip(json!({
+                    "subtype": "hook_callback",
+                    "callback_id": callback_id,
+                    "input": input,
+                    "tool_use_id": tool_use_id,
+                }))
+                .await;
+            if let Some(r) = response {
+                responses.push(r);
+            }
+        }
+        responses
     }
 }
 
@@ -145,18 +192,25 @@ impl Transport for NativeApiTransport {
         }
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
         let (user_tx, user_rx) = mpsc::unbounded_channel();
+        let options = self.options.take().ok_or_else(|| {
+            ClaudeSDKError::cli_connection("native transport cannot reconnect after close")
+        })?;
+        let initial_mode = options
+            .permission_mode
+            .unwrap_or(crate::types::PermissionMode::Default);
         let shared = Arc::new(Shared {
             outbound: outbound_tx,
             pending: Mutex::new(HashMap::new()),
             hooks: Mutex::new(HashMap::new()),
             abort: Mutex::new(CancellationToken::new()),
             model_override: Mutex::new(None),
+            permission_mode: Arc::new(std::sync::RwLock::new(initial_mode)),
+            mcp_status: Mutex::new(json!({"mcp_servers": []})),
+            context_usage: Mutex::new(Value::Null),
+            rewritten_history: Arc::new(std::sync::Mutex::new(None)),
             counter: AtomicU64::new(1),
             input_closed: AtomicBool::new(false),
         });
-        let options = self.options.take().ok_or_else(|| {
-            ClaudeSDKError::cli_connection("native transport cannot reconnect after close")
-        })?;
         let engine = tokio::spawn(engine_main(options, Arc::clone(&shared), user_rx));
         self.shared = Some(shared);
         self.outbound_rx = Some(outbound_rx);
@@ -321,16 +375,52 @@ async fn handle_client_control(shared: &Arc<Shared>, frame: &Value) {
             *shared.model_override.lock().await = model;
             respond(json!({}));
         }
-        "set_permission_mode" | "mcp_status" | "get_context_usage" => {
-            respond(json!({}));
+        "set_permission_mode" => {
+            let parsed = request
+                .get("mode")
+                .and_then(Value::as_str)
+                .and_then(|m| serde_json::from_value::<crate::types::PermissionMode>(json!(m)).ok());
+            match parsed {
+                Some(mode) => {
+                    if let Ok(mut guard) = shared.permission_mode.write() {
+                        *guard = mode;
+                    }
+                    respond(json!({}));
+                }
+                None => {
+                    let _ = shared.outbound.send(json!({
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "error",
+                            "request_id": request_id,
+                            "error": "invalid permission mode",
+                        }
+                    }));
+                }
+            }
+        }
+        "mcp_status" => {
+            let status = shared.mcp_status.lock().await.clone();
+            respond(status);
+        }
+        "get_context_usage" => {
+            let usage = shared.context_usage.lock().await.clone();
+            respond(usage);
         }
         other => {
+            let message = match other {
+                "rewind_files" | "mcp_reconnect" | "mcp_toggle" | "stop_task" => format!(
+                    "Control request '{other}' is not supported by the native transport \
+                     (it requires the CLI subprocess transport)."
+                ),
+                _ => format!("Unsupported control request subtype: {other}"),
+            };
             let _ = shared.outbound.send(json!({
                 "type": "control_response",
                 "response": {
                     "subtype": "error",
                     "request_id": request_id,
-                    "error": format!("Unsupported control request subtype: {other}"),
+                    "error": message,
                 }
             }));
         }
@@ -387,17 +477,64 @@ fn resolve_config(options: &ClaudeAgentOptions) -> Result<EngineConfig> {
     })
 }
 
-fn system_prompt_blocks(options: &ClaudeAgentOptions) -> Vec<SystemBlock> {
+/// Prompt base do preset `claude_code` — o CLI monta o seu por dentro; o
+/// nativo oferece um preset coerente (identidade + ambiente) em vez de vazio.
+fn preset_system_prompt(config: &EngineConfig, model: &str) -> String {
+    let today = chrono_free_date();
+    format!(
+        "You are Claude Code, Anthropic's official CLI for Claude.\n\
+         You are an interactive agent that helps users with software engineering tasks. \
+         Use the tools available to you to assist the user.\n\n\
+         Here is useful information about the environment you are running in:\n\
+         <env>\n\
+         Working directory: {}\n\
+         Platform: {}\n\
+         Today's date: {}\n\
+         </env>\n\
+         You are powered by the model named {model}.",
+        config.cwd,
+        std::env::consts::OS,
+        today,
+    )
+}
+
+/// Data de hoje (YYYY-MM-DD) sem dependência de chrono.
+fn chrono_free_date() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Conversão civil (algoritmo de Howard Hinnant) — dias desde epoch.
+    let days = (secs / 86_400) as i64;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+fn system_prompt_blocks(
+    options: &ClaudeAgentOptions,
+    config: &EngineConfig,
+    model: &str,
+) -> Vec<SystemBlock> {
     match &options.system_prompt {
         Some(SystemPromptConfig::String(s)) if !s.is_empty() => vec![SystemBlock::text(s.clone())],
-        // O preset do CLI não existe nativamente; o que dá para honrar do
-        // structured é o `append`. Arquivo é lido no connect? Não: síncrono
-        // aqui, então File é lido de forma best-effort.
-        Some(SystemPromptConfig::Structured(SystemPrompt::Preset { append, .. })) => append
-            .as_ref()
-            .filter(|s| !s.is_empty())
-            .map(|s| vec![SystemBlock::text(s.clone())])
-            .unwrap_or_default(),
+        // Preset `claude_code`: o nativo monta um prompt base coerente
+        // (identidade + ambiente) e concatena o `append`.
+        Some(SystemPromptConfig::Structured(SystemPrompt::Preset { append, .. })) => {
+            let mut blocks = vec![SystemBlock::text(preset_system_prompt(config, model))];
+            if let Some(extra) = append.as_ref().filter(|s| !s.is_empty()) {
+                blocks.push(SystemBlock::text(extra.clone()));
+            }
+            blocks
+        }
         Some(SystemPromptConfig::Structured(SystemPrompt::File { path })) => {
             std::fs::read_to_string(path)
                 .ok()
@@ -467,14 +604,138 @@ async fn engine_main(
     if let Some(model) = &config.model {
         client = client.with_model(model.clone());
     }
+    // Betas das options viram header (o único permitido pelo SDK é o 1M).
+    let mut context_window_tokens = 200_000usize;
+    for beta in &options.betas {
+        match beta {
+            crate::types::SdkBeta::Context1M => {
+                client = client.with_beta("context-1m-2025-08-07");
+                context_window_tokens = 1_000_000;
+            }
+        }
+    }
 
     let transcript_path = storage.session_path(&session_id).display().to_string();
     let mut last_uuid: Option<String> = None;
 
+    // mcp_status pré-computado: os servidores in-process com as suas tools.
+    {
+        let mut servers = Vec::new();
+        for server_name in options.sdk_mcp_servers.names() {
+            if let Some(server) = options.sdk_mcp_servers.get(&server_name) {
+                let listed = server
+                    .handle_message(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+                    .await;
+                let tools = listed
+                    .as_ref()
+                    .and_then(|v| v.pointer("/result/tools"))
+                    .cloned()
+                    .unwrap_or_else(|| json!([]));
+                servers.push(json!({
+                    "name": server_name,
+                    "status": "connected",
+                    "scope": "sdk",
+                    "tools": tools,
+                }));
+            }
+        }
+        *shared.mcp_status.lock().await = json!({"mcp_servers": servers});
+    }
+
+    // SessionStart: dispara os hooks registrados (o resultado não bloqueia).
+    let hook_base = |extra: Value| {        let mut base = json!({
+            "session_id": session_id,
+            "transcript_path": transcript_path,
+            "cwd": config.cwd,
+        });
+        if let (Some(obj), Some(extra_obj)) = (base.as_object_mut(), extra.as_object()) {
+            for (k, v) in extra_obj {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+        base
+    };
+    shared
+        .run_hooks("SessionStart", hook_base(json!({"source": "startup"})))
+        .await;
+
+    // Custo acumulado da sessão — o teto vem de options.max_budget_usd.
+    let mut session_cost_usd: f64 = 0.0;
+
+    // Stores por sessão: TodoV2/background e a lista TodoWrite v1.
+    let task_store = Arc::new(crate::tools::task_store::TaskStore::new());
+    let todo_store = Arc::new(std::sync::Mutex::new(serde_json::json!([])));
+
     while let Some(frame) = user_rx.recv().await {
-        let content = user_content_of(&frame);
+        if let Some(budget) = options.max_budget_usd {
+            if session_cost_usd >= budget {
+                let _ = shared.outbound.send(json!({
+                    "type": "result",
+                    "subtype": "error_max_budget_usd",
+                    "is_error": true,
+                    "duration_ms": 0,
+                    "duration_api_ms": 0,
+                    "num_turns": 0,
+                    "total_cost_usd": session_cost_usd,
+                    "usage": {},
+                    "stop_reason": null,
+                    "session_id": session_id,
+                    "uuid": uuid::Uuid::new_v4().to_string(),
+                    "errors": [format!("Maximum budget of ${budget} exceeded (spent ${session_cost_usd:.4})")],
+                }));
+                continue;
+            }
+        }
+        let mut content = user_content_of(&frame);
         if content.is_empty() {
             continue;
+        }
+
+        // UserPromptSubmit: pode BLOQUEAR o prompt ou anexar contexto.
+        {
+            let prompt_text = content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let responses = shared
+                .run_hooks("UserPromptSubmit", hook_base(json!({"prompt": prompt_text})))
+                .await;
+            let mut blocked_reason: Option<String> = None;
+            for r in &responses {
+                let decision_block = r.get("decision").and_then(Value::as_str) == Some("block")
+                    || r.pointer("/hookSpecificOutput/permissionDecision")
+                        .and_then(Value::as_str)
+                        == Some("deny");
+                if decision_block {
+                    blocked_reason = Some(
+                        r.get("reason")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Prompt blocked by UserPromptSubmit hook")
+                            .to_string(),
+                    );
+                    break;
+                }
+                if let Some(ctx) = r
+                    .pointer("/hookSpecificOutput/additionalContext")
+                    .and_then(Value::as_str)
+                {
+                    content.push(ContentBlock::text(ctx.to_string()));
+                }
+            }
+            if let Some(reason) = blocked_reason {
+                let _ = shared.outbound.send(json!({
+                    "type": "system",
+                    "subtype": "user_prompt_submit_blocked",
+                    "reason": reason,
+                    "session_id": session_id,
+                    "uuid": uuid::Uuid::new_v4().to_string(),
+                }));
+                continue;
+            }
         }
 
         // Persiste o turno do usuário no JSONL (e espelha).
@@ -518,20 +779,117 @@ async fn engine_main(
             &session_id,
             &transcript_path,
             tool_results_dir,
+            Arc::clone(&task_store),
+            Arc::clone(&todo_store),
+            client.clone(),
+            model.clone(),
         )
         .await;
+
+        // Stop hook: roundtrip pelos callback ids registrados. `decision:
+        // "block"` reinjeta a razão como user message (re-loop); `continue:
+        // false` encerra com stop_hook_prevented.
+        let stop_shared = Arc::clone(&shared);
+        let stop_session = session_id.clone();
+        let stop_transcript = transcript_path.clone();
+        let stop_cwd = config.cwd.clone();
+        let stop_hook: crate::agentic::StopHookCallback = Arc::new(move |_ctx| {
+            let shared = Arc::clone(&stop_shared);
+            let session_id = stop_session.clone();
+            let transcript_path = stop_transcript.clone();
+            let cwd = stop_cwd.clone();
+            Box::pin(async move {
+                let responses = shared
+                    .run_hooks(
+                        "Stop",
+                        json!({
+                            "session_id": session_id,
+                            "transcript_path": transcript_path,
+                            "cwd": cwd,
+                            "stop_hook_active": true,
+                        }),
+                    )
+                    .await;
+                let mut result = crate::agentic::StopHookResult::default();
+                for r in &responses {
+                    if r.get("continue").and_then(Value::as_bool) == Some(false) {
+                        result.prevent_continuation = true;
+                    }
+                    if r.get("decision").and_then(Value::as_str) == Some("block") {
+                        let reason = r
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Stop hook blocked stopping")
+                            .to_string();
+                        result
+                            .blocking_messages
+                            .push(ApiMessage::user(vec![ContentBlock::text(reason)]));
+                    }
+                }
+                result
+            })
+        });
+
+        // PreCompact: aviso antes da compactação cara (resposta ignorada).
+        let pre_compact_shared = Arc::clone(&shared);
+        let pre_compact_session = session_id.clone();
+        let pre_compact_transcript = transcript_path.clone();
+        let pre_compact_cwd = config.cwd.clone();
+        let pre_compact: crate::agentic::PreCompactHook = Arc::new(move |trigger: String| {
+            let shared = Arc::clone(&pre_compact_shared);
+            let session_id = pre_compact_session.clone();
+            let transcript_path = pre_compact_transcript.clone();
+            let cwd = pre_compact_cwd.clone();
+            Box::pin(async move {
+                shared
+                    .run_hooks(
+                        "PreCompact",
+                        json!({
+                            "session_id": session_id,
+                            "transcript_path": transcript_path,
+                            "cwd": cwd,
+                            "trigger": trigger,
+                        }),
+                    )
+                    .await;
+            })
+        });
+
+        // Rewrite de histórico: o loop grava o snapshot; o engine aplica
+        // quando o evento de boundary correspondente chega.
+        let rewrite_slot = Arc::clone(&shared.rewritten_history);
+        let on_history_rewrite: crate::agentic::HistoryRewriteFn =
+            Arc::new(move |messages: Vec<ApiMessage>| {
+                if let Ok(mut slot) = rewrite_slot.lock() {
+                    *slot = Some(messages);
+                }
+            });
+
+        let has_stop_hooks = !shared
+            .hooks
+            .lock()
+            .await
+            .get("Stop")
+            .cloned()
+            .unwrap_or_default()
+            .is_empty();
+
         let loop_options = AgenticLoopOptions {
-            model,
-            system_prompt: system_prompt_blocks(&options),
+            model: model.clone(),
+            system_prompt: system_prompt_blocks(&options, &config, &model),
             max_turns: options
                 .max_turns
                 .and_then(|n| u32::try_from(n).ok()),
             initial_messages: history.clone(),
             thinking: thinking_param(&options),
-            include_stream_events: false,
+            include_stream_events: options.include_partial_messages,
             abort: Some(abort),
             fallback_model: options.fallback_model.clone(),
             session_id: Some(session_id.clone()),
+            stop_hook: if has_stop_hooks { Some(stop_hook) } else { None },
+            pre_compact_hook: Some(pre_compact),
+            on_history_rewrite: Some(on_history_rewrite),
+            context_window_tokens,
             ..AgenticLoopOptions::default()
         };
 
@@ -541,6 +899,21 @@ async fn engine_main(
         while let Some(event) = stream.next().await {
             match event {
                 Ok(ev) => {
+                    // Compaction reescreveu o histórico dentro do loop: o
+                    // snapshot chega ANTES do evento de boundary — aplicar
+                    // aqui é o que faz a compactação sobreviver entre turnos.
+                    if let AgenticEvent::System { subtype, .. } = &ev {
+                        if subtype == "microcompact" || subtype == "compact_boundary" {
+                            if let Ok(mut slot) = shared.rewritten_history.lock() {
+                                if let Some(snapshot) = slot.take() {
+                                    history = snapshot;
+                                }
+                            }
+                        }
+                    }
+                    if let AgenticEvent::Result { total_cost_usd: cost, .. } = &ev {
+                        session_cost_usd += *cost;
+                    }
                     track_history(&mut history, &ev);
                     persist_event(&storage, &shared, &config, &session_id, &transcript_path, &mut last_uuid, &ev)
                         .await;
@@ -566,7 +939,47 @@ async fn engine_main(
                 }
             }
         }
+
+        // Estimativa de contexto atualizada para o get_context_usage.
+        {
+            use crate::compact::token_estimation::estimate_message_tokens_with_margin;
+            let system_blocks = system_prompt_blocks(&options, &config, &model);
+            let system_tokens: usize = system_blocks
+                .iter()
+                .map(|b| b.text.len() / 4)
+                .sum();
+            let total = estimate_message_tokens_with_margin(&history) + system_tokens;
+            let max_tokens = context_window_tokens;
+            *shared.context_usage.lock().await = json!({
+                "categories": [
+                    {"name": "System prompt", "tokens": system_tokens, "color": "blue"},
+                    {"name": "Messages", "tokens": total.saturating_sub(system_tokens), "color": "green"},
+                ],
+                "totalTokens": total,
+                "maxTokens": max_tokens,
+                "rawMaxTokens": max_tokens,
+                "percentage": (total as f64 / max_tokens as f64) * 100.0,
+                "model": model,
+                "isAutoCompactEnabled": true,
+                "memoryFiles": [],
+                "mcpTools": [],
+                "agents": [],
+                "gridRows": [],
+            });
+        }
     }
+    // SessionEnd antes do EOF: o cliente ainda está lendo o stream.
+    shared
+        .run_hooks(
+            "SessionEnd",
+            json!({
+                "session_id": session_id,
+                "transcript_path": transcript_path,
+                "cwd": config.cwd,
+                "reason": "other",
+            }),
+        )
+        .await;
     // user_tx caiu (end_input/close) e a fila drenou: EOF.
 }
 
@@ -680,6 +1093,15 @@ fn register_named_builtins(registry: &mut ToolRegistry, names: &[String]) {
             "TodoWrite" => registry.register(Box::new(todo::TodoWriteTool)),
             "WebFetch" => registry.register(Box::new(web_fetch::WebFetchTool)),
             "WebSearch" => registry.register(Box::new(web_search::WebSearchTool)),
+            "AskUserQuestion" => registry.register(Box::new(ask_user::AskUserQuestionTool)),
+            "TaskCreate" => registry.register(Box::new(tasks::TaskCreateTool)),
+            "TaskGet" => registry.register(Box::new(tasks::TaskGetTool)),
+            "TaskList" => registry.register(Box::new(tasks::TaskListTool)),
+            "TaskUpdate" => registry.register(Box::new(tasks::TaskUpdateTool)),
+            "TaskStop" => registry.register(Box::new(tasks::TaskStopTool)),
+            "TaskOutput" => registry.register(Box::new(tasks::TaskOutputTool)),
+            "EnterPlanMode" => registry.register(Box::new(plan_mode::EnterPlanModeTool)),
+            "ExitPlanMode" => registry.register(Box::new(plan_mode::ExitPlanModeTool)),
             // Nome desconhecido: silencioso de propósito — a lista vem do
             // chamador e um nome CLI sem builtin nativo não pode derrubar a
             // sessão inteira.
@@ -695,13 +1117,47 @@ async fn build_executor(
     session_id: &str,
     transcript_path: &str,
     tool_results_dir: std::path::PathBuf,
+    task_store: Arc<crate::tools::task_store::TaskStore>,
+    todo_store: Arc<std::sync::Mutex<serde_json::Value>>,
+    client: AnthropicClient,
+    model: String,
 ) -> ToolExecutor {
+    let permission_rules = crate::tools::permission::PermissionRules::from_lists(
+        &options.allowed_tools,
+        &options.disallowed_tools,
+    );
+
     let mut registry = ToolRegistry::new();
     match &options.tools {
         Some(ToolsConfig::List(names)) => register_named_builtins(&mut registry, names),
         // Preset/ausente: o conjunto default de builtins.
         Some(ToolsConfig::Preset(_)) | None => registry.register_defaults(),
     }
+    // Subagente in-process: registrado como `Task` (nome que os modelos
+    // conhecem) e `Agent` (nome atual do CLI). Só quando as tools não vieram
+    // por lista explícita sem ele.
+    let wants_agent = match &options.tools {
+        Some(ToolsConfig::List(names)) => names
+            .iter()
+            .any(|n| n == "Task" || n == "Agent"),
+        _ => true,
+    };
+    if wants_agent {
+        for tool_name in ["Task", "Agent"] {
+            registry.register(Box::new(NativeAgentTool {
+                client: client.clone(),
+                model: model.clone(),
+                agents: options.agents.clone().unwrap_or_default(),
+                cwd: config.cwd.clone(),
+                tool_results_dir: tool_results_dir.clone(),
+                task_store: Arc::clone(&task_store),
+                tool_name,
+            }));
+        }
+    }
+
+    // Deny incondicional tira a tool do request inteiro (filterToolsByDenyRules).
+    registry.retain(|name| !permission_rules.is_tool_fully_denied(name));
 
     // Ponte MCP in-process: cada tool dos servidores declarados nas opções
     // vira uma tool `mcp__<servidor>__<tool>` executada via JSON-RPC direto.
@@ -744,6 +1200,68 @@ async fn build_executor(
             }
         }
     }
+
+    // PreToolUse: roda antes da permissão e pode decidi-la
+    // (hookSpecificOutput.permissionDecision) ou reescrever o input.
+    let pre_shared = Arc::clone(shared);
+    let pre_session = session_id.to_string();
+    let pre_transcript = transcript_path.to_string();
+    let pre_cwd = config.cwd.clone();
+    let pre_tool_use: crate::tools::framework::PreToolUseFn = Arc::new(move |request| {
+        let shared = Arc::clone(&pre_shared);
+        let session_id = pre_session.clone();
+        let transcript_path = pre_transcript.clone();
+        let cwd = pre_cwd.clone();
+        Box::pin(async move {
+            let responses = shared
+                .run_hooks(
+                    "PreToolUse",
+                    json!({
+                        "session_id": session_id,
+                        "transcript_path": transcript_path,
+                        "cwd": cwd,
+                        "tool_name": request.tool_name,
+                        "tool_input": request.input,
+                        "tool_use_id": request.tool_use_id,
+                    }),
+                )
+                .await;
+            let mut decision = crate::tools::framework::PreToolUseDecision::default();
+            for r in &responses {
+                if let Some(updated) = r.pointer("/hookSpecificOutput/updatedInput") {
+                    if !updated.is_null() {
+                        decision.updated_input = Some(updated.clone());
+                    }
+                }
+                let perm = r
+                    .pointer("/hookSpecificOutput/permissionDecision")
+                    .and_then(Value::as_str)
+                    .or_else(|| r.get("decision").and_then(Value::as_str));
+                match perm {
+                    Some("deny") | Some("block") => {
+                        let message = r
+                            .pointer("/hookSpecificOutput/permissionDecisionReason")
+                            .and_then(Value::as_str)
+                            .or_else(|| r.get("reason").and_then(Value::as_str))
+                            .unwrap_or("Denied by PreToolUse hook")
+                            .to_string();
+                        decision.permission =
+                            Some(crate::tools::framework::PermissionOutcome::Deny { message });
+                        // Um deny vence qualquer allow de outro hook.
+                        return decision;
+                    }
+                    Some("allow") | Some("approve") => {
+                        decision.permission =
+                            Some(crate::tools::framework::PermissionOutcome::Allow {
+                                updated_input: None,
+                            });
+                    }
+                    _ => {}
+                }
+            }
+            decision
+        })
+    });
 
     // can_use_tool: round-trip pelo cliente. Sem resposta = recusa dita.
     let permission_shared = Arc::clone(shared);
@@ -799,24 +1317,18 @@ async fn build_executor(
         let transcript_path = hook_transcript.clone();
         let cwd = hook_cwd.clone();
         Box::pin(async move {
-            let ids = shared
-                .hooks
-                .lock()
-                .await
-                .get("PostToolUse")
-                .cloned()
-                .unwrap_or_default();
-            if ids.is_empty() {
-                return None;
+            // PostToolUse sempre; PostToolUseFailure adicionalmente quando o
+            // resultado é erro.
+            let mut events_to_run = vec!["PostToolUse"];
+            if event.is_error {
+                events_to_run.push("PostToolUseFailure");
             }
             let mut contexts: Vec<String> = Vec::new();
-            for callback_id in ids {
-                let response = shared
-                    .control_roundtrip(json!({
-                        "subtype": "hook_callback",
-                        "callback_id": callback_id,
-                        "input": {
-                            "hook_event_name": "PostToolUse",
+            for hook_event in events_to_run {
+                let responses = shared
+                    .run_hooks(
+                        hook_event,
+                        json!({
                             "session_id": session_id,
                             "transcript_path": transcript_path,
                             "cwd": cwd,
@@ -824,16 +1336,16 @@ async fn build_executor(
                             "tool_input": event.tool_input,
                             "tool_response": event.tool_response,
                             "tool_use_id": event.tool_use_id,
-                        },
-                        "tool_use_id": event.tool_use_id,
-                    }))
+                        }),
+                    )
                     .await;
-                if let Some(text) = response
-                    .as_ref()
-                    .and_then(|v| v.pointer("/hookSpecificOutput/additionalContext"))
-                    .and_then(Value::as_str)
-                {
-                    contexts.push(text.to_string());
+                for response in responses {
+                    if let Some(text) = response
+                        .pointer("/hookSpecificOutput/additionalContext")
+                        .and_then(Value::as_str)
+                    {
+                        contexts.push(text.to_string());
+                    }
                 }
             }
             if contexts.is_empty() {
@@ -846,12 +1358,186 @@ async fn build_executor(
 
     let context = ToolContext {
         working_directory: std::path::PathBuf::from(&config.cwd),
-        permission_mode: crate::types::PermissionMode::Default,
+        permission_mode: *shared
+            .permission_mode
+            .read()
+            .unwrap_or_else(|e| e.into_inner()),
+        permission_mode_shared: Some(Arc::clone(&shared.permission_mode)),
         permission_callback: Some(permission_callback),
+        pre_tool_use: Some(pre_tool_use),
         post_tool_use: Some(post_tool_use),
         tool_results_dir: Some(tool_results_dir),
+        additional_directories: options.add_dirs.clone(),
+        extra_env: options.env.clone(),
+        task_store: Some(task_store),
+        todo_store: Some(todo_store),
     };
-    ToolExecutor::new(registry, context)
+    ToolExecutor::new(registry, context).with_permission_rules(permission_rules)
+}
+
+/// Subagente in-process: um `AgenticLoop` aninhado com registry próprio. O
+/// `subagent_type` resolve em `options.agents`; sem tipo (ou `general-purpose`)
+/// roda com as builtins default. As tools do subagente passam pelo MESMO
+/// fluxo de permissão do pai (can_use_tool via cliente e modo compartilhado).
+struct NativeAgentTool {
+    client: AnthropicClient,
+    model: String,
+    agents: HashMap<String, crate::types::AgentDefinition>,
+    cwd: String,
+    tool_results_dir: std::path::PathBuf,
+    task_store: Arc<crate::tools::task_store::TaskStore>,
+    tool_name: &'static str,
+}
+
+#[async_trait::async_trait]
+impl Tool for NativeAgentTool {
+    fn name(&self) -> &str {
+        self.tool_name
+    }
+
+    fn description(&self) -> &str {
+        "Launch a subagent to handle a multi-step task. Provide a short \
+         description, the full prompt, and optionally a subagent_type from the \
+         configured agents."
+    }
+
+    fn input_schema(&self) -> Value {
+        let types: Vec<String> = {
+            let mut t: Vec<String> = self.agents.keys().cloned().collect();
+            t.push("general-purpose".to_string());
+            t.sort();
+            t.dedup();
+            t
+        };
+        json!({
+            "type": "object",
+            "properties": {
+                "description": { "type": "string", "description": "A short (3-5 word) description of the task" },
+                "prompt": { "type": "string", "description": "The task for the agent to perform" },
+                "subagent_type": { "type": "string", "description": format!("One of: {}", types.join(", ")) },
+                "model": { "type": "string", "description": "Optional model override" },
+                "run_in_background": { "type": "boolean", "description": "Not supported natively; the agent runs in the foreground" }
+            },
+            "required": ["description", "prompt"]
+        })
+    }
+
+    async fn execute(&self, input: Value, context: &ToolContext) -> ToolResult {
+        let prompt = input
+            .get("prompt")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if prompt.is_empty() {
+            return ToolResult::error("prompt is required");
+        }
+        let subagent_type = input
+            .get("subagent_type")
+            .and_then(Value::as_str)
+            .unwrap_or("general-purpose");
+        let definition = self.agents.get(subagent_type);
+        if definition.is_none() && subagent_type != "general-purpose" {
+            let mut known: Vec<&str> = self.agents.keys().map(String::as_str).collect();
+            known.push("general-purpose");
+            return ToolResult::error(format!(
+                "Unknown subagent_type '{subagent_type}'. Available: {}",
+                known.join(", ")
+            ));
+        }
+
+        // Registry do subagente: as tools do agent def, ou as defaults —
+        // nunca o próprio Agent/Task (sem recursão de subagentes na v1).
+        let mut registry = ToolRegistry::new();
+        match definition.and_then(|d| d.tools.as_ref()) {
+            Some(names) => register_named_builtins(&mut registry, names),
+            None => registry.register_defaults(),
+        }
+
+        let model = input
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| definition.and_then(|d| d.model.clone()))
+            .unwrap_or_else(|| self.model.clone());
+
+        let sub_context = ToolContext {
+            working_directory: std::path::PathBuf::from(&self.cwd),
+            permission_mode: context.mode(),
+            permission_mode_shared: context.permission_mode_shared.clone(),
+            permission_callback: context.permission_callback.clone(),
+            pre_tool_use: context.pre_tool_use.clone(),
+            post_tool_use: None,
+            tool_results_dir: Some(self.tool_results_dir.clone()),
+            additional_directories: context.additional_directories.clone(),
+            extra_env: context.extra_env.clone(),
+            task_store: Some(Arc::clone(&self.task_store)),
+            todo_store: None,
+        };
+        let executor = ToolExecutor::new(registry, sub_context);
+
+        let system_prompt = definition
+            .map(|d| d.prompt.clone())
+            .filter(|p| !p.is_empty())
+            .map(|p| vec![SystemBlock::text(p)])
+            .unwrap_or_default();
+        let max_turns = definition
+            .and_then(|d| d.max_turns)
+            .and_then(|n| u32::try_from(n).ok());
+
+        let loop_options = crate::agentic::AgenticLoopOptions {
+            model,
+            system_prompt,
+            max_turns,
+            include_stream_events: false,
+            ..crate::agentic::AgenticLoopOptions::default()
+        };
+
+        let events = crate::agentic::agentic_query_collect(
+            self.client.clone(),
+            &prompt,
+            executor,
+            loop_options,
+        )
+        .await;
+
+        match events {
+            Ok(events) => {
+                let mut final_text = String::new();
+                let mut is_error = false;
+                let mut errors: Vec<String> = Vec::new();
+                for ev in &events {
+                    if let AgenticEvent::Result {
+                        result,
+                        is_error: err,
+                        errors: evs,
+                        ..
+                    } = ev
+                    {
+                        if let Some(text) = result {
+                            final_text = text.clone();
+                        }
+                        is_error = *err;
+                        errors = evs.clone();
+                    }
+                }
+                if is_error {
+                    ToolResult::error(format!(
+                        "Subagent failed: {}",
+                        if errors.is_empty() {
+                            final_text
+                        } else {
+                            errors.join("; ")
+                        }
+                    ))
+                } else if final_text.is_empty() {
+                    ToolResult::error("Subagent produced no result")
+                } else {
+                    ToolResult::text(final_text)
+                }
+            }
+            Err(e) => ToolResult::error(format!("Subagent error: {e}")),
+        }
+    }
 }
 
 /// Tool que encaminha para um `SdkMcpServer` in-process via JSON-RPC.

@@ -34,6 +34,6 @@ impl Tool for SkillTool {
             Ok(i) => i,
             Err(e) => return ToolResult::error(format!("Invalid input: {e}")),
         };
-        ToolResult::error("Skill system requires skill registry (not yet wired)")
+        ToolResult::error("Skill requires the CLI skill loader (skills directories, frontmatter). Use the CLI subprocess transport to invoke skills.")
     }
 }

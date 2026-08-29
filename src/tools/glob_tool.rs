@@ -39,6 +39,7 @@ impl Tool for GlobTool {
     }
 
     fn is_concurrency_safe(&self) -> bool { true }
+    fn is_read_only(&self) -> bool { true }
 
     async fn execute(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
         let input: GlobInput = match serde_json::from_value(input) {

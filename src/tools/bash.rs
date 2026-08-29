@@ -71,14 +71,71 @@ impl Tool for BashTool {
             Err(e) => return ToolResult::error(format!("Invalid input: {e}")),
         };
 
+        let cwd = &context.working_directory;
+
+        // run_in_background: spawna com stdout/stderr num arquivo e registra
+        // no task store — TaskOutput lê, TaskStop mata.
+        if input.run_in_background == Some(true) {
+            let Some(store) = context.task_store.clone() else {
+                return ToolResult::error(
+                    "run_in_background requires a task store in this session",
+                );
+            };
+            let out_dir = context
+                .tool_results_dir
+                .clone()
+                .unwrap_or_else(std::env::temp_dir);
+            if let Err(e) = tokio::fs::create_dir_all(&out_dir).await {
+                return ToolResult::error(format!("Failed to create output dir: {e}"));
+            }
+            let output_path = out_dir.join(format!(
+                "bash-bg-{}.output",
+                uuid::Uuid::new_v4().simple()
+            ));
+            let file = match std::fs::File::create(&output_path) {
+                Ok(f) => f,
+                Err(e) => return ToolResult::error(format!("Failed to create output file: {e}")),
+            };
+            let stderr_file = match file.try_clone() {
+                Ok(f) => f,
+                Err(e) => return ToolResult::error(format!("Failed to clone output file: {e}")),
+            };
+            let child = tokio::process::Command::new("bash")
+                .arg("-c")
+                .arg(&input.command)
+                .current_dir(cwd)
+                .envs(&context.extra_env)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::from(file))
+                .stderr(std::process::Stdio::from(stderr_file))
+                .spawn();
+            let child = match child {
+                Ok(c) => c,
+                Err(e) => return ToolResult::error(format!("Failed to spawn process: {e}")),
+            };
+            let description = input
+                .description
+                .unwrap_or_else(|| input.command.chars().take(80).collect());
+            let id = store
+                .register_background(description, output_path.clone(), child)
+                .await;
+            return ToolResult::text(format!(
+                "Command running in background with ID: {id}. Output is being written to: {}. \
+                 Use TaskOutput to read it and TaskStop to stop it.",
+                output_path.display()
+            ));
+        }
+
         let timeout = input
             .timeout
             .map(|ms| Duration::from_millis(ms.min(600_000)))
             .unwrap_or(self.default_timeout);
 
-        let cwd = &context.working_directory;
-
-        let result = tokio::time::timeout(timeout, execute_command(&input.command, cwd)).await;
+        let result = tokio::time::timeout(
+            timeout,
+            execute_command(&input.command, cwd, &context.extra_env),
+        )
+        .await;
 
         match result {
             Ok(Ok(output)) => {
@@ -117,11 +174,16 @@ struct CommandOutput {
     exit_code: i32,
 }
 
-async fn execute_command(command: &str, cwd: &PathBuf) -> std::result::Result<CommandOutput, String> {
+async fn execute_command(
+    command: &str,
+    cwd: &PathBuf,
+    extra_env: &std::collections::HashMap<String, String>,
+) -> std::result::Result<CommandOutput, String> {
     let output = tokio::process::Command::new("bash")
         .arg("-c")
         .arg(command)
         .current_dir(cwd)
+        .envs(extra_env)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()

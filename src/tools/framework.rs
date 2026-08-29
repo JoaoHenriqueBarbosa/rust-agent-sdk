@@ -47,6 +47,25 @@ pub type PermissionCallbackFn = Arc<
         + Sync,
 >;
 
+/// Decision returned by a PreToolUse hook, mirroring the CLI's
+/// `hookSpecificOutput.permissionDecision` contract.
+#[derive(Debug, Clone, Default)]
+pub struct PreToolUseDecision {
+    /// `Some(Allow)` skips the permission callback; `Some(Deny)` blocks the
+    /// call with the message; `Some(Ask)`/`None` fall through to the normal
+    /// permission flow.
+    pub permission: Option<PermissionOutcome>,
+    /// Rewritten tool input (the hook's `updatedInput`).
+    pub updated_input: Option<serde_json::Value>,
+}
+
+/// Async PreToolUse hook: runs BEFORE the permission check and can decide it.
+pub type PreToolUseFn = Arc<
+    dyn Fn(ToolPermissionRequest) -> Pin<Box<dyn Future<Output = PreToolUseDecision> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// Event handed to the post-tool-use observer after a tool executed.
 #[derive(Debug, Clone)]
 pub struct PostToolUseEvent {
@@ -71,8 +90,13 @@ pub type PostToolUseFn = Arc<
 pub struct ToolContext {
     pub working_directory: PathBuf,
     pub permission_mode: PermissionMode,
+    /// Modo compartilhado e MUTÁVEL em runtime (set_permission_mode,
+    /// EnterPlanMode/ExitPlanMode). Quando presente, vence o campo estático.
+    pub permission_mode_shared: Option<Arc<std::sync::RwLock<PermissionMode>>>,
     /// Callback for asking user permission.
     pub permission_callback: Option<PermissionCallbackFn>,
+    /// PreToolUse hook: pode decidir a permissão ANTES do callback.
+    pub pre_tool_use: Option<PreToolUseFn>,
     /// Observer called after each tool execution (PostToolUse hook channel).
     pub post_tool_use: Option<PostToolUseFn>,
     /// Diretório onde resultados de tool GRANDES são persistidos por inteiro
@@ -80,14 +104,43 @@ pub struct ToolContext {
     /// `<persisted-output>` com preview + caminho, e o modelo relê com Read.
     /// `None` desliga a persistência e cai no truncamento.
     pub tool_results_dir: Option<PathBuf>,
+    /// Diretórios adicionais em que as file tools podem operar (add_dirs).
+    pub additional_directories: Vec<PathBuf>,
+    /// Env extra herdado das options — aplicado por tools que spawnam
+    /// processos (Bash).
+    pub extra_env: std::collections::HashMap<String, String>,
+    /// Store de tarefas da sessão (TodoV2 + processos de background).
+    pub task_store: Option<Arc<crate::tools::task_store::TaskStore>>,
+    /// Lista de todos vigente (TodoWrite v1) — o output devolve old/new.
+    pub todo_store: Option<Arc<std::sync::Mutex<serde_json::Value>>>,
+}
+
+impl ToolContext {
+    /// O modo vigente: o compartilhado quando existe, senão o estático.
+    pub fn mode(&self) -> PermissionMode {
+        self.permission_mode_shared
+            .as_ref()
+            .and_then(|m| m.read().ok().map(|g| *g))
+            .unwrap_or(self.permission_mode)
+    }
+
+    /// Muda o modo vigente (efetivo só quando há modo compartilhado).
+    pub fn set_mode(&self, mode: PermissionMode) {
+        if let Some(shared) = &self.permission_mode_shared {
+            if let Ok(mut guard) = shared.write() {
+                *guard = mode;
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for ToolContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolContext")
             .field("working_directory", &self.working_directory)
-            .field("permission_mode", &self.permission_mode)
+            .field("permission_mode", &self.mode())
             .field("has_permission_callback", &self.permission_callback.is_some())
+            .field("has_pre_tool_use", &self.pre_tool_use.is_some())
             .field("has_post_tool_use", &self.post_tool_use.is_some())
             .field("tool_results_dir", &self.tool_results_dir)
             .finish()
@@ -99,9 +152,15 @@ impl Default for ToolContext {
         Self {
             working_directory: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             permission_mode: PermissionMode::Default,
+            permission_mode_shared: None,
             permission_callback: None,
+            pre_tool_use: None,
             post_tool_use: None,
             tool_results_dir: None,
+            additional_directories: Vec::new(),
+            extra_env: std::collections::HashMap::new(),
+            task_store: None,
+            todo_store: None,
         }
     }
 }
@@ -186,6 +245,24 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Whether this tool only READS state — read-only tools are auto-allowed
+    /// in plan mode; everything else is refused there.
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    /// Whether this tool is a file-edit tool — auto-allowed in acceptEdits.
+    fn is_edit_tool(&self) -> bool {
+        false
+    }
+
+    /// Whether this tool ALWAYS goes through the permission callback — the
+    /// callback is its answer channel (AskUserQuestion), so no mode may
+    /// auto-allow or auto-deny it.
+    fn always_asks(&self) -> bool {
+        false
+    }
+
     /// Execute the tool with the given input.
     async fn execute(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult;
 }
@@ -227,6 +304,7 @@ impl ToolRegistry {
         self.register(Box::new(glob_tool::GlobTool));
         self.register(Box::new(grep::GrepTool));
         self.register(Box::new(notebook::NotebookEditTool));
+        self.register(Box::new(web_fetch::WebFetchTool));
         self.register(Box::new(ask_user::AskUserQuestionTool));
         self.register(Box::new(todo::TodoWriteTool));
         self.register(Box::new(tasks::TaskCreateTool));
@@ -235,6 +313,15 @@ impl ToolRegistry {
         self.register(Box::new(tasks::TaskUpdateTool));
         self.register(Box::new(tasks::TaskStopTool));
         self.register(Box::new(tasks::TaskOutputTool));
+        self.register(Box::new(plan_mode::EnterPlanModeTool));
+        self.register(Box::new(plan_mode::ExitPlanModeTool));
+    }
+
+    /// Remove do registry as tools cujo nome não passa no predicado — usado
+    /// para honrar deny rules incondicionais antes do request.
+    pub fn retain(&mut self, keep: impl Fn(&str) -> bool) {
+        self.tools.retain(|t| keep(t.name()));
+        self.shared_tools.retain(|t| keep(t.name()));
     }
 
     /// Iterator over all tools (owned + shared).
@@ -403,52 +490,139 @@ impl ToolExecutor {
         tool_use: crate::api::streaming::ToolUseBlock,
     ) -> ToolExecutionResult {
         let mut tool_use = tool_use;
-        // Check permissions
-        let decision = self.permission_rules.check(&tool_use.name, &tool_use.input);
-        match decision {
-            PermissionDecision::Deny(reason) => {
+
+        // ── PreToolUse hook: roda ANTES da permissão e pode decidi-la
+        // (o resolveHookPermissionDecision do CLI). Deny bloqueia com a
+        // mensagem; Allow pula o can_use_tool; updatedInput reescreve o input.
+        let mut hook_allowed = false;
+        if let Some(hook) = &self.context.pre_tool_use {
+            let request = ToolPermissionRequest {
+                tool_name: tool_use.name.clone(),
+                description: format!("Tool {} wants to execute", tool_use.name),
+                input: tool_use.input.clone(),
+                tool_use_id: Some(tool_use.id.clone()),
+            };
+            let decision = hook(request).await;
+            if let Some(new_input) = decision.updated_input {
+                tool_use.input = new_input;
+            }
+            match decision.permission {
+                Some(PermissionOutcome::Deny { message }) => {
+                    return self
+                        .observe_post_tool_use(ToolExecutionResult {
+                            tool_use_id: tool_use.id.clone(),
+                            result: ToolResult::error(message),
+                            denied: true,
+                        }, &tool_use)
+                        .await;
+                }
+                Some(PermissionOutcome::Allow { updated_input }) => {
+                    if let Some(new_input) = updated_input {
+                        tool_use.input = new_input;
+                    }
+                    hook_allowed = true;
+                }
+                None => {}
+            }
+        }
+
+        let mode = self.context.mode();
+        let (read_only, edit_tool, always_asks) = self
+            .registry
+            .get(&tool_use.name)
+            .map(|t| (t.is_read_only(), t.is_edit_tool(), t.always_asks()))
+            .unwrap_or((false, false, false));
+
+        // ── Rules: deny precede TUDO (inclusive hook allow e bypass).
+        let rule_decision = self.permission_rules.check(&tool_use.name, &tool_use.input);
+        if let PermissionDecision::Deny(reason) = rule_decision {
+            return self
+                .observe_post_tool_use(ToolExecutionResult {
+                    tool_use_id: tool_use.id.clone(),
+                    result: ToolResult::error(format!("Permission denied: {reason}")),
+                    denied: true,
+                }, &tool_use)
+                .await;
+        }
+
+        // ── Plan mode: mutação é recusada mesmo com allow rule — o modo é a
+        // regra mais forte depois do deny. ExitPlanMode é a exceção: ele é a
+        // SAÍDA do plan mode e passa pelo fluxo de aprovação normal.
+        if mode == PermissionMode::Plan
+            && !read_only
+            && !hook_allowed
+            && !always_asks
+            && tool_use.name != "ExitPlanMode"
+        {
+            return self
+                .observe_post_tool_use(ToolExecutionResult {
+                    tool_use_id: tool_use.id.clone(),
+                    result: ToolResult::error(format!(
+                        "Permission denied: plan mode is active. '{}' modifies state; \
+                         only read-only tools may run. Present your plan with ExitPlanMode first.",
+                        tool_use.name
+                    )),
+                    denied: true,
+                }, &tool_use)
+                .await;
+        }
+
+        // ── Auto-allow por modo/regra; senão pergunta (ou nega em dontAsk).
+        // Read-only nunca pergunta (o CLI não prompta Read/Grep/Glob);
+        // `always_asks` (AskUserQuestion) força o callback SEMPRE: ele é o
+        // canal de resposta, não uma permissão.
+        let auto_allowed = !always_asks
+            && (hook_allowed
+                || read_only
+                || matches!(rule_decision, PermissionDecision::Allow)
+                || matches!(mode, PermissionMode::BypassPermissions | PermissionMode::Auto)
+                || (mode == PermissionMode::AcceptEdits && edit_tool));
+
+        if !auto_allowed {
+            if mode == PermissionMode::DontAsk && !always_asks {
                 return self
                     .observe_post_tool_use(ToolExecutionResult {
                         tool_use_id: tool_use.id.clone(),
-                        result: ToolResult::error(format!("Permission denied: {reason}")),
+                        result: ToolResult::error(format!(
+                            "Permission denied: '{}' would require asking the user, \
+                             and dontAsk mode is active.",
+                            tool_use.name
+                        )),
                         denied: true,
                     }, &tool_use)
                     .await;
             }
-            PermissionDecision::Ask => {
-                if let Some(callback) = &self.context.permission_callback {
-                    let request = ToolPermissionRequest {
-                        tool_name: tool_use.name.clone(),
-                        description: format!("Tool {} wants to execute", tool_use.name),
-                        input: tool_use.input.clone(),
-                        tool_use_id: Some(tool_use.id.clone()),
-                    };
-                    match callback(request).await {
-                        PermissionOutcome::Allow { updated_input } => {
-                            if let Some(new_input) = updated_input {
-                                tool_use.input = new_input;
-                            }
-                        }
-                        PermissionOutcome::Deny { message } => {
-                            return self
-                                .observe_post_tool_use(ToolExecutionResult {
-                                    tool_use_id: tool_use.id.clone(),
-                                    result: ToolResult::error(message),
-                                    denied: true,
-                                }, &tool_use)
-                                .await;
+            if let Some(callback) = &self.context.permission_callback {
+                let request = ToolPermissionRequest {
+                    tool_name: tool_use.name.clone(),
+                    description: format!("Tool {} wants to execute", tool_use.name),
+                    input: tool_use.input.clone(),
+                    tool_use_id: Some(tool_use.id.clone()),
+                };
+                match callback(request).await {
+                    PermissionOutcome::Allow { updated_input } => {
+                        if let Some(new_input) = updated_input {
+                            tool_use.input = new_input;
                         }
                     }
-                } else if self.context.permission_mode != PermissionMode::BypassPermissions {
-                    // No callback and not in bypass mode — deny
-                    return ToolExecutionResult {
-                        tool_use_id: tool_use.id,
-                        result: ToolResult::error("Permission required but no callback available"),
-                        denied: true,
-                    };
+                    PermissionOutcome::Deny { message } => {
+                        return self
+                            .observe_post_tool_use(ToolExecutionResult {
+                                tool_use_id: tool_use.id.clone(),
+                                result: ToolResult::error(message),
+                                denied: true,
+                            }, &tool_use)
+                            .await;
+                    }
                 }
+            } else {
+                // No callback and no auto-allow — deny
+                return ToolExecutionResult {
+                    tool_use_id: tool_use.id,
+                    result: ToolResult::error("Permission required but no callback available"),
+                    denied: true,
+                };
             }
-            PermissionDecision::Allow => {}
         }
 
         // Find and execute the tool

@@ -17,6 +17,7 @@ pub mod ask_user;
 pub mod todo;
 pub mod send_message;
 pub mod tasks;
+pub mod task_store;
 pub mod plan_mode;
 pub mod worktree;
 pub mod skill;

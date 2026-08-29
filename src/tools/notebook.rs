@@ -21,6 +21,7 @@ struct NotebookEditInput {
 #[async_trait]
 impl Tool for NotebookEditTool {
     fn name(&self) -> &str { "NotebookEdit" }
+    fn is_edit_tool(&self) -> bool { true }
 
     fn description(&self) -> &str {
         "Replaces, inserts, or deletes a cell in a Jupyter notebook (.ipynb file)."

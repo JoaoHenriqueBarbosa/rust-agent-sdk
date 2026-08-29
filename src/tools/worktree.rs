@@ -17,7 +17,7 @@ impl Tool for EnterWorktreeTool {
         })
     }
     async fn execute(&self, _input: serde_json::Value, _context: &ToolContext) -> ToolResult {
-        ToolResult::error("Worktree management requires git integration (not yet wired)")
+        ToolResult::error("Worktree isolation requires the CLI runtime. Use the CLI subprocess transport for worktree sessions.")
     }
 }
 
@@ -37,6 +37,6 @@ impl Tool for ExitWorktreeTool {
         })
     }
     async fn execute(&self, _input: serde_json::Value, _context: &ToolContext) -> ToolResult {
-        ToolResult::error("Worktree management requires git integration (not yet wired)")
+        ToolResult::error("Worktree isolation requires the CLI runtime. Use the CLI subprocess transport for worktree sessions.")
     }
 }

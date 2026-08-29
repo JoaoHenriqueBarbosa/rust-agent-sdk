@@ -41,6 +41,6 @@ impl Tool for SendMessageTool {
         };
 
         // Requires the agent messaging system to be wired up.
-        ToolResult::error("SendMessage requires agent messaging (not yet wired)")
+        ToolResult::error("SendMessage requires an agent-team runtime, which is only available through the CLI subprocess transport. Use the CLI transport for multi-agent messaging.")
     }
 }

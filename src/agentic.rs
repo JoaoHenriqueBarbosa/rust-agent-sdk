@@ -56,6 +56,18 @@ pub type StopHookCallback = Arc<
         + Sync,
 >;
 
+/// Async callback fired right BEFORE an expensive compaction runs. The
+/// argument is the trigger ("auto" | "reactive" | "reactive_413") — the same
+/// channel the CLI uses for the PreCompact hook.
+pub type PreCompactHook =
+    Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+/// Callback fired whenever the loop REWRITES the message history in place
+/// (microcompact clearing tool_results, compaction replacing everything).
+/// The transport uses it to keep its cross-turn history in sync — without it,
+/// the compacted context would silently grow back on the next user turn.
+pub type HistoryRewriteFn = Arc<dyn Fn(Vec<ApiMessage>) + Send + Sync>;
+
 // ---------------------------------------------------------------------------
 // SDK message types — mirrors TS SDKMessage union
 // ---------------------------------------------------------------------------
@@ -164,6 +176,11 @@ pub struct AgenticLoopOptions {
     /// Optional session ID — when set, reuses the given ID instead of
     /// generating a new one (e.g. for session resume).
     pub session_id: Option<String>,
+    /// Fired before each expensive compaction (PreCompact hook channel).
+    pub pre_compact_hook: Option<PreCompactHook>,
+    /// Fired when the loop rewrites history in place (micro/auto/reactive
+    /// compaction) so the caller can keep its own copy in sync.
+    pub on_history_rewrite: Option<HistoryRewriteFn>,
 }
 
 impl std::fmt::Debug for AgenticLoopOptions {
@@ -196,6 +213,8 @@ impl Default for AgenticLoopOptions {
             fallback_model: None,
             stop_hook: None,
             session_id: None,
+            pre_compact_hook: None,
+            on_history_rewrite: None,
         }
     }
 }
@@ -595,6 +614,9 @@ impl AgenticLoop {
                     if cleared > 0 {
                         // O histórico mudou: a âncora de usage ficou obsoleta.
                         state.usage_anchor = None;
+                        if let Some(ref rewrite) = self.options.on_history_rewrite {
+                            rewrite(messages_for_query.clone());
+                        }
                         context_token_count = hybrid_token_count(
                             &messages_for_query,
                             &self.options.system_prompt,
@@ -614,6 +636,9 @@ impl AgenticLoop {
                 if state.auto_compact_tracking.consecutive_failures < 3
                     && self.auto_compact.should_compact(context_token_count)
                 {
+                    if let Some(ref pre_compact) = self.options.pre_compact_hook {
+                        pre_compact("auto".to_string()).await;
+                    }
                     match self.compaction_engine.compact(&messages_for_query, &self.sys_text()).await {
                         Ok(compacted) => {
                             messages_for_query = compacted;
@@ -627,15 +652,6 @@ impl AgenticLoop {
                                 turn_counter: 0,
                                 consecutive_failures: 0,
                             };
-
-                            yield Ok(AgenticEvent::System {
-                                subtype: "compact_boundary".to_string(),
-                                data: serde_json::json!({
-                                    "compact_metadata": { "trigger": "auto" }
-                                }),
-                                uuid: new_uuid(),
-                                session_id: sid.clone(),
-                            });
 
                             // ─── Post-compact file restoration ───────────
                             // Port of createPostCompactFileAttachments — re-attach
@@ -661,6 +677,22 @@ impl AgenticLoop {
                                 }
                             }
                             self.read_file_tracker.clear();
+
+                            // O rewrite carrega o histórico COMPLETO pós-compact
+                            // (boundary + attachments) e precisa preceder o
+                            // evento — o transporte aplica o snapshot quando o
+                            // compact_boundary chega.
+                            if let Some(ref rewrite) = self.options.on_history_rewrite {
+                                rewrite(messages_for_query.clone());
+                            }
+                            yield Ok(AgenticEvent::System {
+                                subtype: "compact_boundary".to_string(),
+                                data: serde_json::json!({
+                                    "compact_metadata": { "trigger": "auto" }
+                                }),
+                                uuid: new_uuid(),
+                                session_id: sid.clone(),
+                            });
                         }
                         Err(_) => {
                             self.auto_compact.record_failure();
@@ -762,6 +794,9 @@ impl AgenticLoop {
 
                             // Port: reactive compact on prompt-too-long
                             if is_prompt_too_long_err && !state.has_attempted_reactive_compact {
+                                if let Some(ref pre_compact) = self.options.pre_compact_hook {
+                                    pre_compact("reactive".to_string()).await;
+                                }
                                 match self.compaction_engine.compact(&messages_for_query, &self.sys_text()).await {
                                     Ok(compacted) => {
                                         let mut compacted_with_boundary = compacted;
@@ -770,6 +805,9 @@ impl AgenticLoop {
                                         state.usage_anchor = None;
                                         state.has_attempted_reactive_compact = true;
                                         state.transition = Some(Transition::ReactiveCompactRetry);
+                                        if let Some(ref rewrite) = self.options.on_history_rewrite {
+                                            rewrite(state.messages.clone());
+                                        }
                                         yield Ok(AgenticEvent::System {
                                             subtype: "compact_boundary".to_string(),
                                             data: serde_json::json!({
@@ -1065,6 +1103,9 @@ impl AgenticLoop {
                     // (rather than as an HTTP error), attempt reactive compaction.
                     if is_prompt_too_long_message(&assistant_msg) {
                         if !state.has_attempted_reactive_compact {
+                            if let Some(ref pre_compact) = self.options.pre_compact_hook {
+                                pre_compact("reactive_413".to_string()).await;
+                            }
                             match self.compaction_engine.compact(&messages_for_query, &self.sys_text()).await {
                                 Ok(compacted) => {
                                     let mut compacted_with_boundary = compacted;
@@ -1072,6 +1113,9 @@ impl AgenticLoop {
                                     state.messages = compacted_with_boundary;
                                     state.has_attempted_reactive_compact = true;
                                     state.transition = Some(Transition::ReactiveCompactRetry);
+                                    if let Some(ref rewrite) = self.options.on_history_rewrite {
+                                        rewrite(state.messages.clone());
+                                    }
                                     yield Ok(AgenticEvent::System {
                                         subtype: "compact_boundary".to_string(),
                                         data: serde_json::json!({

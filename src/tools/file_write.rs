@@ -15,6 +15,7 @@ struct FileWriteInput {
 #[async_trait]
 impl Tool for FileWriteTool {
     fn name(&self) -> &str { "Write" }
+    fn is_edit_tool(&self) -> bool { true }
 
     fn description(&self) -> &str {
         "Writes content to a file on the local filesystem. Creates parent directories if needed."

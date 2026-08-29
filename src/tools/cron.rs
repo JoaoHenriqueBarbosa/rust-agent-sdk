@@ -36,6 +36,6 @@ impl Tool for ScheduleCronTool {
             Ok(i) => i,
             Err(e) => return ToolResult::error(format!("Invalid input: {e}")),
         };
-        ToolResult::error("Cron scheduling requires scheduler integration (not yet wired)")
+        ToolResult::error("ScheduleCron requires the CLI session scheduler. Use the CLI subprocess transport for cron jobs.")
     }
 }

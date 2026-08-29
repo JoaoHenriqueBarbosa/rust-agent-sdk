@@ -27,6 +27,7 @@ struct TodoItem {
 #[async_trait]
 impl Tool for TodoWriteTool {
     fn name(&self) -> &str { "TodoWrite" }
+    fn is_read_only(&self) -> bool { true }
 
     fn description(&self) -> &str {
         "Write or update a structured task list."
@@ -53,13 +54,29 @@ impl Tool for TodoWriteTool {
         })
     }
 
-    async fn execute(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
-        let input: TodoWriteInput = match serde_json::from_value(input) {
+    async fn execute(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let parsed: TodoWriteInput = match serde_json::from_value(input.clone()) {
             Ok(i) => i,
             Err(e) => return ToolResult::error(format!("Invalid input: {e}")),
         };
 
-        let count = input.todos.len();
+        let count = parsed.todos.len();
+        let new_todos = input.get("todos").cloned().unwrap_or(serde_json::json!([]));
+        // Persiste no store da sessão e devolve old/new como o CLI.
+        if let Some(store) = &context.todo_store {
+            let old_todos = {
+                let mut guard = store.lock().unwrap_or_else(|e| e.into_inner());
+                std::mem::replace(&mut *guard, new_todos.clone())
+            };
+            let payload = serde_json::json!({
+                "oldTodos": old_todos,
+                "newTodos": new_todos,
+            });
+            return ToolResult::text(format!(
+                "Updated {count} todo items\n{}",
+                serde_json::to_string(&payload).unwrap_or_default()
+            ));
+        }
         ToolResult::text(format!("Updated {count} todo items"))
     }
 }
