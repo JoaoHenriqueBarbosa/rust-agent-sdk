@@ -500,7 +500,7 @@ impl ClaudeAgentOptions {
             // estado mutável com o original.
             sdk_mcp_servers: self.sdk_mcp_servers.clone(),
             strict_mcp_config: self.strict_mcp_config,
-            permission_mode: self.permission_mode.clone(),
+            permission_mode: self.permission_mode,
             continue_conversation: self.continue_conversation,
             resume: self.resume.clone(),
             session_id: self.session_id.clone(),

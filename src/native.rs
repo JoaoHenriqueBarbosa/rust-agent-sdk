@@ -856,13 +856,15 @@ async fn engine_main(
             &options,
             &shared,
             &config,
-            &session_id,
-            &transcript_path,
-            tool_results_dir,
-            Arc::clone(&task_store),
-            Arc::clone(&todo_store),
-            client.clone(),
-            model.clone(),
+            ExecutorSetup {
+                session_id: session_id.clone(),
+                transcript_path: transcript_path.clone(),
+                tool_results_dir,
+                task_store: Arc::clone(&task_store),
+                todo_store: Arc::clone(&todo_store),
+                client: client.clone(),
+                model: model.clone(),
+            },
         )
         .await;
 
@@ -1192,18 +1194,38 @@ fn register_named_builtins(registry: &mut ToolRegistry, names: &[String]) {
     }
 }
 
-async fn build_executor(
-    options: &ClaudeAgentOptions,
-    shared: &Arc<Shared>,
-    config: &EngineConfig,
-    session_id: &str,
-    transcript_path: &str,
+/// O que o executor precisa da sessão viva, além das opções e do estado
+/// compartilhado: a identidade da conversa, onde ela é espelhada, e os
+/// depósitos que as builtins de estado usam. Vieram parar numa struct porque
+/// dez parâmetros posicionais do mesmo tipo `String`/`Arc` são trocáveis em
+/// silêncio — o compilador não distingue `session_id` de `transcript_path`.
+struct ExecutorSetup {
+    session_id: String,
+    transcript_path: String,
     tool_results_dir: std::path::PathBuf,
     task_store: Arc<crate::tools::task_store::TaskStore>,
     todo_store: Arc<std::sync::Mutex<serde_json::Value>>,
     client: AnthropicClient,
     model: String,
+}
+
+async fn build_executor(
+    options: &ClaudeAgentOptions,
+    shared: &Arc<Shared>,
+    config: &EngineConfig,
+    setup: ExecutorSetup,
 ) -> ToolExecutor {
+    let ExecutorSetup {
+        session_id,
+        transcript_path,
+        tool_results_dir,
+        task_store,
+        todo_store,
+        client,
+        model,
+    } = setup;
+    let session_id = session_id.as_str();
+    let transcript_path = transcript_path.as_str();
     let permission_rules = crate::tools::permission::PermissionRules::from_lists(
         &options.allowed_tools,
         &options.disallowed_tools,

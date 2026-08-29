@@ -101,6 +101,13 @@ pub fn estimate_tool_definition_tokens(tools: &[crate::api::types::ToolDefinitio
     }).sum()
 }
 
+/// Estimativa com margem de segurança de 1.33x (a mesma do microcompact do
+/// CLI): a heurística de 4 chars/token SUBESTIMA JSON de tool_use/tool_result,
+/// e subestimar contexto significa estourar a janela antes de compactar.
+pub fn estimate_message_tokens_with_margin(messages: &[crate::api::types::ApiMessage]) -> usize {
+    estimate_message_tokens(messages).saturating_mul(4) / 3
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,11 +148,4 @@ mod tests {
         let tokens = estimate_system_tokens(&system);
         assert!(tokens > 0);
     }
-}
-
-/// Estimativa com margem de segurança de 1.33x (a mesma do microcompact do
-/// CLI): a heurística de 4 chars/token SUBESTIMA JSON de tool_use/tool_result,
-/// e subestimar contexto significa estourar a janela antes de compactar.
-pub fn estimate_message_tokens_with_margin(messages: &[crate::api::types::ApiMessage]) -> usize {
-    estimate_message_tokens(messages).saturating_mul(4) / 3
 }
