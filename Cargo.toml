@@ -39,7 +39,7 @@ rand = "0.8"
 # Optional session-store backends. Each is gated behind a feature so the
 # default build (and the published core) stays free of heavy transport deps.
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "json"], optional = true }
-redis = { version = "0.27", default-features = false, features = ["tokio-comp"], optional = true }
+redis = { version = "1.6", default-features = false, features = ["tokio-comp"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
