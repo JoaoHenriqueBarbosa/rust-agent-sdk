@@ -753,6 +753,36 @@ pub struct ToolExecutionResult {
 /// - If schema has `"required"` array, all listed fields must be present in input.
 ///
 /// Returns `Ok(())` on success, or `Err(message)` describing the validation failure.
+/// A forma que a tool espera, escrita como o modelo a escreveria:
+/// `{"campo": <tipo>, ...}` com os obrigatórios primeiro.
+fn expected_shape(schema: &serde_json::Value) -> String {
+    let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) else {
+        return String::from("{}");
+    };
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|items| items.iter().filter_map(|r| r.as_str()).collect())
+        .unwrap_or_default();
+    let mut fields: Vec<String> = Vec::new();
+    for name in &required {
+        let kind = properties
+            .get(*name)
+            .and_then(|p| p.get("type"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("any");
+        fields.push(format!("\"{name}\": <{kind}>"));
+    }
+    for (name, spec) in properties {
+        if required.contains(&name.as_str()) {
+            continue;
+        }
+        let kind = spec.get("type").and_then(|t| t.as_str()).unwrap_or("any");
+        fields.push(format!("\"{name}\"?: <{kind}>"));
+    }
+    format!("{{{}}}", fields.join(", "))
+}
+
 fn validate_tool_input(input: &serde_json::Value, schema: &serde_json::Value) -> std::result::Result<(), String> {
     // Check type: object
     if let Some(schema_type) = schema.get("type").and_then(|t| t.as_str()) {
@@ -780,10 +810,22 @@ fn validate_tool_input(input: &serde_json::Value, schema: &serde_json::Value) ->
                 .filter(|field| !obj.contains_key(*field))
                 .collect();
             if !missing.is_empty() {
+                // A recusa mostra a FORMA esperada, não só o que faltou.
+                // Medido em 29/08/2026: um modelo chamou uma tool de campo
+                // único com o nome errado (`rereport` em vez de `report`),
+                // leu sete vezes "Missing required field: report" — que não
+                // diz o que ele mandou nem qual é a forma certa — e desistiu
+                // sem registrar. Erro que não ensina o conserto vira loop.
                 return Err(format!(
-                    "Missing required field{}: {}",
+                    "Missing required field{}: {}. Expected shape: {}. Received keys: {}",
                     if missing.len() > 1 { "s" } else { "" },
-                    missing.join(", ")
+                    missing.join(", "),
+                    expected_shape(schema),
+                    if obj.is_empty() {
+                        String::from("(none)")
+                    } else {
+                        obj.keys().cloned().collect::<Vec<_>>().join(", ")
+                    }
                 ));
             }
         }
