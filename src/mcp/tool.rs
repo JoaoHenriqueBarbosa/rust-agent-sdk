@@ -92,9 +92,9 @@ impl Tool for McpTool {
                 // Append any __table_event__ lines captured from stderr
                 let stderr_events = self.client.take_stderr_events().await;
                 if !stderr_events.is_empty() {
-                    tool_result.content.push(
-                        ToolResultContent::Text(stderr_events.join("\n"))
-                    );
+                    tool_result
+                        .content
+                        .push(ToolResultContent::Text(stderr_events.join("\n")));
                 }
 
                 tool_result
@@ -128,7 +128,10 @@ fn extract_mcp_result(result: &Value) -> ToolResult {
                 }
                 "image" => {
                     let data = item.get("data").and_then(|d| d.as_str()).unwrap_or("");
-                    let media_type = item.get("mimeType").and_then(|m| m.as_str()).unwrap_or("image/png");
+                    let media_type = item
+                        .get("mimeType")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("image/png");
                     if !data.is_empty() {
                         parts.push(ToolResultContent::Image {
                             data: data.to_string(),
@@ -141,7 +144,8 @@ fn extract_mcp_result(result: &Value) -> ToolResult {
                         if let Some(text) = resource.get("text").and_then(|t| t.as_str()) {
                             parts.push(ToolResultContent::Text(text.to_string()));
                         } else if let Some(blob) = resource.get("blob").and_then(|b| b.as_str()) {
-                            let media_type = resource.get("mimeType")
+                            let media_type = resource
+                                .get("mimeType")
                                 .and_then(|m| m.as_str())
                                 .unwrap_or("application/octet-stream");
                             if media_type.starts_with("image/") {
@@ -182,12 +186,15 @@ fn extract_mcp_result(result: &Value) -> ToolResult {
 #[allow(dead_code)]
 fn extract_mcp_result_text(result: &Value) -> String {
     let tool_result = extract_mcp_result(result);
-    tool_result.content.iter().filter_map(|c| {
-        match c {
+    tool_result
+        .content
+        .iter()
+        .filter_map(|c| match c {
             ToolResultContent::Text(t) => Some(t.as_str()),
             _ => None,
-        }
-    }).collect::<Vec<_>>().join("\n")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -198,8 +205,14 @@ mod tests {
     fn test_normalize_name_for_mcp() {
         assert_eq!(normalize_name_for_mcp("school"), "school");
         assert_eq!(normalize_name_for_mcp("my-server"), "my-server");
-        assert_eq!(normalize_name_for_mcp("claude.ai Google Drive"), "claude_ai_Google_Drive");
-        assert_eq!(normalize_name_for_mcp("server with spaces"), "server_with_spaces");
+        assert_eq!(
+            normalize_name_for_mcp("claude.ai Google Drive"),
+            "claude_ai_Google_Drive"
+        );
+        assert_eq!(
+            normalize_name_for_mcp("server with spaces"),
+            "server_with_spaces"
+        );
     }
 
     #[test]

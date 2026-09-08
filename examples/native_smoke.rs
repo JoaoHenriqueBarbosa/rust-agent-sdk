@@ -1,7 +1,9 @@
 //! Smoke do transporte nativo contra um endpoint real: um turno de texto.
 //! Uso: ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY/ANTHROPIC_MODEL no ambiente.
 
-use rust_agent_sdk::{ClaudeAgentOptions, ClaudeSDKClient, ContentBlock, Message, NativeApiTransport};
+use rust_agent_sdk::{
+    ClaudeAgentOptions, ClaudeSDKClient, ContentBlock, Message, NativeApiTransport,
+};
 
 #[tokio::main]
 async fn main() {

@@ -19,7 +19,9 @@ const MAX_CONTENT_SIZE: usize = 200 * 1024;
 
 #[async_trait]
 impl Tool for WebFetchTool {
-    fn name(&self) -> &str { "WebFetch" }
+    fn name(&self) -> &str {
+        "WebFetch"
+    }
 
     fn description(&self) -> &str {
         "Fetches content from a URL. Returns the page content as text."
@@ -36,8 +38,12 @@ impl Tool for WebFetchTool {
         })
     }
 
-    fn is_concurrency_safe(&self) -> bool { true }
-    fn is_read_only(&self) -> bool { true }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+    fn is_read_only(&self) -> bool {
+        true
+    }
 
     async fn execute(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
         let input: WebFetchInput = match serde_json::from_value(input) {

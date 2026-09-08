@@ -15,7 +15,9 @@ struct GlobInput {
 
 #[async_trait]
 impl Tool for GlobTool {
-    fn name(&self) -> &str { "Glob" }
+    fn name(&self) -> &str {
+        "Glob"
+    }
 
     fn description(&self) -> &str {
         "Find files matching a glob pattern. Returns matching file paths."
@@ -38,8 +40,12 @@ impl Tool for GlobTool {
         })
     }
 
-    fn is_concurrency_safe(&self) -> bool { true }
-    fn is_read_only(&self) -> bool { true }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+    fn is_read_only(&self) -> bool {
+        true
+    }
 
     async fn execute(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
         let input: GlobInput = match serde_json::from_value(input) {
@@ -118,7 +124,10 @@ mod tests {
         };
 
         let result = tool
-            .execute(serde_json::json!({"pattern": "*.nonexistent_extension_xyz"}), &ctx)
+            .execute(
+                serde_json::json!({"pattern": "*.nonexistent_extension_xyz"}),
+                &ctx,
+            )
             .await;
         assert!(!result.is_error);
         match &result.content[0] {

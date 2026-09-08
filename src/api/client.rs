@@ -8,8 +8,10 @@ use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::api::error_classifier::classify_api_error;
-use crate::api::retry::{apply_unified_reset, ErrorKind, RetryConfig, get_retry_delay, should_retry};
-use crate::api::streaming::{AssistantMessage, StreamAccumulator, StreamUpdate, parse_sse_data};
+use crate::api::retry::{
+    apply_unified_reset, get_retry_delay, should_retry, ErrorKind, RetryConfig,
+};
+use crate::api::streaming::{parse_sse_data, AssistantMessage, StreamAccumulator, StreamUpdate};
 use crate::api::types::*;
 use crate::errors::{ClaudeSDKError, Result};
 
@@ -206,7 +208,8 @@ impl AnthropicClient {
                         let adjusted = available
                             .unwrap_or(crate::api::retry::FLOOR_OUTPUT_TOKENS)
                             .max(crate::api::retry::FLOOR_OUTPUT_TOKENS);
-                        if request.max_tokens > adjusted && attempt < self.retry_config.max_retries {
+                        if request.max_tokens > adjusted && attempt < self.retry_config.max_retries
+                        {
                             request.max_tokens = adjusted;
                             body = serde_json::to_string(&request).map_err(|e| {
                                 ClaudeSDKError::sdk(format!("Failed to serialize request: {e}"))
@@ -236,10 +239,8 @@ impl AnthropicClient {
                         return Err(ClaudeSDKError::overloaded_fallback(consecutive_529s));
                     }
 
-                    let classified = classify_api_error(
-                        status,
-                        response_body.as_deref().unwrap_or(""),
-                    );
+                    let classified =
+                        classify_api_error(status, response_body.as_deref().unwrap_or(""));
                     return Err(ClaudeSDKError::process(
                         classified,
                         Some(status as i32),
@@ -373,7 +374,8 @@ impl AnthropicClient {
                         let adjusted = available
                             .unwrap_or(crate::api::retry::FLOOR_OUTPUT_TOKENS)
                             .max(crate::api::retry::FLOOR_OUTPUT_TOKENS);
-                        if request.max_tokens > adjusted && attempt < self.retry_config.max_retries {
+                        if request.max_tokens > adjusted && attempt < self.retry_config.max_retries
+                        {
                             request.max_tokens = adjusted;
                             body = serde_json::to_string(&request).map_err(|e| {
                                 ClaudeSDKError::sdk(format!("Failed to serialize request: {e}"))
@@ -403,10 +405,8 @@ impl AnthropicClient {
                         return Err(ClaudeSDKError::overloaded_fallback(consecutive_529s));
                     }
 
-                    let classified = classify_api_error(
-                        status,
-                        response_body.as_deref().unwrap_or(""),
-                    );
+                    let classified =
+                        classify_api_error(status, response_body.as_deref().unwrap_or(""));
                     return Err(ClaudeSDKError::process(
                         classified,
                         Some(status as i32),
@@ -566,10 +566,12 @@ impl FallbackStream {
 
                         // Events were received before the error — fall back to
                         // non-streaming API call.
-                        let _ = tx.send(Ok(StreamUpdate::TextDelta {
-                            index: 0,
-                            text: String::new(), // empty delta signals fallback transition
-                        })).await;
+                        let _ = tx
+                            .send(Ok(StreamUpdate::TextDelta {
+                                index: 0,
+                                text: String::new(), // empty delta signals fallback transition
+                            }))
+                            .await;
 
                         match client.create_message(request).await {
                             Ok(response) => {
@@ -579,7 +581,7 @@ impl FallbackStream {
                                     content: response.content,
                                     stop_reason: StopReason::from(response.stop_reason.as_ref()),
                                     usage: response.usage,
-            api_error: None,
+                                    api_error: None,
                                 };
                                 let _ = tx
                                     .send(Ok(StreamUpdate::MessageComplete {

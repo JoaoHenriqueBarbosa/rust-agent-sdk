@@ -46,7 +46,7 @@ pub mod api;
 pub mod compact;
 pub mod mcp;
 pub mod messages;
+pub mod native;
 pub mod session;
 pub mod tools;
-pub mod native;
 pub use native::NativeApiTransport;

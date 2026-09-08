@@ -7,11 +7,15 @@ pub struct EnterPlanModeTool;
 
 #[async_trait]
 impl Tool for EnterPlanModeTool {
-    fn name(&self) -> &str { "EnterPlanMode" }
+    fn name(&self) -> &str {
+        "EnterPlanMode"
+    }
     fn description(&self) -> &str {
         "Enter plan mode: only read-only tools may run until the plan is approved via ExitPlanMode."
     }
-    fn is_read_only(&self) -> bool { true }
+    fn is_read_only(&self) -> bool {
+        true
+    }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({ "type": "object", "properties": {} })
     }
@@ -28,7 +32,9 @@ pub struct ExitPlanModeTool;
 
 #[async_trait]
 impl Tool for ExitPlanModeTool {
-    fn name(&self) -> &str { "ExitPlanMode" }
+    fn name(&self) -> &str {
+        "ExitPlanMode"
+    }
     fn description(&self) -> &str {
         "Present the plan for approval and exit plan mode. Approval is requested \
          through the permission callback; once approved, edits are auto-accepted."

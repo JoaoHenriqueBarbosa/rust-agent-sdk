@@ -17,7 +17,9 @@ struct SendMessageInput {
 
 #[async_trait]
 impl Tool for SendMessageTool {
-    fn name(&self) -> &str { "SendMessage" }
+    fn name(&self) -> &str {
+        "SendMessage"
+    }
 
     fn description(&self) -> &str {
         "Send a message to another agent or task."

@@ -1,6 +1,6 @@
 pub mod client;
-pub mod transport;
 pub mod tool;
+pub mod transport;
 
 pub use client::{McpClient, McpServerConfig};
 pub use tool::McpTool;

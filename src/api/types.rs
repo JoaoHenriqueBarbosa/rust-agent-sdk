@@ -58,11 +58,17 @@ pub struct ApiMessage {
 
 impl ApiMessage {
     pub fn user(content: Vec<ContentBlock>) -> Self {
-        Self { role: Role::User, content }
+        Self {
+            role: Role::User,
+            content,
+        }
     }
 
     pub fn assistant(content: Vec<ContentBlock>) -> Self {
-        Self { role: Role::Assistant, content }
+        Self {
+            role: Role::Assistant,
+            content,
+        }
     }
 }
 
@@ -87,9 +93,7 @@ pub enum ContentBlock {
         cache_control: Option<CacheControl>,
     },
     #[serde(rename = "image")]
-    Image {
-        source: ImageSource,
-    },
+    Image { source: ImageSource },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -113,9 +117,7 @@ pub enum ContentBlock {
         signature: Option<String>,
     },
     #[serde(rename = "redacted_thinking")]
-    RedactedThinking {
-        data: String,
-    },
+    RedactedThinking { data: String },
     /// Tool executada PELO SERVIDOR da API (web_search etc.) — o SDK não a
     /// executa; o bloco atravessa intacto para o histórico e requests futuras.
     #[serde(rename = "server_tool_use")]
@@ -134,7 +136,10 @@ pub enum ContentBlock {
 
 impl ContentBlock {
     pub fn text(text: impl Into<String>) -> Self {
-        Self::Text { text: text.into(), cache_control: None }
+        Self::Text {
+            text: text.into(),
+            cache_control: None,
+        }
     }
 
     pub fn text_cached(text: impl Into<String>) -> Self {
@@ -144,14 +149,30 @@ impl ContentBlock {
         }
     }
 
-    pub fn tool_use(id: impl Into<String>, name: impl Into<String>, input: serde_json::Value) -> Self {
-        Self::ToolUse { id: id.into(), name: name.into(), input }
+    pub fn tool_use(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        input: serde_json::Value,
+    ) -> Self {
+        Self::ToolUse {
+            id: id.into(),
+            name: name.into(),
+            input,
+        }
     }
 
-    pub fn tool_result(tool_use_id: impl Into<String>, content: Vec<ToolResultContent>, is_error: bool) -> Self {
+    pub fn tool_result(
+        tool_use_id: impl Into<String>,
+        content: Vec<ToolResultContent>,
+        is_error: bool,
+    ) -> Self {
         Self::ToolResult {
             tool_use_id: tool_use_id.into(),
-            content: if content.is_empty() { None } else { Some(content) },
+            content: if content.is_empty() {
+                None
+            } else {
+                Some(content)
+            },
             is_error: if is_error { Some(true) } else { None },
             cache_control: None,
         }
@@ -164,9 +185,7 @@ pub enum ToolResultContent {
     #[serde(rename = "text")]
     Text { text: String },
     #[serde(rename = "image")]
-    Image {
-        source: ImageSource,
-    },
+    Image { source: ImageSource },
 }
 
 impl ToolResultContent {
@@ -229,7 +248,9 @@ pub struct CacheControl {
 
 impl CacheControl {
     pub fn ephemeral() -> Self {
-        Self { r#type: "ephemeral".to_string() }
+        Self {
+            r#type: "ephemeral".to_string(),
+        }
     }
 }
 
@@ -293,11 +314,17 @@ pub struct ThinkingParam {
 
 impl ThinkingParam {
     pub fn enabled(budget_tokens: u32) -> Self {
-        Self { r#type: "enabled".to_string(), budget_tokens: Some(budget_tokens) }
+        Self {
+            r#type: "enabled".to_string(),
+            budget_tokens: Some(budget_tokens),
+        }
     }
 
     pub fn disabled() -> Self {
-        Self { r#type: "disabled".to_string(), budget_tokens: None }
+        Self {
+            r#type: "disabled".to_string(),
+            budget_tokens: None,
+        }
     }
 }
 
@@ -523,10 +550,14 @@ mod tests {
             _ => panic!("Expected MessageStart"),
         }
 
-        let text_start = r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+        let text_start =
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
         let event: StreamEvent = serde_json::from_str(text_start).unwrap();
         match event {
-            StreamEvent::ContentBlockStart { index, content_block } => {
+            StreamEvent::ContentBlockStart {
+                index,
+                content_block,
+            } => {
                 assert_eq!(index, 0);
                 assert!(matches!(content_block, ContentBlockStart::Text { .. }));
             }
@@ -549,7 +580,10 @@ mod tests {
         let tool_use_start = r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_123","name":"Bash"}}"#;
         let event: StreamEvent = serde_json::from_str(tool_use_start).unwrap();
         match event {
-            StreamEvent::ContentBlockStart { index, content_block } => {
+            StreamEvent::ContentBlockStart {
+                index,
+                content_block,
+            } => {
                 assert_eq!(index, 1);
                 match content_block {
                     ContentBlockStart::ToolUse { id, name } => {
@@ -598,7 +632,8 @@ mod tests {
 
     #[test]
     fn test_tool_result_content() {
-        let block = ContentBlock::tool_result("toolu_1", vec![ToolResultContent::text("ok")], false);
+        let block =
+            ContentBlock::tool_result("toolu_1", vec![ToolResultContent::text("ok")], false);
         let json = serde_json::to_value(&block).unwrap();
         assert_eq!(json["type"], "tool_result");
         assert_eq!(json["tool_use_id"], "toolu_1");
@@ -613,19 +648,31 @@ mod tests {
         assert_eq!(StopReason::from("tool_use"), StopReason::ToolUse);
         assert_eq!(StopReason::from("max_tokens"), StopReason::MaxTokens);
         assert_eq!(StopReason::from("stop_sequence"), StopReason::StopSequence);
-        assert_eq!(StopReason::from("something"), StopReason::Unknown("something".to_string()));
+        assert_eq!(
+            StopReason::from("something"),
+            StopReason::Unknown("something".to_string())
+        );
     }
 
     #[test]
     fn test_thinking_block_deserialization() {
         let thinking_start = r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#;
         let event: StreamEvent = serde_json::from_str(thinking_start).unwrap();
-        assert!(matches!(event, StreamEvent::ContentBlockStart { index: 0, content_block: ContentBlockStart::Thinking { .. } }));
+        assert!(matches!(
+            event,
+            StreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlockStart::Thinking { .. }
+            }
+        ));
 
         let thinking_delta = r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me think..."}}"#;
         let event: StreamEvent = serde_json::from_str(thinking_delta).unwrap();
         match event {
-            StreamEvent::ContentBlockDelta { delta: Delta::ThinkingDelta { thinking }, .. } => {
+            StreamEvent::ContentBlockDelta {
+                delta: Delta::ThinkingDelta { thinking },
+                ..
+            } => {
                 assert_eq!(thinking, "Let me think...");
             }
             _ => panic!("Expected ThinkingDelta"),

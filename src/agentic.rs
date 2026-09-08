@@ -22,7 +22,10 @@ use crate::compact::compact::CompactionEngine;
 use crate::compact::file_tracker::{ReadFileTracker, POST_COMPACT_MAX_LINES_PER_FILE};
 use crate::errors::Result;
 use crate::messages::api_format::inject_cache_control;
-use crate::messages::normalize::{apply_tool_result_budget_default_persisting, ensure_tool_result_pairing, normalize_messages_for_api};
+use crate::messages::normalize::{
+    apply_tool_result_budget_default_persisting, ensure_tool_result_pairing,
+    normalize_messages_for_api,
+};
 use crate::tools::framework::ToolExecutor;
 
 // ---------------------------------------------------------------------------
@@ -51,9 +54,7 @@ pub struct StopHookResult {
 
 /// Async callback invoked after the assistant finishes a turn with no tool use.
 pub type StopHookCallback = Arc<
-    dyn Fn(StopHookContext) -> Pin<Box<dyn Future<Output = StopHookResult> + Send>>
-        + Send
-        + Sync,
+    dyn Fn(StopHookContext) -> Pin<Box<dyn Future<Output = StopHookResult> + Send>> + Send + Sync,
 >;
 
 /// Async callback fired right BEFORE an expensive compaction runs. The
@@ -319,7 +320,10 @@ fn is_compact_boundary_message(msg: &ApiMessage) -> bool {
 
 /// Insert a compact boundary marker as the first message in the compacted list.
 fn insert_compact_boundary(messages: &mut Vec<ApiMessage>) {
-    messages.insert(0, ApiMessage::user(vec![ContentBlock::text(COMPACT_BOUNDARY_MARKER)]));
+    messages.insert(
+        0,
+        ApiMessage::user(vec![ContentBlock::text(COMPACT_BOUNDARY_MARKER)]),
+    );
 }
 
 fn stop_reason_str(reason: &StopReason) -> Option<String> {
@@ -389,7 +393,9 @@ fn hybrid_token_count(
         // O usage real já inclui system e tools do request anterior.
         Some((covered, context_tokens)) if covered <= messages.len() => {
             let delta = estimate_message_tokens_with_margin(&messages[covered..]);
-            usize::try_from(context_tokens).unwrap_or(usize::MAX).saturating_add(delta)
+            usize::try_from(context_tokens)
+                .unwrap_or(usize::MAX)
+                .saturating_add(delta)
         }
         _ => {
             estimate_system_tokens(system)
@@ -1566,7 +1572,9 @@ mod tests {
         let ptl_msg = AssistantMessage {
             id: "msg_1".to_string(),
             model: "test".to_string(),
-            content: vec![ContentBlock::text("Error: prompt is too long (200000 tokens > 128000 max)")],
+            content: vec![ContentBlock::text(
+                "Error: prompt is too long (200000 tokens > 128000 max)",
+            )],
             stop_reason: StopReason::EndTurn,
             usage: Usage::default(),
             api_error: Some("prompt_too_long".to_string()),
@@ -1663,9 +1671,7 @@ mod tests {
 
     #[test]
     fn test_insert_compact_boundary() {
-        let mut messages = vec![
-            ApiMessage::user(vec![ContentBlock::text("summary")]),
-        ];
+        let mut messages = vec![ApiMessage::user(vec![ContentBlock::text("summary")])];
         insert_compact_boundary(&mut messages);
         assert_eq!(messages.len(), 2);
         assert!(is_compact_boundary_message(&messages[0]));

@@ -6,7 +6,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::stream::Stream;
 
-use crate::api::types::{CacheControl, ContentBlock, ToolDefinition, ToolResultContent as ApiToolResultContent};
+use crate::api::types::{
+    CacheControl, ContentBlock, ToolDefinition, ToolResultContent as ApiToolResultContent,
+};
 use crate::tools::permission::{PermissionDecision, PermissionRules};
 use crate::types::PermissionMode;
 
@@ -81,9 +83,7 @@ pub struct PostToolUseEvent {
 /// appended to the tool_result content so it reaches the model — the same
 /// channel the CLI uses for PostToolUse hook `additionalContext`.
 pub type PostToolUseFn = Arc<
-    dyn Fn(PostToolUseEvent) -> Pin<Box<dyn Future<Output = Option<String>> + Send>>
-        + Send
-        + Sync,
+    dyn Fn(PostToolUseEvent) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> + Send + Sync,
 >;
 
 /// Context passed to tool execution.
@@ -139,7 +139,10 @@ impl std::fmt::Debug for ToolContext {
         f.debug_struct("ToolContext")
             .field("working_directory", &self.working_directory)
             .field("permission_mode", &self.mode())
-            .field("has_permission_callback", &self.permission_callback.is_some())
+            .field(
+                "has_permission_callback",
+                &self.permission_callback.is_some(),
+            )
             .field("has_pre_tool_use", &self.pre_tool_use.is_some())
             .field("has_post_tool_use", &self.post_tool_use.is_some())
             .field("tool_results_dir", &self.tool_results_dir)
@@ -207,15 +210,13 @@ impl ToolResult {
             .iter()
             .map(|c| match c {
                 ToolResultContent::Text(text) => ApiToolResultContent::Text { text: text.clone() },
-                ToolResultContent::Image { data, media_type } => {
-                    ApiToolResultContent::Image {
-                        source: crate::api::types::ImageSource {
-                            r#type: "base64".to_string(),
-                            media_type: media_type.clone(),
-                            data: data.clone(),
-                        },
-                    }
-                }
+                ToolResultContent::Image { data, media_type } => ApiToolResultContent::Image {
+                    source: crate::api::types::ImageSource {
+                        r#type: "base64".to_string(),
+                        media_type: media_type.clone(),
+                        data: data.clone(),
+                    },
+                },
             })
             .collect()
     }
@@ -286,7 +287,10 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        Self { tools: Vec::new(), shared_tools: Vec::new() }
+        Self {
+            tools: Vec::new(),
+            shared_tools: Vec::new(),
+        }
     }
 
     /// Register a tool (owned).
@@ -333,7 +337,9 @@ impl ToolRegistry {
 
     /// Iterator over all tools (owned + shared).
     fn all_tools(&self) -> impl Iterator<Item = &dyn Tool> {
-        self.tools.iter().map(|t| t.as_ref())
+        self.tools
+            .iter()
+            .map(|t| t.as_ref())
             .chain(self.shared_tools.iter().map(|t| t.as_ref()))
     }
 
@@ -457,8 +463,9 @@ impl ToolExecutor {
             if safe {
                 // Concorrentes com teto, e `buffered` (não unordered) para os
                 // resultados saírem na ordem pedida.
-                let mut stream = futures::stream::iter(run.into_iter().map(|tu| self.execute_one(tu)))
-                    .buffered(Self::MAX_TOOL_CONCURRENCY);
+                let mut stream =
+                    futures::stream::iter(run.into_iter().map(|tu| self.execute_one(tu)))
+                        .buffered(Self::MAX_TOOL_CONCURRENCY);
                 while let Some(result) = stream.next().await {
                     results.push(result);
                 }
@@ -522,11 +529,14 @@ impl ToolExecutor {
             match decision.permission {
                 Some(PermissionOutcome::Deny { message }) => {
                     return self
-                        .observe_post_tool_use(ToolExecutionResult {
-                            tool_use_id: tool_use.id.clone(),
-                            result: ToolResult::error(message),
-                            denied: true,
-                        }, &tool_use)
+                        .observe_post_tool_use(
+                            ToolExecutionResult {
+                                tool_use_id: tool_use.id.clone(),
+                                result: ToolResult::error(message),
+                                denied: true,
+                            },
+                            &tool_use,
+                        )
                         .await;
                 }
                 Some(PermissionOutcome::Allow { updated_input }) => {
@@ -550,11 +560,14 @@ impl ToolExecutor {
         let rule_decision = self.permission_rules.check(&tool_use.name, &tool_use.input);
         if let PermissionDecision::Deny(reason) = rule_decision {
             return self
-                .observe_post_tool_use(ToolExecutionResult {
-                    tool_use_id: tool_use.id.clone(),
-                    result: ToolResult::error(format!("Permission denied: {reason}")),
-                    denied: true,
-                }, &tool_use)
+                .observe_post_tool_use(
+                    ToolExecutionResult {
+                        tool_use_id: tool_use.id.clone(),
+                        result: ToolResult::error(format!("Permission denied: {reason}")),
+                        denied: true,
+                    },
+                    &tool_use,
+                )
                 .await;
         }
 
@@ -568,15 +581,18 @@ impl ToolExecutor {
             && tool_use.name != "ExitPlanMode"
         {
             return self
-                .observe_post_tool_use(ToolExecutionResult {
-                    tool_use_id: tool_use.id.clone(),
-                    result: ToolResult::error(format!(
-                        "Permission denied: plan mode is active. '{}' modifies state; \
+                .observe_post_tool_use(
+                    ToolExecutionResult {
+                        tool_use_id: tool_use.id.clone(),
+                        result: ToolResult::error(format!(
+                            "Permission denied: plan mode is active. '{}' modifies state; \
                          only read-only tools may run. Present your plan with ExitPlanMode first.",
-                        tool_use.name
-                    )),
-                    denied: true,
-                }, &tool_use)
+                            tool_use.name
+                        )),
+                        denied: true,
+                    },
+                    &tool_use,
+                )
                 .await;
         }
 
@@ -588,21 +604,27 @@ impl ToolExecutor {
             && (hook_allowed
                 || read_only
                 || matches!(rule_decision, PermissionDecision::Allow)
-                || matches!(mode, PermissionMode::BypassPermissions | PermissionMode::Auto)
+                || matches!(
+                    mode,
+                    PermissionMode::BypassPermissions | PermissionMode::Auto
+                )
                 || (mode == PermissionMode::AcceptEdits && edit_tool));
 
         if !auto_allowed {
             if mode == PermissionMode::DontAsk && !always_asks {
                 return self
-                    .observe_post_tool_use(ToolExecutionResult {
-                        tool_use_id: tool_use.id.clone(),
-                        result: ToolResult::error(format!(
-                            "Permission denied: '{}' would require asking the user, \
+                    .observe_post_tool_use(
+                        ToolExecutionResult {
+                            tool_use_id: tool_use.id.clone(),
+                            result: ToolResult::error(format!(
+                                "Permission denied: '{}' would require asking the user, \
                              and dontAsk mode is active.",
-                            tool_use.name
-                        )),
-                        denied: true,
-                    }, &tool_use)
+                                tool_use.name
+                            )),
+                            denied: true,
+                        },
+                        &tool_use,
+                    )
                     .await;
             }
             if let Some(callback) = &self.context.permission_callback {
@@ -620,11 +642,14 @@ impl ToolExecutor {
                     }
                     PermissionOutcome::Deny { message } => {
                         return self
-                            .observe_post_tool_use(ToolExecutionResult {
-                                tool_use_id: tool_use.id.clone(),
-                                result: ToolResult::error(message),
-                                denied: true,
-                            }, &tool_use)
+                            .observe_post_tool_use(
+                                ToolExecutionResult {
+                                    tool_use_id: tool_use.id.clone(),
+                                    result: ToolResult::error(message),
+                                    denied: true,
+                                },
+                                &tool_use,
+                            )
                             .await;
                     }
                 }
@@ -643,11 +668,14 @@ impl ToolExecutor {
             Some(t) => t,
             None => {
                 return self
-                    .observe_post_tool_use(ToolExecutionResult {
-                        tool_use_id: tool_use.id.clone(),
-                        result: ToolResult::error(format!("Unknown tool: {}", tool_use.name)),
-                        denied: false,
-                    }, &tool_use)
+                    .observe_post_tool_use(
+                        ToolExecutionResult {
+                            tool_use_id: tool_use.id.clone(),
+                            result: ToolResult::error(format!("Unknown tool: {}", tool_use.name)),
+                            denied: false,
+                        },
+                        &tool_use,
+                    )
                     .await;
             }
         };
@@ -656,14 +684,17 @@ impl ToolExecutor {
         let schema = tool.input_schema();
         if let Err(validation_error) = validate_tool_input(&tool_use.input, &schema) {
             return self
-                .observe_post_tool_use(ToolExecutionResult {
-                    tool_use_id: tool_use.id.clone(),
-                    result: ToolResult::error(format!(
-                        "Input validation error for {}: {}",
-                        tool_use.name, validation_error
-                    )),
-                    denied: false,
-                }, &tool_use)
+                .observe_post_tool_use(
+                    ToolExecutionResult {
+                        tool_use_id: tool_use.id.clone(),
+                        result: ToolResult::error(format!(
+                            "Input validation error for {}: {}",
+                            tool_use.name, validation_error
+                        )),
+                        denied: false,
+                    },
+                    &tool_use,
+                )
                 .await;
         }
 
@@ -679,11 +710,14 @@ impl ToolExecutor {
             None => truncate_result(result),
         };
 
-        self.observe_post_tool_use(ToolExecutionResult {
-            tool_use_id: tool_use.id.clone(),
-            result,
-            denied: false,
-        }, &tool_use)
+        self.observe_post_tool_use(
+            ToolExecutionResult {
+                tool_use_id: tool_use.id.clone(),
+                result,
+                denied: false,
+            },
+            &tool_use,
+        )
         .await
     }
 
@@ -721,13 +755,11 @@ impl ToolExecutor {
     ) -> crate::api::types::ApiMessage {
         let content: Vec<ContentBlock> = results
             .into_iter()
-            .map(|r| {
-                ContentBlock::ToolResult {
-                    tool_use_id: r.tool_use_id,
-                    content: Some(r.result.to_api_content()),
-                    is_error: if r.result.is_error { Some(true) } else { None },
-                    cache_control: None,
-                }
+            .map(|r| ContentBlock::ToolResult {
+                tool_use_id: r.tool_use_id,
+                content: Some(r.result.to_api_content()),
+                is_error: if r.result.is_error { Some(true) } else { None },
+                cache_control: None,
             })
             .collect();
 
@@ -783,7 +815,10 @@ fn expected_shape(schema: &serde_json::Value) -> String {
     format!("{{{}}}", fields.join(", "))
 }
 
-fn validate_tool_input(input: &serde_json::Value, schema: &serde_json::Value) -> std::result::Result<(), String> {
+fn validate_tool_input(
+    input: &serde_json::Value,
+    schema: &serde_json::Value,
+) -> std::result::Result<(), String> {
     // Check type: object
     if let Some(schema_type) = schema.get("type").and_then(|t| t.as_str()) {
         if schema_type == "object" && !input.is_object() {
@@ -931,15 +966,21 @@ mod tests {
 
     #[async_trait]
     impl Tool for MockTool {
-        fn name(&self) -> &str { self.name }
-        fn description(&self) -> &str { "A mock tool" }
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "A mock tool"
+        }
         fn input_schema(&self) -> serde_json::Value {
             serde_json::json!({
                 "type": "object",
                 "properties": {},
             })
         }
-        fn is_concurrency_safe(&self) -> bool { self.concurrent }
+        fn is_concurrency_safe(&self) -> bool {
+            self.concurrent
+        }
         async fn execute(&self, _input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
             ToolResult::text(format!("executed {}", self.name))
         }
@@ -949,8 +990,12 @@ mod tests {
 
     #[async_trait]
     impl Tool for BigOutputTool {
-        fn name(&self) -> &str { "Big" }
-        fn description(&self) -> &str { "Devolve um resultado enorme" }
+        fn name(&self) -> &str {
+            "Big"
+        }
+        fn description(&self) -> &str {
+            "Devolve um resultado enorme"
+        }
         fn input_schema(&self) -> serde_json::Value {
             serde_json::json!({"type": "object", "properties": {}})
         }
@@ -1020,7 +1065,10 @@ mod tests {
     #[test]
     fn test_registry() {
         let mut reg = ToolRegistry::new();
-        reg.register(Box::new(MockTool { name: "test_tool", concurrent: false }));
+        reg.register(Box::new(MockTool {
+            name: "test_tool",
+            concurrent: false,
+        }));
 
         assert_eq!(reg.len(), 1);
         assert!(reg.get("test_tool").is_some());
@@ -1031,8 +1079,14 @@ mod tests {
     #[test]
     fn test_api_definitions() {
         let mut reg = ToolRegistry::new();
-        reg.register(Box::new(MockTool { name: "bash", concurrent: false }));
-        reg.register(Box::new(MockTool { name: "read", concurrent: true }));
+        reg.register(Box::new(MockTool {
+            name: "bash",
+            concurrent: false,
+        }));
+        reg.register(Box::new(MockTool {
+            name: "read",
+            concurrent: true,
+        }));
 
         let defs = reg.api_definitions();
         assert_eq!(defs.len(), 2);
@@ -1078,9 +1132,18 @@ mod tests {
         use crate::api::streaming::ToolUseBlock;
 
         let mut reg = ToolRegistry::new();
-        reg.register(Box::new(MockTool { name: "safe1", concurrent: true }));
-        reg.register(Box::new(MockTool { name: "safe2", concurrent: true }));
-        reg.register(Box::new(MockTool { name: "unsafe1", concurrent: false }));
+        reg.register(Box::new(MockTool {
+            name: "safe1",
+            concurrent: true,
+        }));
+        reg.register(Box::new(MockTool {
+            name: "safe2",
+            concurrent: true,
+        }));
+        reg.register(Box::new(MockTool {
+            name: "unsafe1",
+            concurrent: false,
+        }));
 
         let ctx = ToolContext {
             permission_mode: PermissionMode::BypassPermissions,
@@ -1090,9 +1153,21 @@ mod tests {
         let executor = ToolExecutor::new(reg, ctx);
 
         let tool_uses = vec![
-            ToolUseBlock { id: "t1".into(), name: "safe1".into(), input: serde_json::json!({}) },
-            ToolUseBlock { id: "t2".into(), name: "safe2".into(), input: serde_json::json!({}) },
-            ToolUseBlock { id: "t3".into(), name: "unsafe1".into(), input: serde_json::json!({}) },
+            ToolUseBlock {
+                id: "t1".into(),
+                name: "safe1".into(),
+                input: serde_json::json!({}),
+            },
+            ToolUseBlock {
+                id: "t2".into(),
+                name: "safe2".into(),
+                input: serde_json::json!({}),
+            },
+            ToolUseBlock {
+                id: "t3".into(),
+                name: "unsafe1".into(),
+                input: serde_json::json!({}),
+            },
         ];
 
         let results = executor.execute_all(tool_uses).await;
@@ -1114,9 +1189,13 @@ mod tests {
 
         let executor = ToolExecutor::new(reg, ctx);
 
-        let results = executor.execute_all(vec![
-            ToolUseBlock { id: "t1".into(), name: "nonexistent".into(), input: serde_json::json!({}) },
-        ]).await;
+        let results = executor
+            .execute_all(vec![ToolUseBlock {
+                id: "t1".into(),
+                name: "nonexistent".into(),
+                input: serde_json::json!({}),
+            }])
+            .await;
 
         assert_eq!(results.len(), 1);
         assert!(results[0].result.is_error);
@@ -1192,8 +1271,12 @@ mod tests {
 
         #[async_trait]
         impl Tool for StrictTool {
-            fn name(&self) -> &str { "strict" }
-            fn description(&self) -> &str { "A tool with required params" }
+            fn name(&self) -> &str {
+                "strict"
+            }
+            fn description(&self) -> &str {
+                "A tool with required params"
+            }
             fn input_schema(&self) -> serde_json::Value {
                 serde_json::json!({
                     "type": "object",
@@ -1216,9 +1299,13 @@ mod tests {
 
         let executor = ToolExecutor::new(reg, ctx);
 
-        let results = executor.execute_all(vec![
-            ToolUseBlock { id: "t1".into(), name: "strict".into(), input: serde_json::json!({}) },
-        ]).await;
+        let results = executor
+            .execute_all(vec![ToolUseBlock {
+                id: "t1".into(),
+                name: "strict".into(),
+                input: serde_json::json!({}),
+            }])
+            .await;
 
         assert_eq!(results.len(), 1);
         assert!(results[0].result.is_error);

@@ -34,7 +34,9 @@ struct BashInput {
 
 #[async_trait]
 impl Tool for BashTool {
-    fn name(&self) -> &str { "Bash" }
+    fn name(&self) -> &str {
+        "Bash"
+    }
 
     fn description(&self) -> &str {
         "Executes a given bash command and returns its output."
@@ -88,10 +90,8 @@ impl Tool for BashTool {
             if let Err(e) = tokio::fs::create_dir_all(&out_dir).await {
                 return ToolResult::error(format!("Failed to create output dir: {e}"));
             }
-            let output_path = out_dir.join(format!(
-                "bash-bg-{}.output",
-                uuid::Uuid::new_v4().simple()
-            ));
+            let output_path =
+                out_dir.join(format!("bash-bg-{}.output", uuid::Uuid::new_v4().simple()));
             let file = match std::fs::File::create(&output_path) {
                 Ok(f) => f,
                 Err(e) => return ToolResult::error(format!("Failed to create output file: {e}")),
@@ -141,17 +141,15 @@ impl Tool for BashTool {
             Ok(Ok(output)) => {
                 if output.exit_code != 0 {
                     ToolResult {
-                        content: vec![crate::tools::framework::ToolResultContent::Text(
-                            format!(
-                                "{}Exit code: {}",
-                                if output.combined_output.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!("{}\n", output.combined_output)
-                                },
-                                output.exit_code
-                            ),
-                        )],
+                        content: vec![crate::tools::framework::ToolResultContent::Text(format!(
+                            "{}Exit code: {}",
+                            if output.combined_output.is_empty() {
+                                String::new()
+                            } else {
+                                format!("{}\n", output.combined_output)
+                            },
+                            output.exit_code
+                        ))],
                         is_error: true,
                     }
                 } else if output.combined_output.is_empty() {
@@ -161,10 +159,7 @@ impl Tool for BashTool {
                 }
             }
             Ok(Err(e)) => ToolResult::error(format!("Command failed: {e}")),
-            Err(_) => ToolResult::error(format!(
-                "Command timed out after {}s",
-                timeout.as_secs()
-            )),
+            Err(_) => ToolResult::error(format!("Command timed out after {}s", timeout.as_secs())),
         }
     }
 }
@@ -242,7 +237,10 @@ mod tests {
         let tool = BashTool::default();
         let ctx = ToolContext::default();
         let result = tool
-            .execute(serde_json::json!({"command": "sleep 10", "timeout": 100}), &ctx)
+            .execute(
+                serde_json::json!({"command": "sleep 10", "timeout": 100}),
+                &ctx,
+            )
             .await;
         assert!(result.is_error);
         match &result.content[0] {

@@ -36,7 +36,11 @@ impl ReadFileTracker {
         let limit = max_count.min(POST_COMPACT_MAX_FILES_TO_RESTORE);
         let mut entries: Vec<_> = self.files.iter().collect();
         entries.sort_by(|a, b| b.1.cmp(a.1));
-        entries.into_iter().take(limit).map(|(p, _)| p.clone()).collect()
+        entries
+            .into_iter()
+            .take(limit)
+            .map(|(p, _)| p.clone())
+            .collect()
     }
 
     /// Clear all tracked files (called after post-compact restoration).

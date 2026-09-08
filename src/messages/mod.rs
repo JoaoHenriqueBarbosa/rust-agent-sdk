@@ -1,5 +1,7 @@
-pub mod normalize;
 pub mod api_format;
+pub mod normalize;
 
-pub use normalize::{split_multi_block_messages, derive_uuid, normalize_messages_for_api, ensure_tool_result_pairing};
-pub use api_format::{inject_cache_control};
+pub use api_format::inject_cache_control;
+pub use normalize::{
+    derive_uuid, ensure_tool_result_pairing, normalize_messages_for_api, split_multi_block_messages,
+};

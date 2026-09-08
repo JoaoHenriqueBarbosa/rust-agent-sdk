@@ -17,8 +17,12 @@ struct FileEditInput {
 
 #[async_trait]
 impl Tool for FileEditTool {
-    fn name(&self) -> &str { "Edit" }
-    fn is_edit_tool(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "Edit"
+    }
+    fn is_edit_tool(&self) -> bool {
+        true
+    }
 
     fn description(&self) -> &str {
         "Performs exact string replacements in files."

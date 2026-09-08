@@ -13,15 +13,17 @@ pub enum StreamUpdate {
     /// A thinking delta was received.
     ThinkingDelta { index: usize, thinking: String },
     /// A tool use block has started streaming.
-    ToolUseStart { index: usize, id: String, name: String },
+    ToolUseStart {
+        index: usize,
+        id: String,
+        name: String,
+    },
     /// Partial JSON input for a tool use block.
     ToolUseInputDelta { index: usize, partial_json: String },
     /// A content block has been completed.
     ContentBlockComplete { index: usize, block: ContentBlock },
     /// The message is complete with stop reason and usage.
-    MessageComplete {
-        message: AssistantMessage,
-    },
+    MessageComplete { message: AssistantMessage },
 }
 
 /// A complete assistant message accumulated from streaming events.
@@ -68,7 +70,9 @@ impl AssistantMessage {
 
     /// Whether this message contains any tool_use blocks.
     pub fn has_tool_use(&self) -> bool {
-        self.content.iter().any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+        self.content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
     }
 
     /// Extract the text content from this message (concatenated).
@@ -164,7 +168,10 @@ impl StreamAccumulator {
                 Ok(None)
             }
 
-            StreamEvent::ContentBlockStart { index, content_block } => {
+            StreamEvent::ContentBlockStart {
+                index,
+                content_block,
+            } => {
                 // Ensure blocks vec is large enough
                 while self.blocks.len() <= index {
                     self.blocks.push(BlockState::Text {
@@ -175,7 +182,10 @@ impl StreamAccumulator {
 
                 let (state, update) = match content_block {
                     ContentBlockStart::Text { text } => (
-                        BlockState::Text { text: text.clone(), cache_control: None },
+                        BlockState::Text {
+                            text: text.clone(),
+                            cache_control: None,
+                        },
                         if text.is_empty() {
                             None
                         } else {
@@ -201,10 +211,7 @@ impl StreamAccumulator {
                             Some(StreamUpdate::ThinkingDelta { index, thinking })
                         },
                     ),
-                    ContentBlockStart::RedactedThinking => (
-                        BlockState::RedactedThinking,
-                        None,
-                    ),
+                    ContentBlockStart::RedactedThinking => (BlockState::RedactedThinking, None),
                     ContentBlockStart::ServerToolUse { id, name } => (
                         BlockState::ServerToolUse {
                             id,
@@ -213,7 +220,10 @@ impl StreamAccumulator {
                         },
                         None,
                     ),
-                    ContentBlockStart::WebSearchToolResult { tool_use_id, content } => (
+                    ContentBlockStart::WebSearchToolResult {
+                        tool_use_id,
+                        content,
+                    } => (
                         BlockState::Complete(Some(ContentBlock::WebSearchToolResult {
                             tool_use_id,
                             content,
@@ -238,22 +248,43 @@ impl StreamAccumulator {
                 let update = match (&mut self.blocks[index], delta) {
                     (BlockState::Text { text, .. }, Delta::TextDelta { text: delta_text }) => {
                         text.push_str(&delta_text);
-                        Some(StreamUpdate::TextDelta { index, text: delta_text })
+                        Some(StreamUpdate::TextDelta {
+                            index,
+                            text: delta_text,
+                        })
                     }
-                    (BlockState::ToolUse { input_json, .. }, Delta::InputJsonDelta { partial_json }) => {
+                    (
+                        BlockState::ToolUse { input_json, .. },
+                        Delta::InputJsonDelta { partial_json },
+                    ) => {
                         input_json.push_str(&partial_json);
-                        Some(StreamUpdate::ToolUseInputDelta { index, partial_json })
+                        Some(StreamUpdate::ToolUseInputDelta {
+                            index,
+                            partial_json,
+                        })
                     }
-                    (BlockState::Thinking { thinking, .. }, Delta::ThinkingDelta { thinking: delta }) => {
+                    (
+                        BlockState::Thinking { thinking, .. },
+                        Delta::ThinkingDelta { thinking: delta },
+                    ) => {
                         thinking.push_str(&delta);
-                        Some(StreamUpdate::ThinkingDelta { index, thinking: delta })
+                        Some(StreamUpdate::ThinkingDelta {
+                            index,
+                            thinking: delta,
+                        })
                     }
-                    (BlockState::Thinking { signature, .. }, Delta::SignatureDelta { signature: sig }) => {
+                    (
+                        BlockState::Thinking { signature, .. },
+                        Delta::SignatureDelta { signature: sig },
+                    ) => {
                         let s = signature.get_or_insert_with(String::new);
                         s.push_str(&sig);
                         None
                     }
-                    (BlockState::ServerToolUse { input_json, .. }, Delta::InputJsonDelta { partial_json }) => {
+                    (
+                        BlockState::ServerToolUse { input_json, .. },
+                        Delta::InputJsonDelta { partial_json },
+                    ) => {
                         input_json.push_str(&partial_json);
                         None
                     }
@@ -273,7 +304,10 @@ impl StreamAccumulator {
 
                 match self.finalize_block(index)? {
                     Some(block) => {
-                        let update = StreamUpdate::ContentBlockComplete { index, block: block.clone() };
+                        let update = StreamUpdate::ContentBlockComplete {
+                            index,
+                            block: block.clone(),
+                        };
                         self.finalized_blocks.push(block);
                         Ok(Some(update))
                     }
@@ -300,9 +334,10 @@ impl StreamAccumulator {
 
             StreamEvent::Ping => Ok(None),
 
-            StreamEvent::Error { error } => {
-                Err(ClaudeSDKError::sdk(format!("API stream error: {} - {}", error.r#type, error.message)))
-            }
+            StreamEvent::Error { error } => Err(ClaudeSDKError::sdk(format!(
+                "API stream error: {} - {}",
+                error.r#type, error.message
+            ))),
         }
     }
 
@@ -310,19 +345,23 @@ impl StreamAccumulator {
     /// `None` = bloco desconhecido, descartado deliberadamente.
     fn finalize_block(&self, index: usize) -> Result<Option<ContentBlock>> {
         match &self.blocks[index] {
-            BlockState::Text { text, cache_control } => {
-                Ok(Some(ContentBlock::Text {
-                    text: text.clone(),
-                    cache_control: cache_control.clone(),
-                }))
-            }
-            BlockState::ToolUse { id, name, input_json } => {
+            BlockState::Text {
+                text,
+                cache_control,
+            } => Ok(Some(ContentBlock::Text {
+                text: text.clone(),
+                cache_control: cache_control.clone(),
+            })),
+            BlockState::ToolUse {
+                id,
+                name,
+                input_json,
+            } => {
                 let input = if input_json.is_empty() {
                     serde_json::Value::Object(serde_json::Map::new())
                 } else {
-                    serde_json::from_str(input_json).map_err(|e| {
-                        ClaudeSDKError::json_decode(input_json.clone(), e)
-                    })?
+                    serde_json::from_str(input_json)
+                        .map_err(|e| ClaudeSDKError::json_decode(input_json.clone(), e))?
                 };
                 Ok(Some(ContentBlock::ToolUse {
                     id: id.clone(),
@@ -330,18 +369,21 @@ impl StreamAccumulator {
                     input,
                 }))
             }
-            BlockState::Thinking { thinking, signature } => {
-                Ok(Some(ContentBlock::Thinking {
-                    thinking: thinking.clone(),
-                    signature: signature.clone(),
-                }))
-            }
-            BlockState::RedactedThinking => {
-                Ok(Some(ContentBlock::RedactedThinking {
-                    data: String::new(),
-                }))
-            }
-            BlockState::ServerToolUse { id, name, input_json } => {
+            BlockState::Thinking {
+                thinking,
+                signature,
+            } => Ok(Some(ContentBlock::Thinking {
+                thinking: thinking.clone(),
+                signature: signature.clone(),
+            })),
+            BlockState::RedactedThinking => Ok(Some(ContentBlock::RedactedThinking {
+                data: String::new(),
+            })),
+            BlockState::ServerToolUse {
+                id,
+                name,
+                input_json,
+            } => {
                 // Input malformado de server tool não derruba a run: o bloco
                 // é do SERVIDOR, e perder a sessão por causa dele seria pior.
                 let input = if input_json.is_empty() {
@@ -470,13 +512,19 @@ mod tests {
         let mut acc = StreamAccumulator::new();
         let mut final_msg = None;
         for event in inteiro {
-            if let Some(StreamUpdate::MessageComplete { message }) = acc.process_event(event).unwrap() {
+            if let Some(StreamUpdate::MessageComplete { message }) =
+                acc.process_event(event).unwrap()
+            {
                 final_msg = Some(message);
             }
         }
 
         let msg = final_msg.expect("o segundo stream fecha a mensagem");
-        let tool = msg.tool_use_blocks().into_iter().next().expect("um tool_use");
+        let tool = msg
+            .tool_use_blocks()
+            .into_iter()
+            .next()
+            .expect("um tool_use");
         // O campo chega com o nome LIMPO: nada do `{"re` interrompido sobrou.
         assert!(
             tool.input.get("report").is_some(),
@@ -509,7 +557,9 @@ mod tests {
         let mut final_msg = None;
 
         for event in events {
-            if let Some(StreamUpdate::MessageComplete { message }) = acc.process_event(event).unwrap() {
+            if let Some(StreamUpdate::MessageComplete { message }) =
+                acc.process_event(event).unwrap()
+            {
                 final_msg = Some(message);
             }
         }
@@ -546,7 +596,9 @@ mod tests {
         let mut final_msg = None;
 
         for event in events {
-            if let Some(StreamUpdate::MessageComplete { message }) = acc.process_event(event).unwrap() {
+            if let Some(StreamUpdate::MessageComplete { message }) =
+                acc.process_event(event).unwrap()
+            {
                 final_msg = Some(message);
             }
         }
@@ -555,7 +607,10 @@ mod tests {
         assert_eq!(msg.content.len(), 2);
 
         match &msg.content[0] {
-            ContentBlock::Thinking { thinking, signature } => {
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
                 assert_eq!(thinking, "Let me think about this...");
                 assert_eq!(signature.as_deref(), Some("sig123"));
             }

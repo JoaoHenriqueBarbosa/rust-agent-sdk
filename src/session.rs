@@ -175,25 +175,22 @@ impl SessionStorage {
     /// Append a raw JSON entry to the session file.
     async fn append_entry(&self, session_id: &str, entry: &serde_json::Value) -> Result<()> {
         let path = self.session_path(session_id);
-        let json = serde_json::to_string(entry).map_err(|e| {
-            ClaudeSDKError::sdk(format!("Failed to serialize entry: {e}"))
-        })?;
+        let json = serde_json::to_string(entry)
+            .map_err(|e| ClaudeSDKError::sdk(format!("Failed to serialize entry: {e}")))?;
 
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
             .await
-            .map_err(|e| {
-                ClaudeSDKError::sdk(format!("Failed to open session file: {e}"))
-            })?;
+            .map_err(|e| ClaudeSDKError::sdk(format!("Failed to open session file: {e}")))?;
 
-        file.write_all(json.as_bytes()).await.map_err(|e| {
-            ClaudeSDKError::sdk(format!("Failed to write to session file: {e}"))
-        })?;
-        file.write_all(b"\n").await.map_err(|e| {
-            ClaudeSDKError::sdk(format!("Failed to write newline: {e}"))
-        })?;
+        file.write_all(json.as_bytes())
+            .await
+            .map_err(|e| ClaudeSDKError::sdk(format!("Failed to write to session file: {e}")))?;
+        file.write_all(b"\n")
+            .await
+            .map_err(|e| ClaudeSDKError::sdk(format!("Failed to write newline: {e}")))?;
 
         Ok(())
     }
@@ -221,28 +218,47 @@ fn json_content_to_blocks(content: &serde_json::Value) -> Vec<ContentBlock> {
                     }
                 }
                 "tool_use" => {
-                    let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let id = item
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let name = item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let input = item.get("input").cloned().unwrap_or(serde_json::json!({}));
                     blocks.push(ContentBlock::ToolUse { id, name, input });
                 }
                 "tool_result" => {
-                    let tool_use_id = item.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let tool_use_id = item
+                        .get("tool_use_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let is_error = item.get("is_error").and_then(|v| v.as_bool());
                     let result_content = item.get("content").and_then(|c| {
                         if let Some(text) = c.as_str() {
                             Some(vec![crate::api::types::ToolResultContent::text(text)])
                         } else if let Some(arr) = c.as_array() {
-                            let items: Vec<_> = arr.iter().filter_map(|i| {
-                                if i.get("type")?.as_str()? == "text" {
-                                    Some(crate::api::types::ToolResultContent::text(
-                                        i.get("text")?.as_str()?,
-                                    ))
-                                } else {
-                                    None
-                                }
-                            }).collect();
-                            if items.is_empty() { None } else { Some(items) }
+                            let items: Vec<_> = arr
+                                .iter()
+                                .filter_map(|i| {
+                                    if i.get("type")?.as_str()? == "text" {
+                                        Some(crate::api::types::ToolResultContent::text(
+                                            i.get("text")?.as_str()?,
+                                        ))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            if items.is_empty() {
+                                None
+                            } else {
+                                Some(items)
+                            }
                         } else {
                             None
                         }
@@ -256,7 +272,10 @@ fn json_content_to_blocks(content: &serde_json::Value) -> Vec<ContentBlock> {
                 }
                 "thinking" => {
                     if let Some(thinking) = item.get("thinking").and_then(|t| t.as_str()) {
-                        let signature = item.get("signature").and_then(|s| s.as_str()).map(String::from);
+                        let signature = item
+                            .get("signature")
+                            .and_then(|s| s.as_str())
+                            .map(String::from);
                         blocks.push(ContentBlock::Thinking {
                             thinking: thinking.to_string(),
                             signature,

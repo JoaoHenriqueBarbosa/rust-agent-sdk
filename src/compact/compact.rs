@@ -92,9 +92,7 @@ fn get_compact_prompt(custom_instructions: Option<&str>) -> String {
     if let Some(instructions) = custom_instructions {
         let trimmed = instructions.trim();
         if !trimmed.is_empty() {
-            prompt.push_str(&format!(
-                "\nAdditional Instructions:\n{trimmed}"
-            ));
+            prompt.push_str(&format!("\nAdditional Instructions:\n{trimmed}"));
         }
     }
 
@@ -265,20 +263,13 @@ impl CompactionEngine {
         let mut ptl_attempts: u32 = 0;
         let (summary_text, usage) = loop {
             let (assistant_msg, usage) = self
-                .stream_compact_summary(
-                    &messages_to_summarize,
-                    &compact_prompt,
-                    system_prompt_text,
-                )
+                .stream_compact_summary(&messages_to_summarize, &compact_prompt, system_prompt_text)
                 .await?;
 
             let text = assistant_msg.text();
 
             // Check for prompt-too-long response
-            if !text
-                .to_lowercase()
-                .starts_with(PROMPT_TOO_LONG_PREFIX)
-            {
+            if !text.to_lowercase().starts_with(PROMPT_TOO_LONG_PREFIX) {
                 break (text, usage);
             }
 
@@ -511,10 +502,9 @@ fn extract_conversation_text(messages: &[ApiMessage]) -> String {
 
         for block in &msg.content {
             match block {
-                ContentBlock::Text { text, .. }
-                    if !text.is_empty() => {
-                        parts.push(format!("{role}: {text}"));
-                    }
+                ContentBlock::Text { text, .. } if !text.is_empty() => {
+                    parts.push(format!("{role}: {text}"));
+                }
                 ContentBlock::ToolUse { name, input, .. } => {
                     let input_str = serde_json::to_string(input).unwrap_or_default();
                     let truncated = if input_str.len() > 200 {
@@ -524,8 +514,14 @@ fn extract_conversation_text(messages: &[ApiMessage]) -> String {
                     };
                     parts.push(format!("{role}: [Tool: {name}({truncated})]"));
                 }
-                ContentBlock::ToolResult { content, is_error, .. } => {
-                    let error_tag = if *is_error == Some(true) { " ERROR" } else { "" };
+                ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => {
+                    let error_tag = if *is_error == Some(true) {
+                        " ERROR"
+                    } else {
+                        ""
+                    };
                     if let Some(blocks) = content {
                         for c in blocks {
                             if let ToolResultContent::Text { text } = c {
@@ -534,20 +530,20 @@ fn extract_conversation_text(messages: &[ApiMessage]) -> String {
                                 } else {
                                     text.clone()
                                 };
-                                parts.push(format!("{role}: [Tool Result{error_tag}: {truncated}]"));
+                                parts
+                                    .push(format!("{role}: [Tool Result{error_tag}: {truncated}]"));
                             }
                         }
                     }
                 }
-                ContentBlock::Thinking { thinking, .. }
-                    if !thinking.is_empty() => {
-                        let truncated = if thinking.len() > 300 {
-                            format!("{}...", &thinking[..300])
-                        } else {
-                            thinking.clone()
-                        };
-                        parts.push(format!("{role}: [Thinking: {truncated}]"));
-                    }
+                ContentBlock::Thinking { thinking, .. } if !thinking.is_empty() => {
+                    let truncated = if thinking.len() > 300 {
+                        format!("{}...", &thinking[..300])
+                    } else {
+                        thinking.clone()
+                    };
+                    parts.push(format!("{role}: [Thinking: {truncated}]"));
+                }
                 _ => {}
             }
         }
@@ -579,11 +575,17 @@ mod tests {
         let messages = vec![
             ApiMessage::assistant(vec![
                 ContentBlock::text("Let me read that."),
-                ContentBlock::tool_use("t1", "Read", serde_json::json!({"file_path": "/tmp/test.txt"})),
+                ContentBlock::tool_use(
+                    "t1",
+                    "Read",
+                    serde_json::json!({"file_path": "/tmp/test.txt"}),
+                ),
             ]),
             ApiMessage::user(vec![ContentBlock::ToolResult {
                 tool_use_id: "t1".to_string(),
-                content: Some(vec![ToolResultContent::Text { text: "file contents here".to_string() }]),
+                content: Some(vec![ToolResultContent::Text {
+                    text: "file contents here".to_string(),
+                }]),
                 is_error: None,
                 cache_control: None,
             }]),

@@ -26,8 +26,12 @@ struct TodoItem {
 
 #[async_trait]
 impl Tool for TodoWriteTool {
-    fn name(&self) -> &str { "TodoWrite" }
-    fn is_read_only(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "TodoWrite"
+    }
+    fn is_read_only(&self) -> bool {
+        true
+    }
 
     fn description(&self) -> &str {
         "Write or update a structured task list."

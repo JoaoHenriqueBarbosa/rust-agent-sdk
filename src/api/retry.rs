@@ -1,5 +1,5 @@
-use std::time::Duration;
 use rand::Rng;
+use std::time::Duration;
 
 /// Configuration for retry behavior.
 #[derive(Debug, Clone)]
@@ -31,9 +31,7 @@ impl Default for RetryConfig {
 pub enum RetryOutcome {
     /// The overload (529) retry limit was hit — if a fallback model is available,
     /// the caller should switch to it.
-    FallbackTriggered {
-        consecutive_529s: u32,
-    },
+    FallbackTriggered { consecutive_529s: u32 },
 }
 
 /// Classification of HTTP/API errors for retry decisions.
@@ -116,13 +114,16 @@ impl ErrorKind {
         // "overloaded_error" no corpo, às vezes 200 com erro embutido) — o
         // corpo decide antes do status, como no is529Error do CLI.
         if body.is_some_and(|b| b.contains("\"overloaded_error\"")) {
-            return Self::apply_should_retry_header(ErrorKind::Overloaded, status, should_retry_header);
+            return Self::apply_should_retry_header(
+                ErrorKind::Overloaded,
+                status,
+                should_retry_header,
+            );
         }
         let kind = match status {
             429 => {
-                let retry_after = retry_after_header.and_then(|v| {
-                    v.parse::<u64>().ok().map(Duration::from_secs)
-                });
+                let retry_after =
+                    retry_after_header.and_then(|v| v.parse::<u64>().ok().map(Duration::from_secs));
                 ErrorKind::RateLimited { retry_after }
             }
             529 => ErrorKind::Overloaded,
@@ -225,12 +226,11 @@ pub fn should_retry(
 }
 
 /// Get the delay for a retry, taking into account retry-after headers.
-pub fn get_retry_delay(
-    config: &RetryConfig,
-    error_kind: &ErrorKind,
-    attempt: u32,
-) -> Duration {
-    if let ErrorKind::RateLimited { retry_after: Some(duration) } = error_kind {
+pub fn get_retry_delay(config: &RetryConfig, error_kind: &ErrorKind, attempt: u32) -> Duration {
+    if let ErrorKind::RateLimited {
+        retry_after: Some(duration),
+    } = error_kind
+    {
         return *duration;
     }
     calculate_delay(config, attempt)
@@ -252,34 +252,72 @@ mod tests {
             ErrorKind::RateLimited { retry_after: Some(d) } if d == Duration::from_secs(5)
         ));
 
-        assert_eq!(ErrorKind::from_status(529, None, None, None), ErrorKind::Overloaded);
+        assert_eq!(
+            ErrorKind::from_status(529, None, None, None),
+            ErrorKind::Overloaded
+        );
 
         assert_eq!(
-            ErrorKind::from_status(400, None, Some(r#"{"error":{"message":"prompt is too long"}}"#), None),
+            ErrorKind::from_status(
+                400,
+                None,
+                Some(r#"{"error":{"message":"prompt is too long"}}"#),
+                None
+            ),
             ErrorKind::PromptTooLong
         );
 
-        assert_eq!(ErrorKind::from_status(400, None, None, None), ErrorKind::ClientError(400));
+        assert_eq!(
+            ErrorKind::from_status(400, None, None, None),
+            ErrorKind::ClientError(400)
+        );
         // 401 é retryable poucas vezes: gateways devolvem 401 transitório.
-        assert_eq!(ErrorKind::from_status(401, None, None, None), ErrorKind::AuthError);
+        assert_eq!(
+            ErrorKind::from_status(401, None, None, None),
+            ErrorKind::AuthError
+        );
         // Corpo com overloaded_error decide antes do status errado do proxy.
         assert_eq!(
-            ErrorKind::from_status(500, None, Some(r#"{"error":{"type":"overloaded_error"}}"#), None),
+            ErrorKind::from_status(
+                500,
+                None,
+                Some(r#"{"error":{"type":"overloaded_error"}}"#),
+                None
+            ),
             ErrorKind::Overloaded
         );
         // 408/409 são transientes de proxy: retryable.
-        assert_eq!(ErrorKind::from_status(408, None, None, None), ErrorKind::ServerError(408));
-        assert_eq!(ErrorKind::from_status(409, None, None, None), ErrorKind::ServerError(409));
+        assert_eq!(
+            ErrorKind::from_status(408, None, None, None),
+            ErrorKind::ServerError(408)
+        );
+        assert_eq!(
+            ErrorKind::from_status(409, None, None, None),
+            ErrorKind::ServerError(409)
+        );
         // x-should-retry manda mais que a tabela.
         assert!(ErrorKind::from_status(404, None, None, Some("true")).is_retryable());
         assert!(!ErrorKind::from_status(500, None, None, Some("false")).is_retryable());
         // Overflow de max_tokens carrega o espaço disponível parseado.
         assert_eq!(
-            ErrorKind::from_status(400, None, Some("input length and max_tokens exceed context limit: 190000 + 16384 > 200000"), None),
-            ErrorKind::MaxTokensContextOverflow { available: Some(10_000) }
+            ErrorKind::from_status(
+                400,
+                None,
+                Some("input length and max_tokens exceed context limit: 190000 + 16384 > 200000"),
+                None
+            ),
+            ErrorKind::MaxTokensContextOverflow {
+                available: Some(10_000)
+            }
         );
-        assert_eq!(ErrorKind::from_status(500, None, None, None), ErrorKind::ServerError(500));
-        assert_eq!(ErrorKind::from_status(502, None, None, None), ErrorKind::ServerError(502));
+        assert_eq!(
+            ErrorKind::from_status(500, None, None, None),
+            ErrorKind::ServerError(500)
+        );
+        assert_eq!(
+            ErrorKind::from_status(502, None, None, None),
+            ErrorKind::ServerError(502)
+        );
     }
 
     #[test]
@@ -331,7 +369,12 @@ mod tests {
         let config = RetryConfig::default();
 
         // Retryable error, first attempt
-        assert!(should_retry(&config, &ErrorKind::RateLimited { retry_after: None }, 0, 0));
+        assert!(should_retry(
+            &config,
+            &ErrorKind::RateLimited { retry_after: None },
+            0,
+            0
+        ));
 
         // Non-retryable error
         assert!(!should_retry(&config, &ErrorKind::ClientError(400), 0, 0));
@@ -356,7 +399,9 @@ mod tests {
         let config = RetryConfig::default();
         let delay = get_retry_delay(
             &config,
-            &ErrorKind::RateLimited { retry_after: Some(Duration::from_secs(10)) },
+            &ErrorKind::RateLimited {
+                retry_after: Some(Duration::from_secs(10)),
+            },
             0,
         );
         assert_eq!(delay, Duration::from_secs(10));

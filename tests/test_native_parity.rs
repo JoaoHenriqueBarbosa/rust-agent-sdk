@@ -326,7 +326,11 @@ async fn disallowed_tools_never_reach_the_request() {
 // Hooks
 // ---------------------------------------------------------------------------
 
-fn sync_output(hso: Option<HookSpecificOutput>, decision: Option<&str>, reason: Option<&str>) -> HookJSONOutput {
+fn sync_output(
+    hso: Option<HookSpecificOutput>,
+    decision: Option<&str>,
+    reason: Option<&str>,
+) -> HookJSONOutput {
     HookJSONOutput::Sync {
         continue_: None,
         suppress_output: None,
@@ -350,9 +354,7 @@ async fn pre_tool_use_hook_deny_blocks_the_tool_and_steers_the_model() {
             sync_output(
                 Some(HookSpecificOutput::PreToolUse {
                     permission_decision: Some("deny".to_string()),
-                    permission_decision_reason: Some(
-                        "política: rm recursivo proibido".to_string(),
-                    ),
+                    permission_decision_reason: Some("política: rm recursivo proibido".to_string()),
                     updated_input: None,
                     additional_context: None,
                 }),
@@ -463,7 +465,11 @@ async fn stop_hook_block_reinjects_the_reason_and_loops() {
     .await;
     let messages = run_one(&mut fx, "termine a task").await;
     // Contrato: o block do Stop hook reinjeta a razão e o loop roda de novo.
-    assert_eq!(fired.load(Ordering::SeqCst), 2, "o Stop hook deveria rodar duas vezes");
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        2,
+        "o Stop hook deveria rodar duas vezes"
+    );
     let requests = api.requests().await;
     assert_eq!(requests.len(), 2);
     let second = requests[1].to_string();
@@ -481,7 +487,11 @@ async fn stop_hook_block_reinjects_the_reason_and_loops() {
 #[tokio::test]
 async fn task_create_and_list_share_the_session_store() {
     let api = MockApi::start(vec![
-        sse_tool_call_id("toolu_a", "TaskCreate", &json!({"subject": "estudar paridade", "description": "ler o plano"})),
+        sse_tool_call_id(
+            "toolu_a",
+            "TaskCreate",
+            &json!({"subject": "estudar paridade", "description": "ler o plano"}),
+        ),
         sse_tool_call_id("toolu_b", "TaskList", &json!({})),
         sse_text("listado"),
     ])
@@ -508,7 +518,11 @@ async fn task_create_and_list_share_the_session_store() {
 #[tokio::test]
 async fn bash_background_registers_a_task_and_task_output_reads_it() {
     let api = MockApi::start(vec![
-        sse_tool_call_id("toolu_a", "Bash", &json!({"command": "echo saida-de-fundo", "run_in_background": true})),
+        sse_tool_call_id(
+            "toolu_a",
+            "Bash",
+            &json!({"command": "echo saida-de-fundo", "run_in_background": true}),
+        ),
         sse_tool_call_id("toolu_b", "TaskOutput", &json!({"task_id": "bash_1"})),
         sse_text("li o output"),
     ])
@@ -652,8 +666,14 @@ async fn web_search_is_declared_as_a_server_tool_and_never_executed_locally() {
         .find(|t| t["name"] == "web_search")
         .expect("web_search declarada");
     assert_eq!(ws["type"], "web_search_20250305");
-    assert!(ws.get("input_schema").is_none(), "server tool não leva input_schema: {ws}");
-    assert!(ws.get("cache_control").is_none(), "server tool não aceita cache_control: {ws}");
+    assert!(
+        ws.get("input_schema").is_none(),
+        "server tool não leva input_schema: {ws}"
+    );
+    assert!(
+        ws.get("cache_control").is_none(),
+        "server tool não aceita cache_control: {ws}"
+    );
 
     // Contrato: o resultado do servidor encerra o turno sem uma segunda
     // request — o SDK não executou nada localmente.
@@ -690,7 +710,11 @@ async fn an_unknown_content_block_type_does_not_kill_the_session() {
 async fn an_oversized_tool_result_is_persisted_and_the_next_request_carries_the_reference() {
     // A tool devolve um output gigante; o modelo pede de novo no turno 2.
     let api = MockApi::start(vec![
-        sse_tool_call_id("toolu_big", "Bash", &json!({"command": "yes paridade | head -c 120000"})),
+        sse_tool_call_id(
+            "toolu_big",
+            "Bash",
+            &json!({"command": "yes paridade | head -c 120000"}),
+        ),
         sse_text("li o resumo"),
     ])
     .await;
@@ -769,7 +793,10 @@ async fn unsupported_options_are_announced_instead_of_silently_ignored() {
         }
         _ => false,
     });
-    assert!(announced, "opções sem tradução foram engolidas: {messages:?}");
+    assert!(
+        announced,
+        "opções sem tradução foram engolidas: {messages:?}"
+    );
     assert_eq!(result_of(&messages).expect("result").subtype, "success");
 }
 

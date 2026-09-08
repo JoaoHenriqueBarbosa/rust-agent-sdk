@@ -74,7 +74,12 @@ impl TaskStore {
     }
 
     pub fn get_task(&self, id: &str) -> Option<TaskRecord> {
-        self.tasks.lock().unwrap().iter().find(|t| t.id == id).cloned()
+        self.tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t.id == id)
+            .cloned()
     }
 
     pub fn list_tasks(&self) -> Vec<TaskRecord> {

@@ -22,7 +22,9 @@ const MAX_RESULTS: usize = 200;
 
 #[async_trait]
 impl Tool for GrepTool {
-    fn name(&self) -> &str { "Grep" }
+    fn name(&self) -> &str {
+        "Grep"
+    }
 
     fn description(&self) -> &str {
         "Search for a pattern in files using regex. Returns matching lines with file paths and line numbers."
@@ -49,8 +51,12 @@ impl Tool for GrepTool {
         })
     }
 
-    fn is_concurrency_safe(&self) -> bool { true }
-    fn is_read_only(&self) -> bool { true }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+    fn is_read_only(&self) -> bool {
+        true
+    }
 
     async fn execute(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
         let input: GrepInput = match serde_json::from_value(input) {

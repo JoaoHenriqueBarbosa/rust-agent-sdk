@@ -10,7 +10,11 @@ enum CacheTarget {
     /// Last text block in a user message.
     UserMessageTextBlock { msg_index: usize },
     /// A tool_result block with large content.
-    ToolResultBlock { msg_index: usize, block_index: usize, content_len: usize },
+    ToolResultBlock {
+        msg_index: usize,
+        block_index: usize,
+        content_len: usize,
+    },
 }
 
 /// Inject cache_control breakpoints — a estratégia do addCacheBreakpoints do
@@ -22,10 +26,7 @@ enum CacheTarget {
 ///
 /// Os marcadores do turno anterior são LIMPOS antes: o histórico persiste
 /// entre iterações, e acumular breakpoints estoura o limite de 4 da API.
-pub fn inject_cache_control(
-    messages: &mut [ApiMessage],
-    system: &mut [SystemBlock],
-) {
+pub fn inject_cache_control(messages: &mut [ApiMessage], system: &mut [SystemBlock]) {
     // System: o último bloco leva o breakpoint (o prompt não muda na sessão).
     if let Some(last_sys) = system.last_mut() {
         last_sys.cache_control = Some(CacheControl::ephemeral());
@@ -139,7 +140,15 @@ mod tests {
         let marked: usize = messages
             .iter()
             .flat_map(|m| &m.content)
-            .filter(|b| matches!(b, ContentBlock::Text { cache_control: Some(_), .. }))
+            .filter(|b| {
+                matches!(
+                    b,
+                    ContentBlock::Text {
+                        cache_control: Some(_),
+                        ..
+                    }
+                )
+            })
             .count();
         // Contrato: exatamente UM breakpoint de mensagem por request.
         assert_eq!(marked, 1);
@@ -153,16 +162,14 @@ mod tests {
     fn test_inject_cache_control_large_tool_result() {
         let mut system = vec![SystemBlock::text("system")];
         let large_content = "x".repeat(2000);
-        let mut messages = vec![
-            ApiMessage::user(vec![
-                ContentBlock::tool_result(
-                    "tool_1",
-                    vec![ToolResultContent::text(&large_content)],
-                    false,
-                ),
-                ContentBlock::text("question"),
-            ]),
-        ];
+        let mut messages = vec![ApiMessage::user(vec![
+            ContentBlock::tool_result(
+                "tool_1",
+                vec![ToolResultContent::text(&large_content)],
+                false,
+            ),
+            ContentBlock::text("question"),
+        ])];
 
         inject_cache_control(&mut messages, &mut system);
 
@@ -191,16 +198,14 @@ mod tests {
     fn test_inject_cache_control_small_tool_result_not_cached() {
         let mut system = vec![SystemBlock::text("system")];
         let small_content = "short";
-        let mut messages = vec![
-            ApiMessage::user(vec![
-                ContentBlock::tool_result(
-                    "tool_1",
-                    vec![ToolResultContent::text(small_content)],
-                    false,
-                ),
-                ContentBlock::text("question"),
-            ]),
-        ];
+        let mut messages = vec![ApiMessage::user(vec![
+            ContentBlock::tool_result(
+                "tool_1",
+                vec![ToolResultContent::text(small_content)],
+                false,
+            ),
+            ContentBlock::text("question"),
+        ])];
 
         inject_cache_control(&mut messages, &mut system);
 
@@ -221,12 +226,20 @@ mod tests {
         // 4 user messages + 2 large tool results = more than 4 candidates
         let mut messages = vec![
             ApiMessage::user(vec![
-                ContentBlock::tool_result("t1", vec![ToolResultContent::text(&large_content)], false),
+                ContentBlock::tool_result(
+                    "t1",
+                    vec![ToolResultContent::text(&large_content)],
+                    false,
+                ),
                 ContentBlock::text("q1"),
             ]),
             ApiMessage::assistant(vec![ContentBlock::text("a1")]),
             ApiMessage::user(vec![
-                ContentBlock::tool_result("t2", vec![ToolResultContent::text(&large_content2)], false),
+                ContentBlock::tool_result(
+                    "t2",
+                    vec![ToolResultContent::text(&large_content2)],
+                    false,
+                ),
                 ContentBlock::text("q2"),
             ]),
             ApiMessage::assistant(vec![ContentBlock::text("a2")]),
@@ -247,14 +260,23 @@ mod tests {
         for m in &messages {
             for b in &m.content {
                 match b {
-                    ContentBlock::Text { cache_control: Some(_), .. } => count += 1,
-                    ContentBlock::ToolResult { cache_control: Some(_), .. } => count += 1,
+                    ContentBlock::Text {
+                        cache_control: Some(_),
+                        ..
+                    } => count += 1,
+                    ContentBlock::ToolResult {
+                        cache_control: Some(_),
+                        ..
+                    } => count += 1,
                     _ => {}
                 }
             }
         }
 
-        assert!(count <= 4, "Should not exceed 4 breakpoints (API limit), got {count}");
+        assert!(
+            count <= 4,
+            "Should not exceed 4 breakpoints (API limit), got {count}"
+        );
     }
 
     #[test]

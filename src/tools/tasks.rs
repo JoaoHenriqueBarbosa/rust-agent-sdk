@@ -22,9 +22,15 @@ pub struct TaskCreateTool;
 
 #[async_trait]
 impl Tool for TaskCreateTool {
-    fn name(&self) -> &str { "TaskCreate" }
-    fn description(&self) -> &str { "Create a new task in the session task list" }
-    fn is_read_only(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "TaskCreate"
+    }
+    fn description(&self) -> &str {
+        "Create a new task in the session task list"
+    }
+    fn is_read_only(&self) -> bool {
+        true
+    }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -38,10 +44,21 @@ impl Tool for TaskCreateTool {
     }
 
     async fn execute(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
-        let Some(store) = store_of(context) else { return no_store() };
-        let subject = input.get("subject").and_then(|v| v.as_str()).unwrap_or_default();
-        let description = input.get("description").and_then(|v| v.as_str()).map(str::to_string);
-        let active_form = input.get("activeForm").and_then(|v| v.as_str()).map(str::to_string);
+        let Some(store) = store_of(context) else {
+            return no_store();
+        };
+        let subject = input
+            .get("subject")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let description = input
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let active_form = input
+            .get("activeForm")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         let record = store.create_task(subject.to_string(), description, active_form);
         json_result(serde_json::json!({"task": record}))
     }
@@ -51,10 +68,18 @@ pub struct TaskGetTool;
 
 #[async_trait]
 impl Tool for TaskGetTool {
-    fn name(&self) -> &str { "TaskGet" }
-    fn description(&self) -> &str { "Retrieve a task by ID" }
-    fn is_read_only(&self) -> bool { true }
-    fn is_concurrency_safe(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "TaskGet"
+    }
+    fn description(&self) -> &str {
+        "Retrieve a task by ID"
+    }
+    fn is_read_only(&self) -> bool {
+        true
+    }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -64,8 +89,13 @@ impl Tool for TaskGetTool {
     }
 
     async fn execute(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
-        let Some(store) = store_of(context) else { return no_store() };
-        let id = input.get("taskId").and_then(|v| v.as_str()).unwrap_or_default();
+        let Some(store) = store_of(context) else {
+            return no_store();
+        };
+        let id = input
+            .get("taskId")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         match store.get_task(id) {
             Some(task) => json_result(serde_json::json!({"task": task})),
             None => ToolResult::error(format!("Task not found: {id}")),
@@ -77,16 +107,26 @@ pub struct TaskListTool;
 
 #[async_trait]
 impl Tool for TaskListTool {
-    fn name(&self) -> &str { "TaskList" }
-    fn description(&self) -> &str { "List all tasks in the session task list" }
-    fn is_read_only(&self) -> bool { true }
-    fn is_concurrency_safe(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "TaskList"
+    }
+    fn description(&self) -> &str {
+        "List all tasks in the session task list"
+    }
+    fn is_read_only(&self) -> bool {
+        true
+    }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object", "properties": {}})
     }
 
     async fn execute(&self, _input: serde_json::Value, context: &ToolContext) -> ToolResult {
-        let Some(store) = store_of(context) else { return no_store() };
+        let Some(store) = store_of(context) else {
+            return no_store();
+        };
         json_result(serde_json::json!({"tasks": store.list_tasks()}))
     }
 }
@@ -95,9 +135,15 @@ pub struct TaskUpdateTool;
 
 #[async_trait]
 impl Tool for TaskUpdateTool {
-    fn name(&self) -> &str { "TaskUpdate" }
-    fn description(&self) -> &str { "Update a task (subject, description, status, owner)" }
-    fn is_read_only(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "TaskUpdate"
+    }
+    fn description(&self) -> &str {
+        "Update a task (subject, description, status, owner)"
+    }
+    fn is_read_only(&self) -> bool {
+        true
+    }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -114,10 +160,22 @@ impl Tool for TaskUpdateTool {
     }
 
     async fn execute(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
-        let Some(store) = store_of(context) else { return no_store() };
-        let id = input.get("taskId").and_then(|v| v.as_str()).unwrap_or_default();
+        let Some(store) = store_of(context) else {
+            return no_store();
+        };
+        let id = input
+            .get("taskId")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         let get = |k: &str| input.get(k).and_then(|v| v.as_str()).map(str::to_string);
-        match store.update_task(id, get("subject"), get("description"), get("status"), get("activeForm"), get("owner")) {
+        match store.update_task(
+            id,
+            get("subject"),
+            get("description"),
+            get("status"),
+            get("activeForm"),
+            get("owner"),
+        ) {
             Some(task) => json_result(serde_json::json!({"task": task})),
             None => ToolResult::error(format!("Task not found: {id}")),
         }
@@ -128,8 +186,12 @@ pub struct TaskStopTool;
 
 #[async_trait]
 impl Tool for TaskStopTool {
-    fn name(&self) -> &str { "TaskStop" }
-    fn description(&self) -> &str { "Stop a running background task by its ID" }
+    fn name(&self) -> &str {
+        "TaskStop"
+    }
+    fn description(&self) -> &str {
+        "Stop a running background task by its ID"
+    }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -139,8 +201,13 @@ impl Tool for TaskStopTool {
     }
 
     async fn execute(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
-        let Some(store) = store_of(context) else { return no_store() };
-        let id = input.get("task_id").and_then(|v| v.as_str()).unwrap_or_default();
+        let Some(store) = store_of(context) else {
+            return no_store();
+        };
+        let id = input
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         if store.stop_background(id).await {
             ToolResult::text(format!("Task {id} stopped"))
         } else {
@@ -153,10 +220,18 @@ pub struct TaskOutputTool;
 
 #[async_trait]
 impl Tool for TaskOutputTool {
-    fn name(&self) -> &str { "TaskOutput" }
-    fn description(&self) -> &str { "Get current output and status from a background task" }
-    fn is_read_only(&self) -> bool { true }
-    fn is_concurrency_safe(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "TaskOutput"
+    }
+    fn description(&self) -> &str {
+        "Get current output and status from a background task"
+    }
+    fn is_read_only(&self) -> bool {
+        true
+    }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -166,8 +241,13 @@ impl Tool for TaskOutputTool {
     }
 
     async fn execute(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
-        let Some(store) = store_of(context) else { return no_store() };
-        let id = input.get("task_id").and_then(|v| v.as_str()).unwrap_or_default();
+        let Some(store) = store_of(context) else {
+            return no_store();
+        };
+        let id = input
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         match store.background_status(id).await {
             Some((finished, exit_code, output_path)) => {
                 let output = tokio::fs::read_to_string(&output_path)

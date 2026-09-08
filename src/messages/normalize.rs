@@ -251,7 +251,9 @@ pub fn ensure_tool_result_pairing(messages: &mut Vec<ApiMessage>) {
             // Port: if (msg.type !== "assistant") {
             //   check for orphaned tool_results before any assistant message
             if msg.role == Role::User {
-                let prev_is_assistant = result.last().is_some_and(|m: &ApiMessage| m.role == Role::Assistant);
+                let prev_is_assistant = result
+                    .last()
+                    .is_some_and(|m: &ApiMessage| m.role == Role::Assistant);
                 if !prev_is_assistant {
                     // Strip tool_result blocks that appear before any assistant message
                     let stripped: Vec<ContentBlock> = msg
@@ -809,11 +811,7 @@ mod tests {
             )]),
             ApiMessage::user(vec![
                 ContentBlock::tool_result("t1", vec![ToolResultContent::text("ok")], false),
-                ContentBlock::tool_result(
-                    "t999",
-                    vec![ToolResultContent::text("orphaned")],
-                    false,
-                ),
+                ContentBlock::tool_result("t999", vec![ToolResultContent::text("orphaned")], false),
             ]),
         ];
         ensure_tool_result_pairing(&mut messages);
@@ -855,16 +853,18 @@ mod tests {
 
     #[test]
     fn test_apply_tool_result_budget_no_truncation() {
-        let mut messages = vec![
-            ApiMessage::user(vec![ContentBlock::ToolResult {
-                tool_use_id: "t1".to_string(),
-                content: Some(vec![ToolResultContent::text("short result")]),
-                is_error: None,
-                cache_control: None,
-            }]),
-        ];
+        let mut messages = vec![ApiMessage::user(vec![ContentBlock::ToolResult {
+            tool_use_id: "t1".to_string(),
+            content: Some(vec![ToolResultContent::text("short result")]),
+            is_error: None,
+            cache_control: None,
+        }])];
         apply_tool_result_budget(&mut messages, 80_000);
-        if let ContentBlock::ToolResult { content: Some(ref c), .. } = messages[0].content[0] {
+        if let ContentBlock::ToolResult {
+            content: Some(ref c),
+            ..
+        } = messages[0].content[0]
+        {
             if let ToolResultContent::Text { ref text } = c[0] {
                 assert_eq!(text, "short result");
             }
@@ -874,16 +874,18 @@ mod tests {
     #[test]
     fn test_apply_tool_result_budget_truncates_large() {
         let large_text = "x".repeat(100_000);
-        let mut messages = vec![
-            ApiMessage::user(vec![ContentBlock::ToolResult {
-                tool_use_id: "t1".to_string(),
-                content: Some(vec![ToolResultContent::text(&large_text)]),
-                is_error: None,
-                cache_control: None,
-            }]),
-        ];
+        let mut messages = vec![ApiMessage::user(vec![ContentBlock::ToolResult {
+            tool_use_id: "t1".to_string(),
+            content: Some(vec![ToolResultContent::text(&large_text)]),
+            is_error: None,
+            cache_control: None,
+        }])];
         apply_tool_result_budget(&mut messages, 80_000);
-        if let ContentBlock::ToolResult { content: Some(ref c), .. } = messages[0].content[0] {
+        if let ContentBlock::ToolResult {
+            content: Some(ref c),
+            ..
+        } = messages[0].content[0]
+        {
             if let ToolResultContent::Text { ref text } = c[0] {
                 assert!(text.len() < 100_000);
                 assert!(text.contains("[Result truncated from 100000 to 80000 characters]"));
@@ -893,9 +895,9 @@ mod tests {
 
     #[test]
     fn test_apply_tool_result_budget_skips_assistant() {
-        let mut messages = vec![
-            ApiMessage::assistant(vec![ContentBlock::text("x".repeat(100_000).as_str())]),
-        ];
+        let mut messages = vec![ApiMessage::assistant(vec![ContentBlock::text(
+            "x".repeat(100_000).as_str(),
+        )])];
         let original_len = if let ContentBlock::Text { ref text, .. } = messages[0].content[0] {
             text.len()
         } else {
@@ -919,9 +921,10 @@ mod tests {
 
     #[test]
     fn test_strip_excess_media_under_limit() {
-        let mut messages = vec![
-            ApiMessage::user(vec![make_image_block(), ContentBlock::text("hi")]),
-        ];
+        let mut messages = vec![ApiMessage::user(vec![
+            make_image_block(),
+            ContentBlock::text("hi"),
+        ])];
         strip_excess_media_items(&mut messages, 5);
         let image_count: usize = messages
             .iter()
@@ -962,9 +965,10 @@ mod tests {
 
     #[test]
     fn test_strip_excess_media_exact_limit() {
-        let mut messages = vec![
-            ApiMessage::user(vec![make_image_block(), make_image_block()]),
-        ];
+        let mut messages = vec![ApiMessage::user(vec![
+            make_image_block(),
+            make_image_block(),
+        ])];
         strip_excess_media_items(&mut messages, 2);
         let image_count: usize = messages
             .iter()
@@ -987,7 +991,10 @@ mod tests {
 
     fn text_of(msg: &ApiMessage) -> String {
         match &msg.content[0] {
-            ContentBlock::ToolResult { content: Some(blocks), .. } => match &blocks[0] {
+            ContentBlock::ToolResult {
+                content: Some(blocks),
+                ..
+            } => match &blocks[0] {
                 ToolResultContent::Text { text } => text.clone(),
                 _ => panic!("texto esperado"),
             },

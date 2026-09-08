@@ -12,8 +12,7 @@ pub fn classify_api_error(status: u16, body: &str) -> String {
         401 => "Invalid API key. Check your ANTHROPIC_API_KEY.".to_string(),
         403 => "Access denied. Your API key may not have access to this model.".to_string(),
         400 => {
-            if body_lower.contains("prompt is too long") || body_lower.contains("too many tokens")
-            {
+            if body_lower.contains("prompt is too long") || body_lower.contains("too many tokens") {
                 "The conversation is too long. Use /compact or start a new conversation."
                     .to_string()
             } else if body_lower.contains("credit") {
@@ -52,7 +51,10 @@ mod tests {
     #[test]
     fn test_access_denied() {
         let msg = classify_api_error(403, "forbidden");
-        assert_eq!(msg, "Access denied. Your API key may not have access to this model.");
+        assert_eq!(
+            msg,
+            "Access denied. Your API key may not have access to this model."
+        );
     }
 
     #[test]

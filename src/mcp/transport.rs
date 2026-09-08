@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{oneshot, Mutex};
 
 use crate::errors::{ClaudeSDKError, Result};
 
@@ -79,17 +79,20 @@ impl StdioTransport {
             ))
         })?;
 
-        let stdin = child.stdin.take().ok_or_else(|| {
-            ClaudeSDKError::sdk("Failed to get stdin of MCP server process")
-        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| ClaudeSDKError::sdk("Failed to get stdin of MCP server process"))?;
 
-        let stdout = child.stdout.take().ok_or_else(|| {
-            ClaudeSDKError::sdk("Failed to get stdout of MCP server process")
-        })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ClaudeSDKError::sdk("Failed to get stdout of MCP server process"))?;
 
-        let stderr = child.stderr.take().ok_or_else(|| {
-            ClaudeSDKError::sdk("Failed to get stderr of MCP server process")
-        })?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| ClaudeSDKError::sdk("Failed to get stderr of MCP server process"))?;
 
         let stderr_events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -240,9 +243,8 @@ impl StdioTransport {
             params,
         };
 
-        let json = serde_json::to_string(&notif).map_err(|e| {
-            ClaudeSDKError::sdk(format!("Failed to serialize notification: {e}"))
-        })?;
+        let json = serde_json::to_string(&notif)
+            .map_err(|e| ClaudeSDKError::sdk(format!("Failed to serialize notification: {e}")))?;
 
         let mut stdin = self.stdin.lock().await;
         stdin

@@ -21,7 +21,9 @@ impl Default for WebSearchTool {
 
 #[async_trait]
 impl Tool for WebSearchTool {
-    fn name(&self) -> &str { "web_search" }
+    fn name(&self) -> &str {
+        "web_search"
+    }
 
     fn description(&self) -> &str {
         "Search the web. Executed server-side by the Anthropic API."
@@ -37,8 +39,12 @@ impl Tool for WebSearchTool {
         })
     }
 
-    fn is_concurrency_safe(&self) -> bool { true }
-    fn is_read_only(&self) -> bool { true }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+    fn is_read_only(&self) -> bool {
+        true
+    }
 
     /// A definição enviada à API é a da SERVER tool (tipo versionado, sem
     /// input_schema) — é isso que faz o servidor executar a busca.

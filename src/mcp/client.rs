@@ -57,18 +57,11 @@ impl McpClient {
     /// handshake, and discover available tools.
     ///
     /// Port of: setupSdkMcpClients + getMcpToolsCommandsAndResources flow.
-    pub async fn connect(
-        server_name: impl Into<String>,
-        config: &McpServerConfig,
-    ) -> Result<Self> {
+    pub async fn connect(server_name: impl Into<String>, config: &McpServerConfig) -> Result<Self> {
         let server_name = server_name.into();
 
-        let transport = StdioTransport::spawn(
-            &config.command,
-            &config.args,
-            config.env.as_ref(),
-        )
-        .await?;
+        let transport =
+            StdioTransport::spawn(&config.command, &config.args, config.env.as_ref()).await?;
 
         // Port: client.connect(transport) → initialize handshake
         let init_result = transport
@@ -102,7 +95,9 @@ impl McpClient {
 
             if let Some(tool_list) = tools_result.get("tools").and_then(|t| t.as_array()) {
                 for tool_val in tool_list {
-                    if let Ok(tool_def) = serde_json::from_value::<McpToolDefinition>(tool_val.clone()) {
+                    if let Ok(tool_def) =
+                        serde_json::from_value::<McpToolDefinition>(tool_val.clone())
+                    {
                         tools.push(tool_def);
                     }
                 }
@@ -132,7 +127,11 @@ impl McpClient {
             .await?;
 
         // Port: check for isError in result
-        if result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if result
+            .get("isError")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             let error_text = result
                 .get("content")
                 .and_then(|c| c.as_array())

@@ -45,9 +45,9 @@ pub fn microcompact_messages(messages: &mut [ApiMessage], keep_recent: usize) ->
                         ToolResultContent::Image { .. } => 0,
                     })
                     .sum();
-                let already_cleared = blocks.iter().any(|c| {
-                    matches!(c, ToolResultContent::Text { text } if text == CLEARED_MESSAGE)
-                });
+                let already_cleared = blocks.iter().any(
+                    |c| matches!(c, ToolResultContent::Text { text } if text == CLEARED_MESSAGE),
+                );
                 if !has_image && !already_cleared && text_len >= MIN_CLEARABLE_BYTES {
                     candidates.push((message_index, block_index));
                 }
@@ -96,7 +96,11 @@ mod tests {
         // Contrato: limpa os 3 mais ANTIGOS e preserva os 5 recentes.
         assert_eq!(cleared, 3);
         for (i, message) in messages.iter().enumerate() {
-            let ContentBlock::ToolResult { content: Some(blocks), .. } = &message.content[0] else {
+            let ContentBlock::ToolResult {
+                content: Some(blocks),
+                ..
+            } = &message.content[0]
+            else {
                 panic!("tool_result esperado");
             };
             let ToolResultContent::Text { text } = &blocks[0] else {

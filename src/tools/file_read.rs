@@ -90,7 +90,9 @@ fn is_blocked_device(path: &std::path::Path) -> bool {
 
 #[async_trait]
 impl Tool for FileReadTool {
-    fn name(&self) -> &str { "Read" }
+    fn name(&self) -> &str {
+        "Read"
+    }
 
     fn description(&self) -> &str {
         // O prompt completo importa: é por ele que o modelo decide como usar
@@ -134,8 +136,12 @@ impl Tool for FileReadTool {
         })
     }
 
-    fn is_concurrency_safe(&self) -> bool { true }
-    fn is_read_only(&self) -> bool { true }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+    fn is_read_only(&self) -> bool {
+        true
+    }
 
     async fn execute(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
         let input: FileReadInput = match serde_json::from_value(input) {
@@ -300,7 +306,10 @@ mod tests {
         let tool = FileReadTool;
         let ctx = ToolContext::default();
         let result = tool
-            .execute(serde_json::json!({"file_path": "/nonexistent/file.txt"}), &ctx)
+            .execute(
+                serde_json::json!({"file_path": "/nonexistent/file.txt"}),
+                &ctx,
+            )
             .await;
         assert!(result.is_error);
         // O cwd na mensagem é o que permite ao modelo se autocorrigir.
@@ -335,11 +344,15 @@ mod tests {
         tokio::fs::write(&file, "").await.unwrap();
 
         let result = tool
-            .execute(serde_json::json!({"file_path": file.display().to_string()}), &ctx)
+            .execute(
+                serde_json::json!({"file_path": file.display().to_string()}),
+                &ctx,
+            )
             .await;
         // Aviso, não erro — e no texto LITERAL que o modelo reconhece.
         assert!(!result.is_error);
-        assert!(text_of(&result).contains("<system-reminder>Warning: the file exists but the contents are empty."));
+        assert!(text_of(&result)
+            .contains("<system-reminder>Warning: the file exists but the contents are empty."));
     }
 
     #[tokio::test]
@@ -380,10 +393,15 @@ mod tests {
         let ctx = ToolContext::default();
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("big.txt");
-        tokio::fs::write(&file, "x".repeat(300 * 1024)).await.unwrap();
+        tokio::fs::write(&file, "x".repeat(300 * 1024))
+            .await
+            .unwrap();
 
         let result = tool
-            .execute(serde_json::json!({"file_path": file.display().to_string()}), &ctx)
+            .execute(
+                serde_json::json!({"file_path": file.display().to_string()}),
+                &ctx,
+            )
             .await;
         assert!(result.is_error);
         // O erro TEM de ensinar o remédio (offset/limit) — é o que faz o

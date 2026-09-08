@@ -18,22 +18,21 @@ pub fn estimate_block_tokens(block: &ContentBlock) -> usize {
         ContentBlock::ToolUse { input, name, .. } => {
             estimate_tokens(name) + estimate_tokens(&input.to_string())
         }
-        ContentBlock::ToolResult { content, .. } => {
-            content.as_ref().map_or(0, |blocks| {
-                blocks.iter().map(|c| match c {
+        ContentBlock::ToolResult { content, .. } => content.as_ref().map_or(0, |blocks| {
+            blocks
+                .iter()
+                .map(|c| match c {
                     crate::api::types::ToolResultContent::Text { text } => estimate_tokens(text),
                     crate::api::types::ToolResultContent::Image { .. } => 2000,
-                }).sum()
-            })
-        }
+                })
+                .sum()
+        }),
         ContentBlock::Thinking { thinking, .. } => estimate_tokens(thinking),
         ContentBlock::RedactedThinking { .. } => 100, // Opaque, can't estimate
         ContentBlock::ServerToolUse { input, name, .. } => {
             estimate_tokens(name) + estimate_tokens(&input.to_string())
         }
-        ContentBlock::WebSearchToolResult { content, .. } => {
-            estimate_tokens(&content.to_string())
-        }
+        ContentBlock::WebSearchToolResult { content, .. } => estimate_tokens(&content.to_string()),
     }
 }
 
@@ -64,26 +63,25 @@ pub async fn count_tokens_via_api(
             .map_err(|e| ClaudeSDKError::sdk(format!("Failed to serialize tools: {e}")))?;
     }
 
-    let response = client
-        .post_json("/v1/messages/count_tokens", &body)
-        .await?;
+    let response = client.post_json("/v1/messages/count_tokens", &body).await?;
 
     let input_tokens = response
         .get("input_tokens")
         .and_then(|v| v.as_u64())
-        .ok_or_else(|| {
-            ClaudeSDKError::sdk("count_tokens response missing input_tokens field")
-        })?;
+        .ok_or_else(|| ClaudeSDKError::sdk("count_tokens response missing input_tokens field"))?;
 
     Ok(input_tokens as usize)
 }
 
 /// Estimate total token count for a list of messages.
 pub fn estimate_message_tokens(messages: &[ApiMessage]) -> usize {
-    messages.iter().map(|m| {
-        // ~4 tokens overhead per message (role, formatting)
-        4 + m.content.iter().map(estimate_block_tokens).sum::<usize>()
-    }).sum()
+    messages
+        .iter()
+        .map(|m| {
+            // ~4 tokens overhead per message (role, formatting)
+            4 + m.content.iter().map(estimate_block_tokens).sum::<usize>()
+        })
+        .sum()
 }
 
 /// Estimate token count for system prompt blocks.
@@ -93,12 +91,15 @@ pub fn estimate_system_tokens(system: &[SystemBlock]) -> usize {
 
 /// Estimate token count for tool definitions.
 pub fn estimate_tool_definition_tokens(tools: &[crate::api::types::ToolDefinition]) -> usize {
-    tools.iter().map(|t| {
-        let name_tokens = estimate_tokens(&t.name);
-        let desc_tokens = t.description.as_ref().map_or(0, |d| estimate_tokens(d));
-        let schema_tokens = estimate_tokens(&t.input_schema.to_string());
-        name_tokens + desc_tokens + schema_tokens
-    }).sum()
+    tools
+        .iter()
+        .map(|t| {
+            let name_tokens = estimate_tokens(&t.name);
+            let desc_tokens = t.description.as_ref().map_or(0, |d| estimate_tokens(d));
+            let schema_tokens = estimate_tokens(&t.input_schema.to_string());
+            name_tokens + desc_tokens + schema_tokens
+        })
+        .sum()
 }
 
 /// Estimativa com margem de segurança de 1.33x (a mesma do microcompact do

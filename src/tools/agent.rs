@@ -18,7 +18,9 @@ struct AgentInput {
 
 #[async_trait]
 impl Tool for AgentTool {
-    fn name(&self) -> &str { "Agent" }
+    fn name(&self) -> &str {
+        "Agent"
+    }
 
     fn description(&self) -> &str {
         "Launch a new agent to handle complex, multi-step tasks."

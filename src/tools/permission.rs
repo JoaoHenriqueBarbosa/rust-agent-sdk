@@ -18,7 +18,11 @@ impl ToolPermissionRule {
                 let pattern = rule[open + 1..rule.len() - 1].trim().to_string();
                 return Self {
                     tool_name,
-                    pattern: if pattern.is_empty() { None } else { Some(pattern) },
+                    pattern: if pattern.is_empty() {
+                        None
+                    } else {
+                        Some(pattern)
+                    },
                 };
             }
         }
@@ -59,10 +63,9 @@ fn primary_argument(tool_name: &str, input: &serde_json::Value) -> Option<String
         .map(str::to_string)
         .or_else(|| {
             // Fallback: qualquer primeiro campo string do input.
-            input.as_object().and_then(|obj| {
-                obj.values()
-                    .find_map(|v| v.as_str().map(str::to_string))
-            })
+            input
+                .as_object()
+                .and_then(|obj| obj.values().find_map(|v| v.as_str().map(str::to_string)))
         })
 }
 
@@ -73,7 +76,10 @@ fn glob_match(pattern: &str, text: &str) -> bool {
         match p.split_first() {
             None => t.is_empty(),
             Some(('*', rest)) => (0..=t.len()).any(|i| inner(rest, &t[i..])),
-            Some((c, rest)) => t.split_first().map(|(tc, tr)| tc == c && inner(rest, tr)).unwrap_or(false),
+            Some((c, rest)) => t
+                .split_first()
+                .map(|(tc, tr)| tc == c && inner(rest, tr))
+                .unwrap_or(false),
         }
     }
     let p: Vec<char> = pattern.chars().collect();
@@ -119,14 +125,21 @@ impl PermissionRules {
     /// (entries like `"Read"` or `"Bash(git *)"`).
     pub fn from_lists(allowed: &[String], disallowed: &[String]) -> Self {
         Self {
-            allow: allowed.iter().map(|r| ToolPermissionRule::parse(r)).collect(),
-            deny: disallowed.iter().map(|r| ToolPermissionRule::parse(r)).collect(),
+            allow: allowed
+                .iter()
+                .map(|r| ToolPermissionRule::parse(r))
+                .collect(),
+            deny: disallowed
+                .iter()
+                .map(|r| ToolPermissionRule::parse(r))
+                .collect(),
         }
     }
 
     /// Add an allow rule.
     pub fn add_allow(&mut self, tool_name: impl Into<String>) {
-        self.allow.push(ToolPermissionRule::parse(&tool_name.into()));
+        self.allow
+            .push(ToolPermissionRule::parse(&tool_name.into()));
     }
 
     /// Add a deny rule.

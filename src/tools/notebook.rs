@@ -20,8 +20,12 @@ struct NotebookEditInput {
 
 #[async_trait]
 impl Tool for NotebookEditTool {
-    fn name(&self) -> &str { "NotebookEdit" }
-    fn is_edit_tool(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "NotebookEdit"
+    }
+    fn is_edit_tool(&self) -> bool {
+        true
+    }
 
     fn description(&self) -> &str {
         "Replaces, inserts, or deletes a cell in a Jupyter notebook (.ipynb file)."
@@ -80,16 +84,25 @@ impl Tool for NotebookEditTool {
             "delete" => {
                 let idx = input.cell_number.unwrap_or(0);
                 if idx >= cells.len() {
-                    return ToolResult::error(format!("Cell index {} out of range (0-{})", idx, cells.len() - 1));
+                    return ToolResult::error(format!(
+                        "Cell index {} out of range (0-{})",
+                        idx,
+                        cells.len() - 1
+                    ));
                 }
                 cells.remove(idx);
             }
             _ => {
                 let idx = input.cell_number.unwrap_or(0);
                 if idx >= cells.len() {
-                    return ToolResult::error(format!("Cell index {} out of range (0-{})", idx, cells.len() - 1));
+                    return ToolResult::error(format!(
+                        "Cell index {} out of range (0-{})",
+                        idx,
+                        cells.len() - 1
+                    ));
                 }
-                let source: Vec<String> = input.new_source.lines().map(|l| format!("{l}\n")).collect();
+                let source: Vec<String> =
+                    input.new_source.lines().map(|l| format!("{l}\n")).collect();
                 cells[idx]["source"] = serde_json::json!(source);
                 if let Some(ct) = input.cell_type.as_deref() {
                     cells[idx]["cell_type"] = serde_json::json!(ct);
@@ -99,7 +112,10 @@ impl Tool for NotebookEditTool {
 
         let output = serde_json::to_string_pretty(&notebook).unwrap();
         match tokio::fs::write(&input.notebook_path, output).await {
-            Ok(()) => ToolResult::text(format!("Successfully {mode}d cell in {}", input.notebook_path)),
+            Ok(()) => ToolResult::text(format!(
+                "Successfully {mode}d cell in {}",
+                input.notebook_path
+            )),
             Err(e) => ToolResult::error(format!("Failed to write notebook: {e}")),
         }
     }

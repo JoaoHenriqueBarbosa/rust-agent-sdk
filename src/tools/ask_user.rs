@@ -34,8 +34,12 @@ struct Question {
 
 #[async_trait]
 impl Tool for AskUserQuestionTool {
-    fn name(&self) -> &str { "AskUserQuestion" }
-    fn always_asks(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "AskUserQuestion"
+    }
+    fn always_asks(&self) -> bool {
+        true
+    }
 
     fn description(&self) -> &str {
         "Ask the user one or more questions and wait for their answers. \

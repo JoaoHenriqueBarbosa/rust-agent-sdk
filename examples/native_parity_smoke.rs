@@ -39,10 +39,13 @@ async fn main() {
     std::fs::write(&secret_path, &secret).expect("write secret");
 
     client
-        .query(format!(
-            "Use a tool Read para ler o arquivo {} e me diga exatamente o conteúdo dele.",
-            secret_path.display()
-        ).as_str())
+        .query(
+            format!(
+                "Use a tool Read para ler o arquivo {} e me diga exatamente o conteúdo dele.",
+                secret_path.display()
+            )
+            .as_str(),
+        )
         .await
         .expect("query 1");
     print_messages(&client.receive_response().await.expect("response 1"));
@@ -58,7 +61,9 @@ async fn main() {
 
     // Server tool: a busca roda NO SERVIDOR; o SDK só declara e consome.
     client
-        .query("Use web_search para descobrir quem é o atual CEO da Anthropic. Responda em uma linha.")
+        .query(
+            "Use web_search para descobrir quem é o atual CEO da Anthropic. Responda em uma linha.",
+        )
         .await
         .expect("query 3");
     print_messages(&client.receive_response().await.expect("response 3"));

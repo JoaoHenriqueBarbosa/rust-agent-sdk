@@ -6,8 +6,12 @@ pub struct EnterWorktreeTool;
 
 #[async_trait]
 impl Tool for EnterWorktreeTool {
-    fn name(&self) -> &str { "EnterWorktree" }
-    fn description(&self) -> &str { "Create an isolated git worktree for the current session." }
+    fn name(&self) -> &str {
+        "EnterWorktree"
+    }
+    fn description(&self) -> &str {
+        "Create an isolated git worktree for the current session."
+    }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -25,8 +29,12 @@ pub struct ExitWorktreeTool;
 
 #[async_trait]
 impl Tool for ExitWorktreeTool {
-    fn name(&self) -> &str { "ExitWorktree" }
-    fn description(&self) -> &str { "Exit the current worktree session." }
+    fn name(&self) -> &str {
+        "ExitWorktree"
+    }
+    fn description(&self) -> &str {
+        "Exit the current worktree session."
+    }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

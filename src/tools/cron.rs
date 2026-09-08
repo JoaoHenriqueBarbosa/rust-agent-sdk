@@ -18,8 +18,12 @@ struct CronInput {
 
 #[async_trait]
 impl Tool for ScheduleCronTool {
-    fn name(&self) -> &str { "ScheduleCron" }
-    fn description(&self) -> &str { "Schedule a prompt to run on a cron schedule." }
+    fn name(&self) -> &str {
+        "ScheduleCron"
+    }
+    fn description(&self) -> &str {
+        "Schedule a prompt to run on a cron schedule."
+    }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

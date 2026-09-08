@@ -17,8 +17,12 @@ struct SkillInput {
 
 #[async_trait]
 impl Tool for SkillTool {
-    fn name(&self) -> &str { "Skill" }
-    fn description(&self) -> &str { "Execute a skill within the conversation." }
+    fn name(&self) -> &str {
+        "Skill"
+    }
+    fn description(&self) -> &str {
+        "Execute a skill within the conversation."
+    }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
