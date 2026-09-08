@@ -46,7 +46,7 @@ tokio = { version = "1", features = ["full", "test-util"] }
 tempfile = "3"
 pretty_assertions = "1"
 filetime = "0.2"
-serial_test = "3"
+serial_test = "4"
 
 [features]
 default = []
