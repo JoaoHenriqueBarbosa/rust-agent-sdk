@@ -43,10 +43,11 @@ use crate::errors::{ClaudeSDKError, Result};
 use crate::internal::transport::Transport;
 use crate::session::SessionStorage;
 use crate::tools::framework::{
-    PermissionOutcome, PostToolUseEvent, Tool, ToolContext, ToolExecutor, ToolRegistry,
-    ToolResult,
+    PermissionOutcome, PostToolUseEvent, Tool, ToolContext, ToolExecutor, ToolRegistry, ToolResult,
 };
-use crate::types::{ClaudeAgentOptions, SystemPrompt, SystemPromptConfig, ThinkingConfig, ToolsConfig};
+use crate::types::{
+    ClaudeAgentOptions, SystemPrompt, SystemPromptConfig, ThinkingConfig, ToolsConfig,
+};
 
 /// Teto de espera por uma resposta do cliente a um `control_request` nosso
 /// (can_use_tool / hook_callback). Estourar vira recusa/ausência — nunca
@@ -184,6 +185,18 @@ impl NativeApiTransport {
     }
 }
 
+/// Dropar o transporte sem `close()` (o cliente foi abortado no meio de um
+/// turno, por exemplo) NÃO pode deixar o engine vivo: ele continuaria
+/// chamando a API e executando tools sem ninguém para ler o resultado. O
+/// `abort` do JoinHandle é síncrono, então cabe no Drop.
+impl Drop for NativeApiTransport {
+    fn drop(&mut self) {
+        if let Some(engine) = self.engine.take() {
+            engine.abort();
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl Transport for NativeApiTransport {
     async fn connect(&mut self) -> Result<()> {
@@ -244,8 +257,9 @@ impl Transport for NativeApiTransport {
             if line.is_empty() {
                 continue;
             }
-            let frame: Value = serde_json::from_str(line)
-                .map_err(|e| ClaudeSDKError::sdk(format!("invalid frame written to native transport: {e}")))?;
+            let frame: Value = serde_json::from_str(line).map_err(|e| {
+                ClaudeSDKError::sdk(format!("invalid frame written to native transport: {e}"))
+            })?;
             match frame.get("type").and_then(Value::as_str) {
                 Some("user") => {
                     if shared.input_closed.load(Ordering::Relaxed) {
@@ -349,10 +363,7 @@ async fn handle_client_control(shared: &Arc<Shared>, frame: &Value) {
                                 matcher.get("hookCallbackIds").and_then(Value::as_array)
                             {
                                 ids.extend(
-                                    cb_ids
-                                        .iter()
-                                        .filter_map(Value::as_str)
-                                        .map(str::to_string),
+                                    cb_ids.iter().filter_map(Value::as_str).map(str::to_string),
                                 );
                             }
                         }
@@ -376,10 +387,9 @@ async fn handle_client_control(shared: &Arc<Shared>, frame: &Value) {
             respond(json!({}));
         }
         "set_permission_mode" => {
-            let parsed = request
-                .get("mode")
-                .and_then(Value::as_str)
-                .and_then(|m| serde_json::from_value::<crate::types::PermissionMode>(json!(m)).ok());
+            let parsed = request.get("mode").and_then(Value::as_str).and_then(|m| {
+                serde_json::from_value::<crate::types::PermissionMode>(json!(m)).ok()
+            });
             match parsed {
                 Some(mode) => {
                     if let Ok(mut guard) = shared.permission_mode.write() {
@@ -451,8 +461,11 @@ fn env_of(options: &ClaudeAgentOptions, key: &str) -> Option<String> {
 }
 
 fn resolve_config(options: &ClaudeAgentOptions) -> Result<EngineConfig> {
-    let api_key = env_of(options, "ANTHROPIC_API_KEY")
-        .ok_or_else(|| ClaudeSDKError::sdk("native transport requires ANTHROPIC_API_KEY (options.env or process env)"))?;
+    let api_key = env_of(options, "ANTHROPIC_API_KEY").ok_or_else(|| {
+        ClaudeSDKError::sdk(
+            "native transport requires ANTHROPIC_API_KEY (options.env or process env)",
+        )
+    })?;
     let base_url = env_of(options, "ANTHROPIC_BASE_URL");
     let model = options
         .model
@@ -703,7 +716,8 @@ async fn engine_main(
     }
 
     // SessionStart: dispara os hooks registrados (o resultado não bloqueia).
-    let hook_base = |extra: Value| {        let mut base = json!({
+    let hook_base = |extra: Value| {
+        let mut base = json!({
             "session_id": session_id,
             "transcript_path": transcript_path,
             "cwd": config.cwd,
@@ -782,7 +796,10 @@ async fn engine_main(
                 .collect::<Vec<_>>()
                 .join("\n");
             let responses = shared
-                .run_hooks("UserPromptSubmit", hook_base(json!({"prompt": prompt_text})))
+                .run_hooks(
+                    "UserPromptSubmit",
+                    hook_base(json!({"prompt": prompt_text})),
+                )
                 .await;
             let mut blocked_reason: Option<String> = None;
             for r in &responses {
@@ -959,16 +976,18 @@ async fn engine_main(
         let loop_options = AgenticLoopOptions {
             model: model.clone(),
             system_prompt: system_prompt_blocks(&options, &config, &model),
-            max_turns: options
-                .max_turns
-                .and_then(|n| u32::try_from(n).ok()),
+            max_turns: options.max_turns.and_then(|n| u32::try_from(n).ok()),
             initial_messages: history.clone(),
             thinking: thinking_param(&options),
             include_stream_events: options.include_partial_messages,
             abort: Some(abort),
             fallback_model: options.fallback_model.clone(),
             session_id: Some(session_id.clone()),
-            stop_hook: if has_stop_hooks { Some(stop_hook) } else { None },
+            stop_hook: if has_stop_hooks {
+                Some(stop_hook)
+            } else {
+                None
+            },
             pre_compact_hook: Some(pre_compact),
             on_history_rewrite: Some(on_history_rewrite),
             context_window_tokens,
@@ -993,12 +1012,24 @@ async fn engine_main(
                             }
                         }
                     }
-                    if let AgenticEvent::Result { total_cost_usd: cost, .. } = &ev {
+                    if let AgenticEvent::Result {
+                        total_cost_usd: cost,
+                        ..
+                    } = &ev
+                    {
                         session_cost_usd += *cost;
                     }
                     track_history(&mut history, &ev);
-                    persist_event(&storage, &shared, &config, &session_id, &transcript_path, &mut last_uuid, &ev)
-                        .await;
+                    persist_event(
+                        &storage,
+                        &shared,
+                        &config,
+                        &session_id,
+                        &transcript_path,
+                        &mut last_uuid,
+                        &ev,
+                    )
+                    .await;
                     match serde_json::to_value(&ev) {
                         Ok(frame) => {
                             if shared.outbound.send(frame).is_err() {
@@ -1026,10 +1057,7 @@ async fn engine_main(
         {
             use crate::compact::token_estimation::estimate_message_tokens_with_margin;
             let system_blocks = system_prompt_blocks(&options, &config, &model);
-            let system_tokens: usize = system_blocks
-                .iter()
-                .map(|b| b.text.len() / 4)
-                .sum();
+            let system_tokens: usize = system_blocks.iter().map(|b| b.text.len() / 4).sum();
             let total = estimate_message_tokens_with_margin(&history) + system_tokens;
             let max_tokens = context_window_tokens;
             *shared.context_usage.lock().await = json!({
@@ -1144,7 +1172,12 @@ async fn persist_event(
                 .ok()
         }
         AgenticEvent::User { message, .. } => storage
-            .append_user(session_id, &message.content, last_uuid.as_deref(), &config.cwd)
+            .append_user(
+                session_id,
+                &message.content,
+                last_uuid.as_deref(),
+                &config.cwd,
+            )
             .await
             .ok(),
         _ => None,
@@ -1241,9 +1274,7 @@ async fn build_executor(
     // conhecem) e `Agent` (nome atual do CLI). Só quando as tools não vieram
     // por lista explícita sem ele.
     let wants_agent = match &options.tools {
-        Some(ToolsConfig::List(names)) => names
-            .iter()
-            .any(|n| n == "Task" || n == "Agent"),
+        Some(ToolsConfig::List(names)) => names.iter().any(|n| n == "Task" || n == "Agent"),
         _ => true,
     };
     if wants_agent {
@@ -1415,50 +1446,51 @@ async fn build_executor(
     let hook_session = session_id.to_string();
     let hook_transcript = transcript_path.to_string();
     let hook_cwd = config.cwd.clone();
-    let post_tool_use: crate::tools::framework::PostToolUseFn = Arc::new(move |event: PostToolUseEvent| {
-        let shared = Arc::clone(&hook_shared);
-        let session_id = hook_session.clone();
-        let transcript_path = hook_transcript.clone();
-        let cwd = hook_cwd.clone();
-        Box::pin(async move {
-            // PostToolUse sempre; PostToolUseFailure adicionalmente quando o
-            // resultado é erro.
-            let mut events_to_run = vec!["PostToolUse"];
-            if event.is_error {
-                events_to_run.push("PostToolUseFailure");
-            }
-            let mut contexts: Vec<String> = Vec::new();
-            for hook_event in events_to_run {
-                let responses = shared
-                    .run_hooks(
-                        hook_event,
-                        json!({
-                            "session_id": session_id,
-                            "transcript_path": transcript_path,
-                            "cwd": cwd,
-                            "tool_name": event.tool_name,
-                            "tool_input": event.tool_input,
-                            "tool_response": event.tool_response,
-                            "tool_use_id": event.tool_use_id,
-                        }),
-                    )
-                    .await;
-                for response in responses {
-                    if let Some(text) = response
-                        .pointer("/hookSpecificOutput/additionalContext")
-                        .and_then(Value::as_str)
-                    {
-                        contexts.push(text.to_string());
+    let post_tool_use: crate::tools::framework::PostToolUseFn =
+        Arc::new(move |event: PostToolUseEvent| {
+            let shared = Arc::clone(&hook_shared);
+            let session_id = hook_session.clone();
+            let transcript_path = hook_transcript.clone();
+            let cwd = hook_cwd.clone();
+            Box::pin(async move {
+                // PostToolUse sempre; PostToolUseFailure adicionalmente quando o
+                // resultado é erro.
+                let mut events_to_run = vec!["PostToolUse"];
+                if event.is_error {
+                    events_to_run.push("PostToolUseFailure");
+                }
+                let mut contexts: Vec<String> = Vec::new();
+                for hook_event in events_to_run {
+                    let responses = shared
+                        .run_hooks(
+                            hook_event,
+                            json!({
+                                "session_id": session_id,
+                                "transcript_path": transcript_path,
+                                "cwd": cwd,
+                                "tool_name": event.tool_name,
+                                "tool_input": event.tool_input,
+                                "tool_response": event.tool_response,
+                                "tool_use_id": event.tool_use_id,
+                            }),
+                        )
+                        .await;
+                    for response in responses {
+                        if let Some(text) = response
+                            .pointer("/hookSpecificOutput/additionalContext")
+                            .and_then(Value::as_str)
+                        {
+                            contexts.push(text.to_string());
+                        }
                     }
                 }
-            }
-            if contexts.is_empty() {
-                None
-            } else {
-                Some(contexts.join("\n"))
-            }
-        })
-    });
+                if contexts.is_empty() {
+                    None
+                } else {
+                    Some(contexts.join("\n"))
+                }
+            })
+        });
 
     let context = ToolContext {
         working_directory: std::path::PathBuf::from(&config.cwd),

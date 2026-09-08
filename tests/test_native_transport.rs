@@ -173,7 +173,12 @@ impl Default for FixtureSpec {
     }
 }
 
-fn base_options(spec: &FixtureSpec, api_addr: &str, config_dir: &str, cwd: &str) -> ClaudeAgentOptions {
+fn base_options(
+    spec: &FixtureSpec,
+    api_addr: &str,
+    config_dir: &str,
+    cwd: &str,
+) -> ClaudeAgentOptions {
     let mut env = HashMap::new();
     env.insert("ANTHROPIC_API_KEY".to_string(), "mock-key".to_string());
     env.insert("ANTHROPIC_BASE_URL".to_string(), api_addr.to_string());
@@ -245,7 +250,10 @@ fn mcp_server_with_log() -> (Arc<SdkMcpServer>, Arc<Mutex<Vec<Value>>>) {
         .tool(
             "remember",
             "Grava um fato.",
-            ToolInputSchema::object().required("fact", PropertySchema::string().description("O fato a gravar.")),
+            ToolInputSchema::object().required(
+                "fact",
+                PropertySchema::string().description("O fato a gravar."),
+            ),
             move |input: Value| {
                 let log = Arc::clone(&log);
                 async move {
@@ -342,8 +350,14 @@ async fn a_tool_cycle_runs_the_mcp_tool_and_the_second_request_carries_the_resul
     let requests = api.requests().await;
     assert_eq!(requests.len(), 2);
     let second = requests[1].to_string();
-    assert!(second.contains("tool_result"), "segunda request sem tool_result: {second}");
-    assert!(second.contains("gravado"), "tool_result sem o output da tool: {second}");
+    assert!(
+        second.contains("tool_result"),
+        "segunda request sem tool_result: {second}"
+    );
+    assert!(
+        second.contains("gravado"),
+        "tool_result sem o output da tool: {second}"
+    );
 
     let (_, result) = drive(&messages);
     assert_eq!(result.expect("result").subtype, "success");
@@ -353,7 +367,10 @@ async fn a_tool_cycle_runs_the_mcp_tool_and_the_second_request_carries_the_resul
 async fn can_use_tool_deny_reaches_the_model_and_the_result_counts_the_denial() {
     let (server, calls) = mcp_server_with_log();
     let api = MockApi::start(vec![
-        sse_tool_call("mcp__bench__remember", &json!({"fact": "não deveria gravar"})),
+        sse_tool_call(
+            "mcp__bench__remember",
+            &json!({"fact": "não deveria gravar"}),
+        ),
         sse_text("entendi, vou commitar"),
     ])
     .await;
@@ -479,10 +496,9 @@ async fn the_session_store_mirrors_the_transcript() {
     // sob a MESMA chave (project_key, session_id) que o subprocess usaria.
     let (_, result) = drive(&messages);
     let session_id = result.expect("result").session_id;
-    let project_key = rust_agent_sdk::project_key_for_directory(Some(
-        &fx.cwd.path().display().to_string(),
-    ))
-    .expect("project key");
+    let project_key =
+        rust_agent_sdk::project_key_for_directory(Some(&fx.cwd.path().display().to_string()))
+            .expect("project key");
     let key = rust_agent_sdk::SessionKey::new(project_key, session_id);
     let entries = store
         .load(&key)
@@ -497,7 +513,11 @@ async fn the_session_store_mirrors_the_transcript() {
 #[tokio::test]
 async fn resume_reloads_the_disk_history_and_keeps_the_session_id() {
     // Primeira sessão: grava o transcript em disco.
-    let api = MockApi::start(vec![sse_text("primeira resposta"), sse_text("segunda resposta")]).await;
+    let api = MockApi::start(vec![
+        sse_text("primeira resposta"),
+        sse_text("segunda resposta"),
+    ])
+    .await;
     let mut fx = fixture(FixtureSpec::default(), &api).await;
     fx.client.connect().await.expect("connect");
     fx.client.query("primeiro turno").await.expect("query");
@@ -577,5 +597,68 @@ async fn two_turns_share_one_session_and_the_second_request_sees_the_first() {
     assert!(
         body.contains("turno um") && body.contains("resposta um") && body.contains("turno dois"),
         "o turno dois não viu o histórico: {body}"
+    );
+}
+
+#[tokio::test]
+async fn dropping_the_client_mid_turn_aborts_the_engine() {
+    // Roteiro: o modelo chama a tool, cujo handler demora; o cliente é
+    // dropado ANTES de a tool terminar. Sem o Drop do transporte, o engine
+    // continuaria: a tool gravaria e a segunda request chegaria ao mock.
+    let api = MockApi::start(vec![
+        sse_tool_call("mcp__bench__remember", &json!({"fact": "tarde demais"})),
+        sse_text("nunca deveria chegar"),
+    ])
+    .await;
+    let calls: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&calls);
+    let server = SdkMcpServer::builder("bench")
+        .tool(
+            "remember",
+            "Grava um fato devagar.",
+            ToolInputSchema::object().required("fact", PropertySchema::string()),
+            move |input: Value| {
+                let log = Arc::clone(&log);
+                async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    log.lock().await.push(input);
+                    Ok(ToolOutput::text("gravado"))
+                }
+            },
+        )
+        .build_shared();
+    let spec = FixtureSpec {
+        mcp_server: Some(server),
+        ..FixtureSpec::default()
+    };
+    let config_dir = tempfile::tempdir().expect("config dir");
+    let cwd = tempfile::tempdir().expect("cwd");
+    let cfg = config_dir.path().display().to_string();
+    let cwd_path = cwd.path().display().to_string();
+    // bypassPermissions: a tool roda sem round-trip pelo cliente, então o
+    // que segura o engine é só o handler lento, não uma permissão pendente.
+    let mut transport_options = base_options(&spec, &api.addr, &cfg, &cwd_path);
+    transport_options.permission_mode = Some(rust_agent_sdk::PermissionMode::BypassPermissions);
+    let mut client_options = base_options(&spec, &api.addr, &cfg, &cwd_path);
+    client_options.permission_mode = Some(rust_agent_sdk::PermissionMode::BypassPermissions);
+    let transport = NativeApiTransport::new(transport_options);
+    let mut client = ClaudeSDKClient::new(client_options).with_transport(Box::new(transport));
+
+    client.connect().await.expect("connect");
+    client.query("lembra").await.expect("query");
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    drop(client);
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+
+    // Contrato: dropar o cliente mata o engine; a tool em curso não conclui e
+    // a request seguinte nunca sai.
+    assert!(
+        calls.lock().await.is_empty(),
+        "a tool concluiu depois do drop"
+    );
+    assert_eq!(
+        api.requests().await.len(),
+        1,
+        "o engine seguiu chamando a API depois do drop"
     );
 }
