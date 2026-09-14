@@ -1665,7 +1665,10 @@ impl ClaudeAgentOptions {
 
     /// Acrescenta uma tool nativa desta sessão. Veja
     /// [`ClaudeAgentOptions::native_tools`].
-    pub fn with_native_tool(mut self, tool: impl Into<Arc<dyn crate::tools::framework::Tool>>) -> Self {
+    pub fn with_native_tool(
+        mut self,
+        tool: impl Into<Arc<dyn crate::tools::framework::Tool>>,
+    ) -> Self {
         self.native_tools.push(tool.into());
         self
     }
