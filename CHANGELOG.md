@@ -5,6 +5,45 @@ Versões ainda não publicadas ficam em `Unreleased`.
 
 ## [Unreleased]
 
+### Adicionado: `JsonLineFramer` público
+
+O enquadramento dos frames stream-json (uma linha, um objeto; objeto partido
+entre linhas bufferizado; ruído do CLI descartado; teto de buffer; bytes
+parciais que sobrevivem a um cancelamento no meio da leitura) era um detalhe
+privado do `SubprocessCLITransport`. Só que essas regras não têm nada de
+específico de subprocess: qualquer transporte que receba o protocolo por um
+fluxo de bytes precisa exatamente delas, e quem implementa `Transport` por fora
+só tinha a opção de copiá-las, bug por bug, e ver as cópias divergirem na
+primeira correção.
+
+Agora são um tipo próprio, `JsonLineFramer`, com dois modos de alimentação:
+`line_buffer()` como destino de `read_until` para fontes `AsyncBufRead` (é o
+que o subprocess usa, e é o que preserva o parcial no cancelamento), e
+`push_chunk()` para fontes que entregam pedaços soltos, como o stream
+multiplexado de um `docker exec` ou frames de WebSocket. O
+`SubprocessCLITransport` passou a delegar para ele, então não existe mais uma
+segunda implementação para sair de sincronia.
+
+### Adicionado: `tool_env_denylist` nas opções
+
+`options.env` acumula dois papéis que só coincidem no caso simples: configurar
+o MOTOR (`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`) e preparar o ambiente dos
+processos que as tools spawnam, porque o `Bash` repassa o env inteiro para o
+comando. Quem embute o motor num sandbox multi-inquilino quer o primeiro sem o
+segundo: senão um `env` digitado pelo modelo no shell revela a credencial da
+sessão.
+
+`tool_env_denylist` é uma lista de prefixos que não chegam às tools que
+executam processo. O default é vazio, ou seja, o comportamento histórico de
+repassar tudo continua idêntico para quem não configurar nada.
+
+### Adicionado: `PostgresSessionStore` é `Clone`
+
+`PgPool` é um handle contado, então clonar o store custa um `Arc` e não abre
+conexão nova. É o que permite a um servidor com muitas sessões vivas dar um
+store a cada uma reusando o pool da aplicação, em vez de repetir o
+`create_schema` de `with_pool` a cada sessão.
+
 ### Adicionado — `get_projects_dir` é público
 
 A raiz em que o `claude` grava os transcripts canônicos

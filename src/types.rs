@@ -1481,6 +1481,19 @@ pub struct ClaudeAgentOptions {
     pub settings: Option<String>,
     pub add_dirs: Vec<PathBuf>,
     pub env: HashMap<String, String>,
+    /// Prefixos de variáveis que NÃO são repassadas às tools que executam
+    /// processo (hoje, `Bash`). Vazio (o default) mantém o comportamento
+    /// histórico: a tool recebe o `env` inteiro.
+    ///
+    /// Existe porque `env` tem dois papéis que só coincidem no caso simples:
+    /// configurar o MOTOR (`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`) e
+    /// preparar o ambiente do processo que a tool vai rodar. Quem embute o
+    /// motor num sandbox multi-inquilino quer o primeiro sem o segundo, porque
+    /// senão um `env` no shell do modelo revela a credencial da sessão.
+    ///
+    /// Comparação por prefixo, sensível a maiúsculas: `["ANTHROPIC_"]` tira
+    /// toda a família de uma vez.
+    pub tool_env_denylist: Vec<String>,
     pub extra_args: HashMap<String, Option<String>>,
     pub max_buffer_size: Option<usize>,
     pub can_use_tool: Option<CanUseToolFn>,
@@ -1543,6 +1556,7 @@ impl Default for ClaudeAgentOptions {
             settings: None,
             add_dirs: Vec::new(),
             env: HashMap::new(),
+            tool_env_denylist: Vec::new(),
             extra_args: HashMap::new(),
             max_buffer_size: None,
             can_use_tool: None,

@@ -1,4 +1,5 @@
 pub mod client;
+pub mod framer;
 pub mod message_parser;
 pub mod query;
 pub mod session_import;

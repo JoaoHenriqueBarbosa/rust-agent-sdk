@@ -1504,11 +1504,33 @@ async fn build_executor(
         post_tool_use: Some(post_tool_use),
         tool_results_dir: Some(tool_results_dir),
         additional_directories: options.add_dirs.clone(),
-        extra_env: options.env.clone(),
+        extra_env: tool_env(&options.env, &options.tool_env_denylist),
         task_store: Some(task_store),
         todo_store: Some(todo_store),
     };
     ToolExecutor::new(registry, context).with_permission_rules(permission_rules)
+}
+
+/// O env que as tools que rodam processo enxergam.
+///
+/// O `options.env` carrega duas coisas: o que configura o MOTOR (a chave e a
+/// base URL da API) e o que prepara o ambiente dos processos que as tools
+/// spawnam. Elas coincidem no uso simples, e divergem quando o motor roda num
+/// sandbox multi-inquilino: ali a credencial da sessão não pode aparecer num
+/// `env` digitado pelo modelo no shell. `tool_env_denylist` é o corte, e vazio
+/// (o default) preserva o comportamento histórico de repassar tudo.
+fn tool_env(env: &HashMap<String, String>, denylist: &[String]) -> HashMap<String, String> {
+    if denylist.is_empty() {
+        return env.clone();
+    }
+    env.iter()
+        .filter(|(key, _)| {
+            !denylist
+                .iter()
+                .any(|prefix| key.starts_with(prefix.as_str()))
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
 }
 
 /// Subagente in-process: um `AgenticLoop` aninhado com registry próprio. O
@@ -1738,5 +1760,62 @@ impl Tool for McpBridgeTool {
         } else {
             ToolResult::text(text)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::tool_env;
+
+    fn env() -> HashMap<String, String> {
+        [
+            ("ANTHROPIC_API_KEY", "segredo"),
+            ("ANTHROPIC_BASE_URL", "https://exemplo"),
+            ("PATH", "/usr/bin"),
+            ("HOME", "/home/agent"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+    }
+
+    /// O default não pode mudar o que já está em produção.
+    #[test]
+    fn denylist_vazia_repassa_o_env_inteiro() {
+        let out = tool_env(&env(), &[]);
+        assert_eq!(out.len(), 4);
+        assert_eq!(
+            out.get("ANTHROPIC_API_KEY").map(String::as_str),
+            Some("segredo")
+        );
+    }
+
+    #[test]
+    fn prefixo_corta_a_familia_inteira() {
+        let deny = vec!["ANTHROPIC_".to_string()];
+        let out = tool_env(&env(), &deny);
+        assert_eq!(out.len(), 2);
+        assert!(!out.contains_key("ANTHROPIC_API_KEY"));
+        assert!(!out.contains_key("ANTHROPIC_BASE_URL"));
+        assert_eq!(out.get("PATH").map(String::as_str), Some("/usr/bin"));
+        assert_eq!(out.get("HOME").map(String::as_str), Some("/home/agent"));
+    }
+
+    /// Sensível a maiúsculas: nome de variável de ambiente é, e um casamento
+    /// frouxo aqui cortaria em silêncio o que o chamador não pediu.
+    #[test]
+    fn comparacao_e_sensivel_a_maiusculas() {
+        let out = tool_env(&env(), &["anthropic_".to_string()]);
+        assert_eq!(out.len(), 4);
+    }
+
+    #[test]
+    fn varios_prefixos_somam() {
+        let deny = vec!["ANTHROPIC_".to_string(), "HOME".to_string()];
+        let out = tool_env(&env(), &deny);
+        assert_eq!(out.len(), 1);
+        assert!(out.contains_key("PATH"));
     }
 }

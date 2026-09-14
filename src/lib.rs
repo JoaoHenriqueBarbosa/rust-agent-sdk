@@ -12,6 +12,7 @@ pub mod stores;
 // Re-exports for convenience
 pub use client::ClaudeSDKClient;
 pub use errors::ClaudeSDKError;
+pub use internal::framer::JsonLineFramer;
 pub use internal::message_parser::parse_message;
 pub use internal::session_import::import_session_to_store;
 pub use internal::session_mutations::{
@@ -27,7 +28,7 @@ pub use internal::sessions::{
     project_key_for_directory,
 };
 pub use internal::task::{spawn_detached, TaskHandle};
-pub use internal::transport::{SubprocessCLITransport, Transport};
+pub use internal::transport::{SubprocessCLITransport, Transport, DEFAULT_MAX_BUFFER_SIZE};
 pub use query::{query, query_collect};
 pub use sdk_mcp::{
     PropertyKind, PropertySchema, SdkMcpRegistry, SdkMcpServer, SdkMcpServerBuilder, SdkTool,

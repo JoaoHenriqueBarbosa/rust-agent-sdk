@@ -17,6 +17,12 @@ use crate::types::{
 };
 
 /// A [`SessionStore`] that mirrors session transcripts into a Postgres table.
+///
+/// `Clone` compartilha o mesmo `PgPool` (que é um handle contado), então clonar
+/// custa um `Arc` e não abre conexão nova. É o que permite a um servidor com
+/// muitas sessões vivas dar um store a cada uma reusando o pool da aplicação,
+/// sem repetir o `create_schema` de `with_pool` por sessão.
+#[derive(Clone)]
 pub struct PostgresSessionStore {
     pool: PgPool,
     table: String,

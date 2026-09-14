@@ -517,6 +517,7 @@ impl ClaudeAgentOptions {
             settings: self.settings.clone(),
             add_dirs: self.add_dirs.clone(),
             env: self.env.clone(),
+            tool_env_denylist: self.tool_env_denylist.clone(),
             extra_args: self.extra_args.clone(),
             max_buffer_size: self.max_buffer_size,
             can_use_tool: None,

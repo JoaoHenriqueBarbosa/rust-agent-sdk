@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::errors::{ClaudeSDKError, Result};
+use crate::internal::framer::JsonLineFramer;
 use crate::types::{
     ClaudeAgentOptions, McpServersConfig, PermissionMode, SettingSource, SystemPrompt,
     SystemPromptConfig, ThinkingConfig, ThinkingDisplay, ToolsConfig,
@@ -88,16 +89,12 @@ pub struct SubprocessCLITransport {
     connected: bool,
     child: Option<tokio::process::Child>,
     stdout_reader: Option<tokio::io::BufReader<tokio::process::ChildStdout>>,
-    /// Accumulates partial JSON when a line doesn't parse on its own.
-    json_buffer: String,
-    /// The line currently being read, kept across calls so that a
-    /// `read_message()` future canceled mid-line (e.g. losing a `select!`
-    /// against an interrupt signal) does not lose the bytes already read.
-    /// Bytes and not a String, and `read_until` and not `read_line`, on
-    /// purpose: `read_until` appends incrementally into the caller's buffer
-    /// (partial data survives the cancel), while `read_line` moves the
-    /// String's allocation into the future and drops it on cancel.
-    line_buffer: Vec<u8>,
+    /// Enquadrador dos frames stream-json (uma linha, um objeto). Guarda tanto
+    /// a linha em construção quanto o objeto partido entre linhas, e vive aqui,
+    /// e não na stack da future, para que uma `read_message()` cancelada no
+    /// meio (perdendo um `select!` para um sinal de interrupção) não perca os
+    /// bytes já lidos. As regras estão em [`JsonLineFramer`].
+    framer: JsonLineFramer,
     /// Write lock to serialize stdin writes and prevent TOCTOU with close()/end_input().
     write_lock: tokio::sync::Mutex<()>,
     /// Background task for reading stderr.
@@ -106,14 +103,14 @@ pub struct SubprocessCLITransport {
 
 impl SubprocessCLITransport {
     pub fn new(prompt: impl Into<String>, options: ClaudeAgentOptions) -> Self {
+        let max_buffer_size = options.max_buffer_size.unwrap_or(DEFAULT_MAX_BUFFER_SIZE);
         Self {
             prompt: prompt.into(),
             options,
             connected: false,
             child: None,
             stdout_reader: None,
-            json_buffer: String::new(),
-            line_buffer: Vec::new(),
+            framer: JsonLineFramer::new(max_buffer_size),
             write_lock: tokio::sync::Mutex::new(()),
             stderr_task: None,
         }
@@ -838,97 +835,43 @@ impl Transport for SubprocessCLITransport {
     async fn read_message(&mut self) -> Result<Option<serde_json::Value>> {
         use tokio::io::AsyncBufReadExt;
 
-        let max_buffer_size = self
-            .options
-            .max_buffer_size
-            .unwrap_or(DEFAULT_MAX_BUFFER_SIZE);
-
         if self.stdout_reader.is_none() {
             return Ok(None);
         }
 
         loop {
-            // The in-flight line lives on `self`, not on the stack: a
-            // `read_message()` future canceled in a `select!` (e.g. losing to
-            // an interrupt signal) must not lose the bytes already read.
-            // `read_until` appends into this persistent buffer as data
-            // arrives, so the next call picks the SAME line up where the
-            // cancel left off.
-            let reader = match &mut self.stdout_reader {
+            // Campos destacados de `self` porque a leitura toca dois deles na
+            // mesma expressão (lê do stdout, escreve no framer): destacados, o
+            // borrow checker enxerga que são disjuntos.
+            let Self {
+                stdout_reader,
+                framer,
+                ..
+            } = self;
+            let reader = match stdout_reader {
                 Some(r) => r,
                 None => return Ok(None),
             };
+
+            // `read_until` acrescenta no buffer do framer conforme os bytes
+            // chegam, então um cancelamento aqui no meio da linha não perde o
+            // que já foi lido: a próxima chamada continua de onde parou.
             let bytes_read = reader
-                .read_until(b'\n', &mut self.line_buffer)
+                .read_until(b'\n', framer.line_buffer())
                 .await
                 .map_err(|e| {
                     ClaudeSDKError::cli_connection(format!("Failed to read from stdout: {}", e))
                 })?;
 
-            if bytes_read == 0 && self.line_buffer.is_empty() {
-                // EOF — try to parse any remaining buffer
-                if !self.json_buffer.is_empty() {
-                    let buf = std::mem::take(&mut self.json_buffer);
-                    match serde_json::from_str::<serde_json::Value>(&buf) {
-                        Ok(val) => return Ok(Some(val)),
-                        Err(_) => return Ok(None),
-                    }
-                }
-                return Ok(None);
+            if bytes_read == 0 && framer.line_is_empty() {
+                // EOF: só resta o que estiver no buffer de continuação.
+                return Ok(framer.flush_pending());
             }
 
-            // A tail read before EOF (stream died mid-line) still goes through
-            // the parser below: next iteration hits the empty-buffer EOF path.
-            let raw = std::mem::take(&mut self.line_buffer);
-            let line = String::from_utf8_lossy(&raw);
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            // If buffer is empty, try to parse the line directly
-            if self.json_buffer.is_empty() {
-                // Skip non-JSON lines (e.g. [SandboxDebug] lines)
-                if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
-                    continue;
-                }
-
-                match serde_json::from_str::<serde_json::Value>(trimmed) {
-                    Ok(val) => return Ok(Some(val)),
-                    Err(_) => {
-                        // Só um OBJETO pode estar partido ao meio: o protocolo
-                        // stream-json manda um objeto por linha. Linhas de
-                        // debug do CLI começam com '[' (ex.: "[SandboxDebug]…")
-                        // e nunca completam — bufferizá-las envenenava o parser
-                        // e engolia todas as mensagens seguintes (#347).
-                        if trimmed.starts_with('{') {
-                            self.json_buffer.push_str(trimmed);
-                        }
-                    }
-                }
-            } else {
-                // Append to buffer
-                self.json_buffer.push_str(trimmed);
-
-                // Check buffer size
-                if self.json_buffer.len() > max_buffer_size {
-                    let _buf = std::mem::take(&mut self.json_buffer);
-                    return Err(ClaudeSDKError::sdk(format!(
-                        "JSON buffer exceeded maximum buffer size of {} bytes",
-                        max_buffer_size
-                    )));
-                }
-
-                // Try to parse the accumulated buffer
-                match serde_json::from_str::<serde_json::Value>(&self.json_buffer) {
-                    Ok(val) => {
-                        self.json_buffer.clear();
-                        return Ok(Some(val));
-                    }
-                    Err(_) => {
-                        // Still incomplete — keep buffering
-                    }
-                }
+            // Uma leitura de cauda antes do EOF (stream morto no meio da linha)
+            // ainda passa pelo parser: a volta seguinte cai no EOF acima.
+            if let Some(val) = framer.take_line()? {
+                return Ok(Some(val));
             }
         }
     }
