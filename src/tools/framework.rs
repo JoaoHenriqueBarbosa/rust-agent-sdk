@@ -109,6 +109,15 @@ pub struct ToolContext {
     /// Env extra herdado das options — aplicado por tools que spawnam
     /// processos (Bash).
     pub extra_env: std::collections::HashMap<String, String>,
+    /// Prefixos de variável que NÃO podem chegar aos processos que as tools
+    /// spawnam, nem mesmo pelo ambiente herdado deste processo.
+    ///
+    /// `extra_env` diz o que ACRESCENTAR; este campo diz o que REMOVER, e sem
+    /// ele o corte não fecha. Um `Command` herda o ambiente do pai, então a
+    /// credencial que configura o MOTOR continua visível num `env` digitado
+    /// pelo modelo no shell, mesmo depois de filtrada do `extra_env`. Vazio
+    /// (o default) preserva o comportamento histórico.
+    pub denied_env_prefixes: Vec<String>,
     /// Store de tarefas da sessão (TodoV2 + processos de background).
     pub task_store: Option<Arc<crate::tools::task_store::TaskStore>>,
     /// Lista de todos vigente (TodoWrite v1) — o output devolve old/new.
@@ -131,6 +140,29 @@ impl ToolContext {
                 *guard = mode;
             }
         }
+    }
+
+    /// Prepara o ambiente de um processo filho: tira o que a sessão proíbe e
+    /// põe o que ela pede.
+    ///
+    /// A remoção varre o ambiente DESTE processo, porque é dele que o filho
+    /// herda por padrão. `env_clear` fecharia de um golpe e levaria tudo junto:
+    /// sem `PATH` não há binário para executar, sem `HOME` as ferramentas
+    /// perdem cache e configuração, sem `LANG` a saída muda de forma.
+    ///
+    /// Toda tool que spawna processo passa por aqui, e é de propósito: o corte
+    /// escrito em dois lugares vira o corte esquecido em um deles.
+    pub fn prepare_child_env(&self, command: &mut tokio::process::Command) {
+        for (key, _) in std::env::vars() {
+            if self
+                .denied_env_prefixes
+                .iter()
+                .any(|prefix| key.starts_with(prefix.as_str()))
+            {
+                command.env_remove(&key);
+            }
+        }
+        command.envs(&self.extra_env);
     }
 }
 
@@ -162,6 +194,7 @@ impl Default for ToolContext {
             tool_results_dir: None,
             additional_directories: Vec::new(),
             extra_env: std::collections::HashMap::new(),
+            denied_env_prefixes: Vec::new(),
             task_store: None,
             todo_store: None,
         }

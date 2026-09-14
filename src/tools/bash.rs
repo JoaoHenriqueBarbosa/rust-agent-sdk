@@ -100,15 +100,16 @@ impl Tool for BashTool {
                 Ok(f) => f,
                 Err(e) => return ToolResult::error(format!("Failed to clone output file: {e}")),
             };
-            let child = tokio::process::Command::new("bash")
+            let mut builder = tokio::process::Command::new("bash");
+            builder
                 .arg("-c")
                 .arg(&input.command)
                 .current_dir(cwd)
-                .envs(&context.extra_env)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::from(file))
-                .stderr(std::process::Stdio::from(stderr_file))
-                .spawn();
+                .stderr(std::process::Stdio::from(stderr_file));
+            context.prepare_child_env(&mut builder);
+            let child = builder.spawn();
             let child = match child {
                 Ok(c) => c,
                 Err(e) => return ToolResult::error(format!("Failed to spawn process: {e}")),
@@ -131,11 +132,8 @@ impl Tool for BashTool {
             .map(|ms| Duration::from_millis(ms.min(600_000)))
             .unwrap_or(self.default_timeout);
 
-        let result = tokio::time::timeout(
-            timeout,
-            execute_command(&input.command, cwd, &context.extra_env),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(timeout, execute_command(&input.command, cwd, context)).await;
 
         match result {
             Ok(Ok(output)) => {
@@ -172,15 +170,17 @@ struct CommandOutput {
 async fn execute_command(
     command: &str,
     cwd: &PathBuf,
-    extra_env: &std::collections::HashMap<String, String>,
+    context: &ToolContext,
 ) -> std::result::Result<CommandOutput, String> {
-    let output = tokio::process::Command::new("bash")
+    let mut builder = tokio::process::Command::new("bash");
+    builder
         .arg("-c")
         .arg(command)
         .current_dir(cwd)
-        .envs(extra_env)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    context.prepare_child_env(&mut builder);
+    let output = builder
         .output()
         .await
         .map_err(|e| format!("Failed to spawn process: {e}"))?;
@@ -230,6 +230,58 @@ mod tests {
             .execute(serde_json::json!({"command": "exit 1"}), &ctx)
             .await;
         assert!(result.is_error);
+    }
+
+    /// O corte de ambiente precisa alcançar o que o processo HERDA, e não só o
+    /// que a sessão acrescenta.
+    ///
+    /// Este teste existe porque a primeira versão filtrava apenas o
+    /// `extra_env`, e a credencial do motor continuava visível para quem
+    /// digitasse `env` no shell: `Command` herda o ambiente do pai, e o filtro
+    /// não tocava nessa herança.
+    #[tokio::test]
+    async fn variavel_negada_nao_chega_ao_shell() {
+        // Nome improvável de propósito: os testes deste crate compartilham
+        // processo, e uma variável de nome comum atrapalharia os vizinhos.
+        std::env::set_var("BASHTOOL_TESTE_SEGREDO", "valor-que-nao-pode-vazar");
+
+        let tool = BashTool::default();
+        let comando = serde_json::json!({
+            "command": "echo ${BASHTOOL_TESTE_SEGREDO:-AUSENTE}"
+        });
+
+        // Sem denylist, o comportamento histórico se mantém: o filho herda.
+        let herdado = tool.execute(comando.clone(), &ToolContext::default()).await;
+        assert!(
+            texto_de(&herdado).contains("valor-que-nao-pode-vazar"),
+            "sem denylist o shell deveria herdar a variável, veio: {}",
+            texto_de(&herdado)
+        );
+
+        // Com o prefixo negado, ela some do ambiente do filho.
+        let cortado = ToolContext {
+            denied_env_prefixes: vec!["BASHTOOL_TESTE_".to_string()],
+            ..Default::default()
+        };
+        let resultado = tool.execute(comando, &cortado).await;
+        let saida = texto_de(&resultado);
+        assert!(
+            saida.contains("AUSENTE"),
+            "a variável negada vazou para o shell: {saida}"
+        );
+        assert!(
+            !saida.contains("valor-que-nao-pode-vazar"),
+            "a variável negada vazou para o shell: {saida}"
+        );
+
+        std::env::remove_var("BASHTOOL_TESTE_SEGREDO");
+    }
+
+    fn texto_de(result: &ToolResult) -> String {
+        match result.content.first() {
+            Some(crate::tools::framework::ToolResultContent::Text(t)) => t.clone(),
+            _ => String::new(),
+        }
     }
 
     #[tokio::test]

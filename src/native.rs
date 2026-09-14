@@ -1505,6 +1505,7 @@ async fn build_executor(
         tool_results_dir: Some(tool_results_dir),
         additional_directories: options.add_dirs.clone(),
         extra_env: tool_env(&options.env, &options.tool_env_denylist),
+        denied_env_prefixes: options.tool_env_denylist.clone(),
         task_store: Some(task_store),
         todo_store: Some(todo_store),
     };
@@ -1628,6 +1629,10 @@ impl Tool for NativeAgentTool {
             tool_results_dir: Some(self.tool_results_dir.clone()),
             additional_directories: context.additional_directories.clone(),
             extra_env: context.extra_env.clone(),
+            // O subagente herda o MESMO corte do pai: ele roda as mesmas tools,
+            // no mesmo processo, e um corte que valesse só no nível de cima
+            // deixaria a credencial ao alcance de quem delegasse a tarefa.
+            denied_env_prefixes: context.denied_env_prefixes.clone(),
             task_store: Some(Arc::clone(&self.task_store)),
             todo_store: None,
         };
