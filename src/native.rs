@@ -866,9 +866,7 @@ async fn engine_main(
                 .unwrap_or_else(|| crate::api::client::DEFAULT_MODEL.to_string())
         };
 
-        let tool_results_dir = storage
-            .session_path(&session_id)
-            .with_extension("tool-results");
+        let tool_results_dir = tool_results_dir_for(&options, &storage.session_path(&session_id));
         let executor = build_executor(
             &options,
             &shared,
@@ -1227,6 +1225,76 @@ fn register_named_builtins(registry: &mut ToolRegistry, names: &[String]) {
     }
 }
 
+/// Põe as tools nativas do chamador no registry, SUBSTITUINDO a builtin de
+/// mesmo nome em vez de concorrer com ela.
+///
+/// A substituição é o ponto. Sem ela, duas tools homônimas iriam no mesmo
+/// request e qual das duas o modelo chamaria dependeria da ordem de registro,
+/// que é um detalhe invisível de quem configura a sessão. Para quem troca a
+/// builtin por uma versão confinada, "às vezes vale a antiga" não é uma
+/// fronteira.
+fn register_native_tools(registry: &mut ToolRegistry, tools: &[Arc<dyn Tool>]) {
+    if tools.is_empty() {
+        return;
+    }
+    let replaced: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
+    registry.retain(|name| !replaced.contains(&name));
+    for tool in tools {
+        registry.register_shared(Arc::clone(tool));
+    }
+}
+
+/// Onde gravar o resultado grande de uma tool: o que as options pedirem, ou o
+/// lugar histórico, ao lado do arquivo de sessão.
+///
+/// Fica numa função própria porque a regra tem uma consequência que merece
+/// teste direto: o default é derivado do transcript, e quem confina o `Read` do
+/// modelo precisa poder mover o destino sem mover o transcript junto.
+fn tool_results_dir_for(
+    options: &ClaudeAgentOptions,
+    session_path: &std::path::Path,
+) -> std::path::PathBuf {
+    options
+        .tool_results_dir
+        .clone()
+        .unwrap_or_else(|| session_path.with_extension("tool-results"))
+}
+
+/// Monta o registry de um subagente: as tools do agent def, ou as defaults,
+/// com as tools nativas do chamador substituindo as homônimas, e as regras de
+/// negação aplicadas por último.
+///
+/// A negação precisa valer AQUI, e não só no nível de cima. Isto foi medido, e
+/// não deduzido: numa sessão que registrava `Task` com `Bash` em
+/// `disallowed_tools`, o subagente recebia o conjunto default (que traz `Bash`),
+/// o executor dele nascia sem regra nenhuma, e o comando rodou de verdade,
+/// escrevendo um arquivo no disco fora de qualquer raiz confinada. **Negação
+/// que vale só no primeiro nível não é negação**: basta um `Task` para o modelo
+/// recuperar tudo o que a configuração tirou dele.
+///
+/// Registre também o que a medição disse sobre evidência: naquele mesmo turno o
+/// modelo afirmou duas vezes, com segurança, que a ferramenta de shell não
+/// existia no ambiente, enquanto ela existia e já tinha rodado. **Testemunho do
+/// modelo sobre as próprias ferramentas não é evidência**, e a conferência que
+/// fecha este buraco é o registry, não a resposta dele.
+fn subagent_registry(
+    tools: Option<&Vec<String>>,
+    native_tools: &[Arc<dyn Tool>],
+    permission_rules: &crate::tools::permission::PermissionRules,
+) -> ToolRegistry {
+    let mut registry = ToolRegistry::new();
+    match tools {
+        Some(names) => register_named_builtins(&mut registry, names),
+        None => registry.register_defaults(),
+    }
+    // O subagente roda no MESMO processo, então a fronteira do pai vale aqui
+    // também: sem isto, delegar uma tarefa devolveria as builtins sem
+    // confinamento que o pai tinha justamente trocado.
+    register_native_tools(&mut registry, native_tools);
+    registry.retain(|name| !permission_rules.is_tool_fully_denied(name));
+    registry
+}
+
 /// O que o executor precisa da sessão viva, além das opções e do estado
 /// compartilhado: a identidade da conversa, onde ela é espelhada, e os
 /// depósitos que as builtins de estado usam. Vieram parar numa struct porque
@@ -1286,10 +1354,17 @@ async fn build_executor(
                 cwd: config.cwd.clone(),
                 tool_results_dir: tool_results_dir.clone(),
                 task_store: Arc::clone(&task_store),
+                native_tools: options.native_tools.clone(),
+                permission_rules: permission_rules.clone(),
                 tool_name,
             }));
         }
     }
+
+    // As tools do chamador entram ANTES das deny rules, e não depois: uma
+    // regra de negação vale para o nome, e trocar quem atende o nome não pode
+    // tirar o nome do alcance da regra.
+    register_native_tools(&mut registry, &options.native_tools);
 
     // Deny incondicional tira a tool do request inteiro (filterToolsByDenyRules).
     registry.retain(|name| !permission_rules.is_tool_fully_denied(name));
@@ -1545,6 +1620,12 @@ struct NativeAgentTool {
     cwd: String,
     tool_results_dir: std::path::PathBuf,
     task_store: Arc<crate::tools::task_store::TaskStore>,
+    /// As tools nativas da sessão, herdadas para que delegar uma tarefa não
+    /// devolva ao subagente as builtins que o pai tinha substituído.
+    native_tools: Vec<Arc<dyn Tool>>,
+    /// As regras de permissão do pai, herdadas pelo mesmo motivo: uma negação
+    /// que parasse no primeiro nível seria contornável com um `Task`.
+    permission_rules: crate::tools::permission::PermissionRules,
     tool_name: &'static str,
 }
 
@@ -1606,11 +1687,11 @@ impl Tool for NativeAgentTool {
 
         // Registry do subagente: as tools do agent def, ou as defaults —
         // nunca o próprio Agent/Task (sem recursão de subagentes na v1).
-        let mut registry = ToolRegistry::new();
-        match definition.and_then(|d| d.tools.as_ref()) {
-            Some(names) => register_named_builtins(&mut registry, names),
-            None => registry.register_defaults(),
-        }
+        let registry = subagent_registry(
+            definition.and_then(|d| d.tools.as_ref()),
+            &self.native_tools,
+            &self.permission_rules,
+        );
 
         let model = input
             .get("model")
@@ -1636,7 +1717,11 @@ impl Tool for NativeAgentTool {
             task_store: Some(Arc::clone(&self.task_store)),
             todo_store: None,
         };
-        let executor = ToolExecutor::new(registry, sub_context);
+        let executor = ToolExecutor::new(registry, sub_context)
+            // Sem isto, a checagem POR CHAMADA do subagente roda com regras
+            // vazias: mesmo com a tool fora do registry, um padrão de negação
+            // mais fino (por argumento) deixaria de valer um nível abaixo.
+            .with_permission_rules(self.permission_rules.clone());
 
         let system_prompt = definition
             .map(|d| d.prompt.clone())
@@ -1771,8 +1856,11 @@ impl Tool for McpBridgeTool {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
-    use super::tool_env;
+    use super::{register_named_builtins, register_native_tools, tool_env, tool_results_dir_for};
+    use crate::tools::framework::{Tool, ToolContext, ToolRegistry, ToolResult};
+    use crate::types::ClaudeAgentOptions;
 
     fn env() -> HashMap<String, String> {
         [
@@ -1822,5 +1910,235 @@ mod tests {
         let out = tool_env(&env(), &deny);
         assert_eq!(out.len(), 1);
         assert!(out.contains_key("PATH"));
+    }
+
+    /// Uma tool nativa com o nome de uma builtin SUBSTITUI a builtin, em vez
+    /// de concorrer com ela.
+    ///
+    /// Este teste existe por causa de quem embute o motor num processo
+    /// multi-inquilino e troca `Read` por uma versão confinada ao diretório da
+    /// sessão. Se as duas ficassem registradas, qual delas atenderia dependeria
+    /// da ordem de registro, e a builtin sem fronteira poderia ganhar: seria um
+    /// confinamento que às vezes vale, ou seja, nenhum.
+    #[test]
+    fn tool_nativa_substitui_a_builtin_homonima() {
+        struct Confinada;
+
+        #[async_trait::async_trait]
+        impl Tool for Confinada {
+            fn name(&self) -> &str {
+                "Read"
+            }
+            fn description(&self) -> &str {
+                "Read confinado ao workspace da sessao"
+            }
+            fn input_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(&self, _input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+                ToolResult::text("confinado")
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.register_defaults();
+        let antes = registry.len();
+        assert!(registry.names().contains(&"Read"));
+
+        let nativas: Vec<Arc<dyn Tool>> = vec![Arc::new(Confinada)];
+        register_native_tools(&mut registry, &nativas);
+
+        // Uma entrou, uma saiu: o total não muda, e sobra um "Read" só.
+        assert_eq!(registry.len(), antes);
+        let leitores = registry.names().iter().filter(|n| **n == "Read").count();
+        assert_eq!(leitores, 1, "ficaram duas tools chamadas Read");
+
+        // E quem atende pelo nome é a do chamador.
+        let escolhida = registry.get("Read");
+        assert!(escolhida.is_some());
+        assert_eq!(
+            escolhida.map(Tool::description),
+            Some("Read confinado ao workspace da sessao")
+        );
+
+        // As outras builtins seguem onde estavam.
+        assert!(registry.names().contains(&"Bash"));
+        assert!(registry.names().contains(&"Glob"));
+    }
+
+    /// Lista vazia de tools nativas não mexe em nada: é o comportamento de
+    /// quem não usa a novidade, e ele não pode mudar.
+    #[test]
+    fn sem_tool_nativa_o_registry_fica_intacto() {
+        let mut registry = ToolRegistry::new();
+        registry.register_defaults();
+        let antes = registry.names().join(",");
+
+        register_native_tools(&mut registry, &[]);
+
+        assert_eq!(registry.names().join(","), antes);
+    }
+
+    /// Com as builtins DESLIGADAS por lista vazia, o conjunto da sessão é
+    /// exatamente o que o chamador registrou.
+    #[test]
+    fn builtins_desligadas_deixam_so_as_do_chamador() {
+        struct Propria;
+
+        #[async_trait::async_trait]
+        impl Tool for Propria {
+            fn name(&self) -> &str {
+                "Glob"
+            }
+            fn description(&self) -> &str {
+                "Glob confinado"
+            }
+            fn input_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(&self, _input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+                ToolResult::text("confinado")
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        // O caminho que `build_executor` toma com `ToolsConfig::List(vec![])`.
+        register_named_builtins(&mut registry, &[]);
+        assert_eq!(registry.len(), 0, "a lista vazia trouxe builtin");
+
+        let nativas: Vec<Arc<dyn Tool>> = vec![Arc::new(Propria)];
+        register_native_tools(&mut registry, &nativas);
+
+        assert_eq!(registry.names(), vec!["Glob"]);
+    }
+
+    /// Sem o campo, o destino do resultado grande continua sendo derivado do
+    /// arquivo de sessão. É o comportamento de quem não usa a novidade, e ele
+    /// não pode mudar.
+    #[test]
+    fn sem_tool_results_dir_o_destino_sai_do_arquivo_de_sessao() {
+        let options = ClaudeAgentOptions::default();
+        let sessao = std::path::Path::new("/home/agent/.claude/projects/x/abc-123.jsonl");
+
+        assert_eq!(
+            tool_results_dir_for(&options, sessao),
+            std::path::PathBuf::from("/home/agent/.claude/projects/x/abc-123.tool-results"),
+        );
+    }
+
+    /// Com o campo, o destino é o do chamador, e o arquivo de sessão deixa de
+    /// decidir.
+    ///
+    /// É esta separação que quem confina o `Read` do modelo precisa: o
+    /// transcript fica de propósito FORA da raiz confinada, e o ponteiro que o
+    /// resultado grande deixa no lugar do texto só resolve se apontar para
+    /// DENTRO dela.
+    #[test]
+    fn tool_results_dir_das_options_manda_no_destino() {
+        let escolhido = std::path::PathBuf::from("/var/lib/claudia/sessions/abc/work/.claudia/out");
+        let options = ClaudeAgentOptions::default().with_tool_results_dir(escolhido.clone());
+        let sessao = std::path::Path::new("/var/lib/claudia/sessions/abc/engine/abc-123.jsonl");
+
+        assert_eq!(tool_results_dir_for(&options, sessao), escolhido);
+    }
+
+    /// A cópia sem callbacks leva o destino junto: quem monta transporte
+    /// próprio constrói as options uma vez só, e perder o campo na cópia
+    /// devolveria o ponteiro para fora da raiz sem ninguém notar.
+    #[test]
+    fn a_copia_sem_callbacks_preserva_o_tool_results_dir() {
+        let escolhido = std::path::PathBuf::from("/var/lib/claudia/sessions/abc/work/.claudia/out");
+        let options = ClaudeAgentOptions::default().with_tool_results_dir(escolhido.clone());
+
+        assert_eq!(
+            options.clone_without_callbacks().tool_results_dir,
+            Some(escolhido)
+        );
+    }
+
+    /// Uma tool negada NÃO volta pela porta do subagente.
+    ///
+    /// Este teste existe por causa de uma medição, e não de uma leitura: numa
+    /// sessão que registrava `Task` com `Bash` em `disallowed_tools`, o
+    /// subagente recebia o conjunto default, o `Bash` dele rodava de verdade e
+    /// escrevia um arquivo no disco fora de qualquer raiz confinada. Negação
+    /// que vale só no primeiro nível não é negação.
+    #[test]
+    fn uma_tool_negada_nao_volta_pelo_subagente() {
+        let rules = crate::tools::permission::PermissionRules::from_lists(
+            &[],
+            &["Bash".to_string(), "WebFetch".to_string()],
+        );
+
+        // `None` é o caminho do subagente sem agent definition, que é o default
+        // e o que traz o conjunto inteiro de builtins.
+        let registry = super::subagent_registry(None, &[], &rules);
+
+        assert!(!registry.names().contains(&"Bash"), "o Bash do subagente sobreviveu à negação");
+        assert!(!registry.names().contains(&"WebFetch"));
+        // E o que não foi negado continua lá: a negação é cirúrgica, não é um
+        // desligamento geral.
+        assert!(registry.names().contains(&"Read"));
+        assert!(registry.names().contains(&"Glob"));
+    }
+
+    /// A negação alcança também o subagente que veio com lista própria de
+    /// tools no agent definition.
+    #[test]
+    fn a_negacao_alcanca_o_subagente_com_lista_propria() {
+        let rules =
+            crate::tools::permission::PermissionRules::from_lists(&[], &["Bash".to_string()]);
+        let pedidas = vec!["Bash".to_string(), "Read".to_string()];
+
+        let registry = super::subagent_registry(Some(&pedidas), &[], &rules);
+
+        assert_eq!(registry.names(), vec!["Read"]);
+    }
+
+    /// Sem negação nenhuma, o subagente continua com o conjunto de sempre: o
+    /// conserto não pode tirar ferramenta de quem não pediu para tirar.
+    #[test]
+    fn sem_negacao_o_subagente_mantem_o_conjunto_default() {
+        let rules = crate::tools::permission::PermissionRules::default();
+
+        let registry = super::subagent_registry(None, &[], &rules);
+
+        assert!(registry.names().contains(&"Bash"));
+        assert!(registry.names().contains(&"WebFetch"));
+    }
+
+    /// A tool nativa do chamador substitui a homônima também no subagente, e a
+    /// negação roda DEPOIS dessa substituição.
+    #[test]
+    fn a_tool_nativa_chega_ao_subagente_e_a_negacao_vem_depois() {
+        struct Confinada;
+
+        #[async_trait::async_trait]
+        impl Tool for Confinada {
+            fn name(&self) -> &str {
+                "Read"
+            }
+            fn description(&self) -> &str {
+                "Read confinado ao workspace da sessao"
+            }
+            fn input_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(&self, _input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+                ToolResult::text("confinado")
+            }
+        }
+
+        let rules =
+            crate::tools::permission::PermissionRules::from_lists(&[], &["Bash".to_string()]);
+        let nativas: Vec<Arc<dyn Tool>> = vec![Arc::new(Confinada)];
+
+        let registry = super::subagent_registry(None, &nativas, &rules);
+
+        assert!(!registry.names().contains(&"Bash"));
+        assert_eq!(
+            registry.get("Read").map(Tool::description),
+            Some("Read confinado ao workspace da sessao")
+        );
     }
 }

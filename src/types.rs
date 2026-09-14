@@ -1494,6 +1494,47 @@ pub struct ClaudeAgentOptions {
     /// Comparação por prefixo, sensível a maiúsculas: `["ANTHROPIC_"]` tira
     /// toda a família de uma vez.
     pub tool_env_denylist: Vec<String>,
+    /// Tools NATIVAS desta sessão: implementações de [`Tool`] do chamador,
+    /// executadas no processo como se fossem builtins.
+    ///
+    /// Existe porque os dois pontos de extensão anteriores não cobriam o caso
+    /// de quem EMBUTE o motor: `tools` só escolhe entre as builtins que o SDK
+    /// já traz, e `sdk_mcp_servers` expõe tudo como `mcp__<servidor>__<tool>`,
+    /// um nome que o modelo não associa ao `Read` que ele conhece.
+    ///
+    /// Quem precisa disto é quem roda o motor num processo multi-inquilino,
+    /// onde a builtin `Read` enxergaria o disco inteiro do host. Trocando-a
+    /// por uma homônima confinada, o modelo continua chamando `Read` com
+    /// `file_path`, e a fronteira muda sem ele reaprender nada.
+    ///
+    /// Uma tool daqui com o nome de uma builtin SUBSTITUI a builtin, em vez de
+    /// concorrer com ela: duas tools de mesmo nome no mesmo request seriam
+    /// ambíguas para a API, e a resolução por ordem de registro faria a
+    /// substituição depender de um detalhe invisível.
+    ///
+    /// Subagentes herdam esta lista pelo mesmo motivo que herdam o corte de
+    /// ambiente: eles rodam as mesmas tools, no mesmo processo, e uma
+    /// fronteira que valesse só no nível de cima cairia com um `Task`.
+    ///
+    /// Vazio (o default) é o comportamento histórico.
+    pub native_tools: Vec<Arc<dyn crate::tools::framework::Tool>>,
+    /// Onde o resultado GRANDE de uma tool é persistido antes de virar um
+    /// ponteiro no transcript.
+    ///
+    /// Acima de 50.000 bytes, o texto de um resultado sai do request e é
+    /// gravado em disco; o que o modelo recebe no lugar é um bloco com o
+    /// caminho do arquivo e a instrução de reler com `Read`. `None` (o default)
+    /// mantém o comportamento histórico: o diretório é derivado do arquivo de
+    /// sessão, ou seja, fica ao lado do transcript em `CLAUDE_CONFIG_DIR`.
+    ///
+    /// Quem precisa apontar para outro lugar é quem embute o motor e dá ao
+    /// modelo um `Read` CONFINADO a uma raiz. Nesse arranjo o transcript mora
+    /// de propósito fora da raiz (senão o modelo reescreveria a própria
+    /// memória), e o ponteiro do resultado grande cairia fora do confinamento:
+    /// o conteúdo ficaria inalcançável, e o caminho real do host apareceria no
+    /// transcript. Apontando este campo para dentro da raiz, o ponteiro volta a
+    /// resolver.
+    pub tool_results_dir: Option<PathBuf>,
     pub extra_args: HashMap<String, Option<String>>,
     pub max_buffer_size: Option<usize>,
     pub can_use_tool: Option<CanUseToolFn>,
@@ -1557,6 +1598,8 @@ impl Default for ClaudeAgentOptions {
             add_dirs: Vec::new(),
             env: HashMap::new(),
             tool_env_denylist: Vec::new(),
+            native_tools: Vec::new(),
+            tool_results_dir: None,
             extra_args: HashMap::new(),
             max_buffer_size: None,
             can_use_tool: None,
@@ -1617,6 +1660,29 @@ impl ClaudeAgentOptions {
         server: impl Into<Arc<crate::sdk_mcp::SdkMcpServer>>,
     ) -> Self {
         self.add_sdk_mcp_server(server);
+        self
+    }
+
+    /// Acrescenta uma tool nativa desta sessão. Veja
+    /// [`ClaudeAgentOptions::native_tools`].
+    pub fn with_native_tool(mut self, tool: impl Into<Arc<dyn crate::tools::framework::Tool>>) -> Self {
+        self.native_tools.push(tool.into());
+        self
+    }
+
+    /// Acrescenta um conjunto de tools nativas de uma vez.
+    pub fn with_native_tools(
+        mut self,
+        tools: impl IntoIterator<Item = Arc<dyn crate::tools::framework::Tool>>,
+    ) -> Self {
+        self.native_tools.extend(tools);
+        self
+    }
+
+    /// Escolhe onde o resultado grande de uma tool é persistido. Veja
+    /// [`ClaudeAgentOptions::tool_results_dir`].
+    pub fn with_tool_results_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.tool_results_dir = Some(dir.into());
         self
     }
 }

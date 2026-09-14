@@ -518,6 +518,12 @@ impl ClaudeAgentOptions {
             add_dirs: self.add_dirs.clone(),
             env: self.env.clone(),
             tool_env_denylist: self.tool_env_denylist.clone(),
+            // Os `Arc` são os MESMOS: a cópia oferece as mesmas tools, e não
+            // cópias delas. Uma tool nativa costuma carregar a capacidade da
+            // sessão (um descritor de diretório, por exemplo), e duplicar isso
+            // seria duplicar a fronteira.
+            native_tools: self.native_tools.clone(),
+            tool_results_dir: self.tool_results_dir.clone(),
             extra_args: self.extra_args.clone(),
             max_buffer_size: self.max_buffer_size,
             can_use_tool: None,
