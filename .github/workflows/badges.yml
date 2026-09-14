@@ -1,5 +1,22 @@
 name: Badges
 
+# Os JSON de badge NÃO são commitados na main, e sim publicados numa branch
+# órfã `badges`, com force-push, contendo só os dois arquivos.
+#
+# O motivo é um impasse por construção: o ruleset `block-ai-coauthor` exige o
+# status check "No AI co-author" na branch default, e esse check só roda em
+# pull request. Um push direto é avaliado ANTES de qualquer check existir para
+# o commit novo, então a regra o rejeita com "Required status check is
+# expected". O bypass do ruleset é só para RepositoryRole 5 (admin), que o
+# `github-actions[bot]` não tem. Resultado: todo push na main falhava aqui.
+#
+# Dar bypass ao bot resolveria o sintoma abrindo um buraco (qualquer workflow
+# com contents:write passaria a escrever na main sem check). Publicar fora da
+# main resolve a causa: um artefato gerado por CI não tem por que morar na
+# branch protegida, nem poluir o histórico com um commit a cada push.
+#
+# As URLs dos badges no README apontam para a branch `badges`.
+
 on:
   push:
     branches: [main]
@@ -20,19 +37,19 @@ jobs:
           LOC=$(find . -path ./target -prune -o -name '*.rs' -print | xargs wc -l | tail -1 | awk '{print $1}')
           echo "tests=$TESTS" >> "$GITHUB_OUTPUT"
           echo "loc=$LOC" >> "$GITHUB_OUTPUT"
-      - name: Write badge endpoints
+      - name: Publish to the badges branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p .github/badges
-          printf '{"schemaVersion":1,"label":"tests","message":"%s","color":"brightgreen"}\n' "${{ steps.m.outputs.tests }}" > .github/badges/tests.json
-          printf '{"schemaVersion":1,"label":"lines of Rust","message":"%s","color":"blue"}\n' "${{ steps.m.outputs.loc }}" > .github/badges/loc.json
-      - name: Commit if changed
-        run: |
+          tmp=$(mktemp -d)
+          printf '{"schemaVersion":1,"label":"tests","message":"%s","color":"brightgreen"}\n' "${{ steps.m.outputs.tests }}" > "$tmp/tests.json"
+          printf '{"schemaVersion":1,"label":"lines of Rust","message":"%s","color":"blue"}\n' "${{ steps.m.outputs.loc }}" > "$tmp/loc.json"
+          cd "$tmp"
+          # Branch órfã reescrita a cada execução: o histórico dela não
+          # interessa, e assim ela nunca cresce.
+          git init -q -b badges
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if ! git diff --quiet .github/badges; then
-            git add .github/badges
-            git commit -m "ci(badges): refresh metrics [skip ci]"
-            git push
-          else
-            echo "badges unchanged"
-          fi
+          git add tests.json loc.json
+          git commit -q -m "ci(badges): refresh metrics"
+          git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges

@@ -4,8 +4,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-edition%202021-orange.svg)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/JoaoHenriqueBarbosa/rust-agent-sdk/main/.github/badges/tests.json)](https://github.com/JoaoHenriqueBarbosa/rust-agent-sdk/actions)
-[![Lines of code](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/JoaoHenriqueBarbosa/rust-agent-sdk/main/.github/badges/loc.json)](#architecture)
+[![Tests](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/JoaoHenriqueBarbosa/rust-agent-sdk/badges/tests.json)](https://github.com/JoaoHenriqueBarbosa/rust-agent-sdk/actions)
+[![Lines of code](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/JoaoHenriqueBarbosa/rust-agent-sdk/badges/loc.json)](#architecture)
 
 > **Status — exploratory spike.** This is a from-scratch reimplementation, in Rust, of
 > the Python `claude-agent-sdk`. It is not an official Anthropic SDK and is not affiliated
