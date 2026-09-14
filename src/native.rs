@@ -1295,6 +1295,46 @@ fn subagent_registry(
     registry
 }
 
+/// Monta o executor do subagente: o registry já filtrado, o contexto herdado do
+/// pai e as MESMAS regras de permissão.
+///
+/// Está fora do `execute` para poder ser conferido por teste sem um turno de
+/// verdade, e isso não é arrumação: a herança das regras tem DOIS efeitos, e só
+/// um deles aparece no registry. Negar `Bash` inteiro tira a ferramenta da
+/// lista, e ali a conferência é visível; negar `Read(/etc/*)` não tira nada da
+/// lista, porque a ferramenta segue legítima no resto da árvore, e quem aplica
+/// a regra é a checagem POR CHAMADA, que mora aqui. Sem estas regras, o
+/// executor do subagente nasceria com `PermissionRules::default()`, que não
+/// nega nada, e a metade fina da fronteira sumiria um nível abaixo sem quebrar
+/// teste nenhum.
+fn subagent_executor(
+    registry: ToolRegistry,
+    parent: &ToolContext,
+    cwd: &str,
+    tool_results_dir: &std::path::Path,
+    task_store: &Arc<crate::tools::task_store::TaskStore>,
+    permission_rules: &crate::tools::permission::PermissionRules,
+) -> ToolExecutor {
+    let context = ToolContext {
+        working_directory: std::path::PathBuf::from(cwd),
+        permission_mode: parent.mode(),
+        permission_mode_shared: parent.permission_mode_shared.clone(),
+        permission_callback: parent.permission_callback.clone(),
+        pre_tool_use: parent.pre_tool_use.clone(),
+        post_tool_use: None,
+        tool_results_dir: Some(tool_results_dir.to_path_buf()),
+        additional_directories: parent.additional_directories.clone(),
+        extra_env: parent.extra_env.clone(),
+        // O subagente herda o MESMO corte do pai: ele roda as mesmas tools, no
+        // mesmo processo, e um corte que valesse só no nível de cima deixaria a
+        // credencial ao alcance de quem delegasse a tarefa.
+        denied_env_prefixes: parent.denied_env_prefixes.clone(),
+        task_store: Some(Arc::clone(task_store)),
+        todo_store: None,
+    };
+    ToolExecutor::new(registry, context).with_permission_rules(permission_rules.clone())
+}
+
 /// O que o executor precisa da sessão viva, além das opções e do estado
 /// compartilhado: a identidade da conversa, onde ela é espelhada, e os
 /// depósitos que as builtins de estado usam. Vieram parar numa struct porque
@@ -1700,28 +1740,14 @@ impl Tool for NativeAgentTool {
             .or_else(|| definition.and_then(|d| d.model.clone()))
             .unwrap_or_else(|| self.model.clone());
 
-        let sub_context = ToolContext {
-            working_directory: std::path::PathBuf::from(&self.cwd),
-            permission_mode: context.mode(),
-            permission_mode_shared: context.permission_mode_shared.clone(),
-            permission_callback: context.permission_callback.clone(),
-            pre_tool_use: context.pre_tool_use.clone(),
-            post_tool_use: None,
-            tool_results_dir: Some(self.tool_results_dir.clone()),
-            additional_directories: context.additional_directories.clone(),
-            extra_env: context.extra_env.clone(),
-            // O subagente herda o MESMO corte do pai: ele roda as mesmas tools,
-            // no mesmo processo, e um corte que valesse só no nível de cima
-            // deixaria a credencial ao alcance de quem delegasse a tarefa.
-            denied_env_prefixes: context.denied_env_prefixes.clone(),
-            task_store: Some(Arc::clone(&self.task_store)),
-            todo_store: None,
-        };
-        let executor = ToolExecutor::new(registry, sub_context)
-            // Sem isto, a checagem POR CHAMADA do subagente roda com regras
-            // vazias: mesmo com a tool fora do registry, um padrão de negação
-            // mais fino (por argumento) deixaria de valer um nível abaixo.
-            .with_permission_rules(self.permission_rules.clone());
+        let executor = subagent_executor(
+            registry,
+            context,
+            &self.cwd,
+            &self.tool_results_dir,
+            &self.task_store,
+            &self.permission_rules,
+        );
 
         let system_prompt = definition
             .map(|d| d.prompt.clone())
@@ -1860,7 +1886,9 @@ mod tests {
 
     use super::{register_named_builtins, register_native_tools, tool_env, tool_results_dir_for};
     use crate::tools::framework::{Tool, ToolContext, ToolRegistry, ToolResult};
+    use crate::tools::permission::{PermissionDecision, PermissionRules};
     use crate::types::ClaudeAgentOptions;
+    use serde_json::json;
 
     fn env() -> HashMap<String, String> {
         [
@@ -2074,7 +2102,10 @@ mod tests {
         // e o que traz o conjunto inteiro de builtins.
         let registry = super::subagent_registry(None, &[], &rules);
 
-        assert!(!registry.names().contains(&"Bash"), "o Bash do subagente sobreviveu à negação");
+        assert!(
+            !registry.names().contains(&"Bash"),
+            "o Bash do subagente sobreviveu à negação"
+        );
         assert!(!registry.names().contains(&"WebFetch"));
         // E o que não foi negado continua lá: a negação é cirúrgica, não é um
         // desligamento geral.
@@ -2139,6 +2170,62 @@ mod tests {
         assert_eq!(
             registry.get("Read").map(Tool::description),
             Some("Read confinado ao workspace da sessao")
+        );
+    }
+
+    /// A outra metade da fronteira: o EXECUTOR do subagente nasce com as
+    /// regras do pai, e não com as regras vazias do default.
+    ///
+    /// O registry sozinho não cobre isto, e a diferença é o que a medição
+    /// custou a ensinar. Uma negação SEM padrão (`Bash`) tira a ferramenta da
+    /// lista, e os testes de registry acima já a pegam. Uma negação COM padrão
+    /// (`Read(/etc/*)`) não tira nada da lista, porque `Read` continua legítimo
+    /// no resto da árvore: quem a aplica é a checagem por chamada, e ela só
+    /// existe no subagente se o executor dele carregar as regras. Apagar essa
+    /// herança não quebrava teste nenhum antes desta conferência.
+    ///
+    /// E a lição sobre o que conta como evidência, porque ela é o motivo de o
+    /// conserto ter demorado: no turno em que o furo apareceu, o modelo
+    /// afirmou DUAS vezes, com toda a segurança, que não havia shell nenhum no
+    /// ambiente, enquanto o shell existia e já tinha escrito um arquivo no
+    /// disco fora da raiz confinada. Testemunho de modelo sobre as próprias
+    /// ferramentas não é evidência. O disco é, e o registry é: quem confere
+    /// esta fronteira são asserções como estas, nunca a resposta dele.
+    #[test]
+    fn o_executor_do_subagente_herda_a_checagem_por_chamada() {
+        // `Bash` sai da lista; `Read` fica, e só a regra por argumento o
+        // alcança.
+        let rules =
+            PermissionRules::from_lists(&[], &["Bash".to_string(), "Read(/etc/*)".to_string()]);
+        let registry = super::subagent_registry(None, &[], &rules);
+        let store = Arc::new(crate::tools::task_store::TaskStore::new());
+
+        let executor = super::subagent_executor(
+            registry,
+            &ToolContext::default(),
+            "/workspace",
+            std::path::Path::new("/workspace/.out"),
+            &store,
+            &rules,
+        );
+
+        assert!(executor.permission_rules.is_tool_fully_denied("Bash"));
+        assert!(!executor.registry.names().contains(&"Bash"));
+        // A regra fina desce junto: o `Read` do subagente recusa `/etc`, que é
+        // exatamente o que o registry NÃO teria como impedir.
+        assert_eq!(
+            executor
+                .permission_rules
+                .check("Read", &json!({"file_path": "/etc/passwd"})),
+            PermissionDecision::Deny("Tool 'Read' is denied by rule".to_string())
+        );
+        // E o que a regra não alcança segue decidido pelo fluxo normal, em vez
+        // de virar recusa geral: a negação é cirúrgica nos dois níveis.
+        assert_eq!(
+            executor
+                .permission_rules
+                .check("Read", &json!({"file_path": "/workspace/pedido.txt"})),
+            PermissionDecision::Ask
         );
     }
 }
