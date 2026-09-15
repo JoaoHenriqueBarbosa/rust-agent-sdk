@@ -644,6 +644,26 @@ pub struct McpStatusResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Session title
+// ---------------------------------------------------------------------------
+
+/// Extrai e limpa o título de um envelope `{"title": ...}`.
+///
+/// O formato é o mesmo nas duas pontas: o modelo pequeno responde assim, e o
+/// `control_response` de `generate_session_title` devolve esse mesmo envelope.
+/// Campo ausente, nulo, não textual ou só com espaço em branco vira `None`,
+/// nunca um título vazio, porque título vazio numa lista de sessões é pior que
+/// título nenhum.
+pub fn session_title_of(value: &serde_json::Value) -> Option<String> {
+    let title = value.get("title")?.as_str()?.trim();
+    if title.is_empty() {
+        None
+    } else {
+        Some(title.to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Context usage types
 // ---------------------------------------------------------------------------
 
@@ -1474,6 +1494,14 @@ pub struct ClaudeAgentOptions {
     pub disallowed_tools: Vec<String>,
     pub model: Option<String>,
     pub fallback_model: Option<String>,
+    /// Modelo que escreve o TÍTULO da sessão (`generate_session_title`).
+    ///
+    /// `None` (o default) usa `claude-haiku-4-5-20251001`: o título tem sete
+    /// palavras e não justifica o modelo do turno. Quem roda atrás de um proxy
+    /// com allowlist de modelos precisa liberar esse modelo OU apontar este
+    /// campo para um que já esteja liberado, senão a geração falha e o título
+    /// volta nulo (por desenho, ela nunca derruba a sessão).
+    pub title_model: Option<String>,
     pub betas: Vec<SdkBeta>,
     pub permission_prompt_tool_name: Option<String>,
     pub cwd: Option<PathBuf>,
@@ -1590,6 +1618,7 @@ impl Default for ClaudeAgentOptions {
             disallowed_tools: Vec::new(),
             model: None,
             fallback_model: None,
+            title_model: None,
             betas: Vec::new(),
             permission_prompt_tool_name: None,
             cwd: None,
@@ -1688,6 +1717,13 @@ impl ClaudeAgentOptions {
         self.tool_results_dir = Some(dir.into());
         self
     }
+
+    /// Escolhe o modelo que escreve o título da sessão. Veja
+    /// [`ClaudeAgentOptions::title_model`].
+    pub fn with_title_model(mut self, model: impl Into<String>) -> Self {
+        self.title_model = Some(model.into());
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1743,6 +1779,8 @@ pub enum SDKControlRequestBody {
     },
     #[serde(rename = "stop_task")]
     StopTask { task_id: String },
+    #[serde(rename = "generate_session_title")]
+    GenerateSessionTitle { description: String, persist: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

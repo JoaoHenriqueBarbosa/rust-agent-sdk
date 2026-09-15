@@ -4,8 +4,8 @@ use crate::internal::query::Query;
 use crate::internal::session_store::SharedSessionStore;
 use crate::internal::transport::Transport;
 use crate::types::{
-    ClaudeAgentOptions, ContextUsageResponse, McpServersConfig, McpStatusResponse, Message,
-    PermissionMode, SystemPrompt, SystemPromptConfig,
+    session_title_of, ClaudeAgentOptions, ContextUsageResponse, McpServersConfig,
+    McpStatusResponse, Message, PermissionMode, SystemPrompt, SystemPromptConfig,
 };
 
 /// Bidirectional client for sustained conversations with Claude Code.
@@ -471,6 +471,29 @@ impl ClaudeSDKClient {
             ))
         }
     }
+
+    /// Gera um título curto (3 a 7 palavras) para a sessão a partir de
+    /// `description`, o texto da conversa que serve de matéria prima. Com
+    /// `persist`, o título também é gravado no transcript, na entrada
+    /// `ai-title` que o CLI lê.
+    ///
+    /// Devolve `None` quando o modelo não produziu título aproveitável: falha
+    /// de rede ou resposta ilegível NÃO viram erro aqui, porque título é
+    /// enfeite de lista de sessões e não pode derrubar a conversa.
+    pub async fn generate_session_title(
+        &mut self,
+        description: &str,
+        persist: bool,
+    ) -> Result<Option<String>> {
+        if let Some(ref mut query) = self._query {
+            let result = query.generate_session_title(description, persist).await?;
+            Ok(session_title_of(&result))
+        } else {
+            Err(ClaudeSDKError::cli_connection(
+                "Not connected. Call connect() first.",
+            ))
+        }
+    }
 }
 
 impl ClaudeAgentOptions {
@@ -510,6 +533,7 @@ impl ClaudeAgentOptions {
             disallowed_tools: self.disallowed_tools.clone(),
             model: self.model.clone(),
             fallback_model: self.fallback_model.clone(),
+            title_model: self.title_model.clone(),
             betas: self.betas.clone(),
             permission_prompt_tool_name: self.permission_prompt_tool_name.clone(),
             cwd: self.cwd.clone(),

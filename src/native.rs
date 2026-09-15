@@ -38,7 +38,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agentic::{AgenticEvent, AgenticLoop, AgenticLoopOptions};
 use crate::api::client::AnthropicClient;
-use crate::api::types::{ApiMessage, ContentBlock, Role, SystemBlock, ThinkingParam};
+use crate::api::types::{
+    ApiMessage, ContentBlock, CreateMessageRequest, Role, SystemBlock, ThinkingParam,
+};
 use crate::errors::{ClaudeSDKError, Result};
 use crate::internal::transport::Transport;
 use crate::session::SessionStorage;
@@ -84,6 +86,25 @@ struct Shared {
     counter: AtomicU64,
     /// `end_input` já foi chamado — user frames novos são erro.
     input_closed: AtomicBool,
+    /// O que a geração de título precisa para trabalhar. Só fica pronto depois
+    /// que o engine resolveu config, sessão e storage, e antes disso um
+    /// `generate_session_title` responde título nulo em vez de esperar.
+    titling: Mutex<Option<Titling>>,
+}
+
+/// Recursos da geração de título de sessão (`generate_session_title`).
+///
+/// O cliente daqui é SEPARADO do cliente do turno: leva o modelo pequeno e
+/// nenhum beta, porque um pedido de sete palavras não tem uso para janela de
+/// 1M e nem todo proxy aceita o par beta/modelo.
+#[derive(Clone)]
+struct Titling {
+    client: AnthropicClient,
+    model: String,
+    session_id: String,
+    storage: SessionStorage,
+    transcript_path: String,
+    mirror: bool,
 }
 
 impl Shared {
@@ -223,6 +244,7 @@ impl Transport for NativeApiTransport {
             rewritten_history: Arc::new(std::sync::Mutex::new(None)),
             counter: AtomicU64::new(1),
             input_closed: AtomicBool::new(false),
+            titling: Mutex::new(None),
         });
         let engine = tokio::spawn(engine_main(options, Arc::clone(&shared), user_rx));
         self.shared = Some(shared);
@@ -417,6 +439,37 @@ async fn handle_client_control(shared: &Arc<Shared>, frame: &Value) {
             let usage = shared.context_usage.lock().await.clone();
             respond(usage);
         }
+        "generate_session_title" => {
+            let description = request
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let persist = request
+                .get("persist")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            // A geração fala com a API, então sai da linha de leitura do
+            // transporte: esperar aqui atrasaria todo frame seguinte do
+            // cliente, inclusive um interrupt.
+            let shared = Arc::clone(shared);
+            let request_id = request_id.clone();
+            tokio::spawn(async move {
+                let titling = shared.titling.lock().await.clone();
+                let title = match titling {
+                    Some(titling) => session_title(&shared, &titling, &description, persist).await,
+                    None => None,
+                };
+                let _ = shared.outbound.send(json!({
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": request_id,
+                        "response": { "title": title },
+                    }
+                }));
+            });
+        }
         other => {
             let message = match other {
                 "rewind_files" | "mcp_reconnect" | "mcp_toggle" | "stop_task" => format!(
@@ -435,6 +488,140 @@ async fn handle_client_control(shared: &Arc<Shared>, frame: &Value) {
             }));
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Título da sessão
+// ---------------------------------------------------------------------------
+
+/// Modelo default do título: pequeno de propósito, porque a tarefa é curta.
+const DEFAULT_TITLE_MODEL: &str = "claude-haiku-4-5-20251001";
+
+/// Teto de texto mandado ao modelo, contado do FIM: o assunto da sessão mora
+/// no que aconteceu por último, não na primeira mensagem.
+const MAX_CONVERSATION_TEXT: usize = 1000;
+
+/// Título tem sete palavras no máximo, e a resposta é um JSON de uma chave.
+const TITLE_MAX_TOKENS: u32 = 64;
+
+/// O prompt é o do CLI, palavra por palavra, com UM acréscimo deliberado: a
+/// frase que manda escrever o título no idioma da conversa. Sem ela, o modelo
+/// segue o idioma deste prompt, que é inglês, e uma conversa inteira em
+/// português ganha um título em inglês. Medido.
+const SESSION_TITLE_PROMPT: &str = r#"Generate a concise, sentence-case title (3-7 words) that captures the main topic or goal of this coding session. The title should be clear enough that the user recognizes the session in a list. Use sentence case: capitalize only the first word and proper nouns. Write the title in the same language the conversation is in.
+
+Return JSON with a single "title" field.
+
+Good examples:
+{"title": "Fix login button on mobile"}
+{"title": "Add OAuth authentication"}
+{"title": "Debug failing CI tests"}
+{"title": "Refactor API client error handling"}
+
+Bad (too vague): {"title": "Code changes"}
+Bad (too long): {"title": "Investigate and fix the issue where the login button does not respond on mobile devices"}
+Bad (wrong case): {"title": "Fix Login Button On Mobile"}"#;
+
+/// Gera o título e, quando `persist`, grava a entrada `ai-title` no transcript.
+///
+/// Nada aqui derruba a sessão: modelo fora da allowlist do proxy, rede caída
+/// ou resposta ilegível viram título nulo e um aviso, como no CLI.
+async fn session_title(
+    shared: &Arc<Shared>,
+    titling: &Titling,
+    description: &str,
+    persist: bool,
+) -> Option<String> {
+    let title = ask_for_title(titling, description).await?;
+    if persist {
+        match titling
+            .storage
+            .append_ai_title(&titling.session_id, &title)
+            .await
+        {
+            Ok(entry) => {
+                if titling.mirror {
+                    emit_mirror(shared, &titling.transcript_path, entry);
+                }
+            }
+            Err(e) => eprintln!("Warning: failed to persist session title: {e}"),
+        }
+    }
+    Some(title)
+}
+
+async fn ask_for_title(titling: &Titling, description: &str) -> Option<String> {
+    let trimmed = description.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let request = CreateMessageRequest {
+        model: titling.model.clone(),
+        max_tokens: TITLE_MAX_TOKENS,
+        messages: vec![ApiMessage::user(vec![ContentBlock::text(last_chars(
+            trimmed,
+            MAX_CONVERSATION_TEXT,
+        ))])],
+        system: Some(vec![SystemBlock::text(SESSION_TITLE_PROMPT)]),
+        tools: None,
+        tool_choice: None,
+        stream: false,
+        metadata: None,
+        stop_sequences: None,
+        temperature: Some(0.0),
+        top_p: None,
+        top_k: None,
+        thinking: None,
+    };
+    match titling.client.create_message(request).await {
+        Ok(response) => title_of_blocks(&response.content),
+        Err(e) => {
+            eprintln!("Warning: session title generation failed: {e}");
+            None
+        }
+    }
+}
+
+/// Últimos `max` CARACTERES (não bytes: cortar no meio de um caractere faria
+/// o texto virar erro de serialização em vez de prompt).
+fn last_chars(text: &str, max: usize) -> String {
+    let total = text.chars().count();
+    if total <= max {
+        return text.to_string();
+    }
+    text.chars().skip(total - max).collect()
+}
+
+fn title_of_blocks(content: &[ContentBlock]) -> Option<String> {
+    let text = content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    title_of_model_text(&text)
+}
+
+/// O modelo responde um JSON `{"title": ...}`. Sem campo, com título vazio ou
+/// com resposta que nem JSON é, o resultado é `None`, nunca título em branco.
+fn title_of_model_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if let Some(title) = title_of_json(trimmed) {
+        return Some(title);
+    }
+    // O pedido não carrega schema de saída, então de vez em quando o objeto
+    // vem embrulhado em cerca de markdown ou em uma frase de cortesia. O JSON
+    // continua lá dentro, entre a primeira chave e a última.
+    let start = trimmed.find('{')?;
+    let end = trimmed.rfind('}')?;
+    title_of_json(trimmed.get(start..=end)?)
+}
+
+fn title_of_json(text: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    crate::types::session_title_of(&value)
 }
 
 // ---------------------------------------------------------------------------
@@ -690,6 +877,26 @@ async fn engine_main(
 
     let transcript_path = storage.session_path(&session_id).display().to_string();
     let mut last_uuid: Option<String> = None;
+
+    // A geração de título fica armada aqui, com tudo que ela precisa: a partir
+    // deste ponto um `generate_session_title` tem sessão, transcript e cliente.
+    {
+        let mut title_client = AnthropicClient::new(config.api_key.clone());
+        if let Some(base_url) = &config.base_url {
+            title_client = title_client.with_base_url(base_url.clone());
+        }
+        *shared.titling.lock().await = Some(Titling {
+            client: title_client,
+            model: options
+                .title_model
+                .clone()
+                .unwrap_or_else(|| DEFAULT_TITLE_MODEL.to_string()),
+            session_id: session_id.clone(),
+            storage: storage.clone(),
+            transcript_path: transcript_path.clone(),
+            mirror: config.mirror,
+        });
+    }
 
     // mcp_status pré-computado: os servidores in-process com as suas tools.
     {
@@ -2227,5 +2434,98 @@ mod tests {
                 .check("Read", &json!({"file_path": "/workspace/pedido.txt"})),
             PermissionDecision::Ask
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Título da sessão: a parte pura, sem rede
+    // -----------------------------------------------------------------------
+
+    use super::{last_chars, title_of_blocks, title_of_model_text};
+    use crate::api::types::ContentBlock;
+
+    #[test]
+    fn titulo_sai_do_json_do_modelo() {
+        assert_eq!(
+            title_of_model_text(r#"{"title": "Fix login button on mobile"}"#),
+            Some("Fix login button on mobile".to_string())
+        );
+    }
+
+    /// O modelo às vezes devolve o título com espaço em volta, e espaço no
+    /// começo de um nome de sessão é sujeira visível na lista.
+    #[test]
+    fn espaco_em_volta_do_titulo_e_aparado() {
+        assert_eq!(
+            title_of_model_text("{\"title\": \"  Add OAuth authentication \\n\"}"),
+            Some("Add OAuth authentication".to_string())
+        );
+    }
+
+    /// Título só de espaço equivale a título nenhum: melhor `None` do que uma
+    /// linha em branco onde deveria estar o assunto da sessão.
+    #[test]
+    fn titulo_so_de_espaco_vira_nulo() {
+        assert_eq!(title_of_model_text(r#"{"title": "   "}"#), None);
+        assert_eq!(title_of_model_text(r#"{"title": ""}"#), None);
+    }
+
+    #[test]
+    fn resposta_vazia_vira_nulo() {
+        assert_eq!(title_of_model_text(""), None);
+        assert_eq!(title_of_model_text("   \n  "), None);
+    }
+
+    #[test]
+    fn resposta_sem_o_campo_vira_nulo() {
+        assert_eq!(title_of_model_text(r#"{"summary": "Fix login"}"#), None);
+        assert_eq!(title_of_model_text(r#"{"title": null}"#), None);
+        assert_eq!(title_of_model_text(r#"{"title": 42}"#), None);
+    }
+
+    /// Sem schema de saída no pedido, o objeto chega embrulhado de vez em
+    /// quando. Desistir aí seria perder um título que está ali, legível.
+    #[test]
+    fn json_embrulhado_ainda_rende_titulo() {
+        assert_eq!(
+            title_of_model_text("```json\n{\"title\": \"Debug failing CI tests\"}\n```"),
+            Some("Debug failing CI tests".to_string())
+        );
+        assert_eq!(
+            title_of_model_text("Sure! {\"title\": \"Refactor API client\"} hope it helps"),
+            Some("Refactor API client".to_string())
+        );
+    }
+
+    #[test]
+    fn resposta_que_nem_json_e_vira_nulo() {
+        assert_eq!(title_of_model_text("Fix login button on mobile"), None);
+    }
+
+    /// A resposta chega em blocos, e só os de texto interessam.
+    #[test]
+    fn titulo_sai_dos_blocos_de_texto() {
+        let content = vec![
+            ContentBlock::Thinking {
+                thinking: "pensando".to_string(),
+                signature: None,
+            },
+            ContentBlock::text(r#"{"title": "#),
+            ContentBlock::text(r#""Add OAuth authentication"}"#),
+        ];
+        assert_eq!(
+            title_of_blocks(&content),
+            Some("Add OAuth authentication".to_string())
+        );
+        assert_eq!(title_of_blocks(&[]), None);
+    }
+
+    /// O corte é pelo FIM, e conta caractere: cortar por byte partiria um
+    /// acentuado no meio.
+    #[test]
+    fn o_corte_do_texto_pega_o_final_e_conta_caractere() {
+        assert_eq!(last_chars("conversa curta", 100), "conversa curta");
+        assert_eq!(last_chars("abcdef", 3), "def");
+        assert_eq!(last_chars("ação", 3), "ção");
+        assert_eq!(last_chars("ação", 0), "");
     }
 }

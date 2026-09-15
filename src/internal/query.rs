@@ -802,6 +802,23 @@ impl Query {
         Ok(())
     }
 
+    /// Pede um título curto para a sessão, escrito por um modelo pequeno a
+    /// partir de `description`. Com `persist`, o outro lado também grava o
+    /// título no transcript. A resposta é `{"title": ...}`, e `title` pode vir
+    /// nulo quando o modelo não devolveu nada aproveitável.
+    pub async fn generate_session_title(
+        &mut self,
+        description: &str,
+        persist: bool,
+    ) -> Result<serde_json::Value> {
+        let request = json!({
+            "subtype": "generate_session_title",
+            "description": description,
+            "persist": persist,
+        });
+        self.send_control_request(request, 60.0).await
+    }
+
     pub async fn wait_for_result_and_end_input(&mut self) -> Result<()> {
         // If SDK MCP servers or hooks are present, wait for first result
         if !self.sdk_mcp_servers.is_empty() || !self.hooks.is_empty() {

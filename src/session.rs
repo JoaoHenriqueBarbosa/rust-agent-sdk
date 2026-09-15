@@ -172,6 +172,23 @@ impl SessionStorage {
         Ok((uuid, entry))
     }
 
+    /// Append the AI generated session title, in the same entry shape the CLI
+    /// writes (`{"type":"ai-title","aiTitle":...,"sessionId":...}`).
+    /// Returns the written entry so the caller can mirror it.
+    pub async fn append_ai_title(
+        &self,
+        session_id: &str,
+        ai_title: &str,
+    ) -> Result<serde_json::Value> {
+        let entry = serde_json::json!({
+            "type": "ai-title",
+            "aiTitle": ai_title,
+            "sessionId": session_id,
+        });
+        self.append_entry(session_id, &entry).await?;
+        Ok(entry)
+    }
+
     /// Append a raw JSON entry to the session file.
     async fn append_entry(&self, session_id: &str, entry: &serde_json::Value) -> Result<()> {
         let path = self.session_path(session_id);
