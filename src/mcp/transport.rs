@@ -12,7 +12,41 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{oneshot, Mutex};
 
-use crate::errors::{ClaudeSDKError, Result};
+use crate::mcp::error::McpError;
+
+/// Prazo de uma request pelo stdio, o mesmo que o transporte sempre teve.
+const STDIO_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+// ---------------------------------------------------------------------------
+// O contrato que os três transportes cumprem
+// ---------------------------------------------------------------------------
+
+/// Um canal JSON-RPC com um servidor MCP: stdio, HTTP streamável ou SSE.
+///
+/// O cliente (`McpClient`) só conhece isto. É o que permite reconectar por
+/// baixo de uma sessão expirada sem que quem chama a tool perceba, e é o que
+/// deixa o transporte nativo ligar `mcp_servers` externos pelo mesmo caminho
+/// dos servidores in-process.
+#[async_trait::async_trait]
+pub trait McpTransport: Send + Sync {
+    /// Manda uma request e espera a resposta com o mesmo id.
+    async fn request(&self, method: &str, params: Option<Value>) -> Result<Value, McpError>;
+
+    /// Manda uma notificação, que por contrato não tem resposta.
+    async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), McpError>;
+
+    /// Versão negociada no `initialize`: os transportes HTTP a mandam no
+    /// cabeçalho `mcp-protocol-version` de toda request seguinte.
+    fn set_protocol_version(&self, _version: &str) {}
+
+    /// Linhas `__table_event__` capturadas do stderr (só o stdio tem stderr).
+    async fn take_stderr_events(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Fecha o canal e libera o que ele segura (processo, stream, sessão).
+    async fn close(&self) {}
+}
 
 // ---------------------------------------------------------------------------
 // JSON-RPC types
@@ -50,7 +84,7 @@ pub struct StdioTransport {
     stdin: Arc<Mutex<tokio::process::ChildStdin>>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
     next_id: AtomicU64,
-    _child: Arc<Mutex<Child>>,
+    child: Arc<Mutex<Child>>,
     stderr_events: Arc<Mutex<Vec<String>>>,
 }
 
@@ -60,7 +94,7 @@ impl StdioTransport {
         command: &str,
         args: &[String],
         env: Option<&HashMap<String, String>>,
-    ) -> Result<Self> {
+    ) -> Result<Self, McpError> {
         let mut cmd = Command::new(command);
         cmd.args(args)
             .stdin(Stdio::piped())
@@ -74,25 +108,22 @@ impl StdioTransport {
         }
 
         let mut child = cmd.spawn().map_err(|e| {
-            ClaudeSDKError::sdk(format!(
+            McpError::Transport(format!(
                 "Failed to spawn MCP server process '{command}': {e}"
             ))
         })?;
 
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| ClaudeSDKError::sdk("Failed to get stdin of MCP server process"))?;
+        let stdin = child.stdin.take().ok_or_else(|| {
+            McpError::Transport("Failed to get stdin of MCP server process".to_string())
+        })?;
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| ClaudeSDKError::sdk("Failed to get stdout of MCP server process"))?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            McpError::Transport("Failed to get stdout of MCP server process".to_string())
+        })?;
 
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| ClaudeSDKError::sdk("Failed to get stderr of MCP server process"))?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            McpError::Transport("Failed to get stderr of MCP server process".to_string())
+        })?;
 
         let stderr_events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -159,7 +190,7 @@ impl StdioTransport {
             stdin: Arc::new(Mutex::new(stdin)),
             pending,
             next_id: AtomicU64::new(1),
-            _child: Arc::new(Mutex::new(child)),
+            child: Arc::new(Mutex::new(child)),
             stderr_events,
         })
     }
@@ -170,8 +201,27 @@ impl StdioTransport {
         std::mem::take(&mut *events)
     }
 
+    async fn write_line(&self, payload: &impl Serialize) -> Result<(), McpError> {
+        let json = serde_json::to_string(payload)
+            .map_err(|e| McpError::Transport(format!("Failed to serialize JSON-RPC: {e}")))?;
+        let mut stdin = self.stdin.lock().await;
+        stdin
+            .write_all(json.as_bytes())
+            .await
+            .map_err(|e| McpError::Transport(format!("Failed to write to MCP stdin: {e}")))?;
+        stdin
+            .write_all(b"\n")
+            .await
+            .map_err(|e| McpError::Transport(format!("Failed to write newline: {e}")))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|e| McpError::Transport(format!("Failed to flush MCP stdin: {e}")))?;
+        Ok(())
+    }
+
     /// Send a JSON-RPC request and wait for the response.
-    pub async fn request(&self, method: &str, params: Option<Value>) -> Result<Value> {
+    pub async fn request(&self, method: &str, params: Option<Value>) -> Result<Value, McpError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
         let req = JsonRpcRequest {
@@ -188,47 +238,40 @@ impl StdioTransport {
             pending.insert(id, tx);
         }
 
-        // Write request to stdin
-        let json = serde_json::to_string(&req).map_err(|e| {
-            ClaudeSDKError::sdk(format!("Failed to serialize JSON-RPC request: {e}"))
-        })?;
-
-        {
-            let mut stdin = self.stdin.lock().await;
-            stdin
-                .write_all(json.as_bytes())
-                .await
-                .map_err(|e| ClaudeSDKError::sdk(format!("Failed to write to MCP stdin: {e}")))?;
-            stdin
-                .write_all(b"\n")
-                .await
-                .map_err(|e| ClaudeSDKError::sdk(format!("Failed to write newline: {e}")))?;
-            stdin
-                .flush()
-                .await
-                .map_err(|e| ClaudeSDKError::sdk(format!("Failed to flush MCP stdin: {e}")))?;
+        if let Err(error) = self.write_line(&req).await {
+            self.pending.lock().await.remove(&id);
+            return Err(error);
         }
 
         // Wait for response with timeout
-        let resp = tokio::time::timeout(std::time::Duration::from_secs(120), rx)
-            .await
-            .map_err(|_| ClaudeSDKError::sdk(format!("MCP request '{method}' timed out")))?
-            .map_err(|_| {
-                ClaudeSDKError::sdk(format!("MCP server closed before responding to '{method}'"))
-            })?;
+        let resp = match tokio::time::timeout(STDIO_REQUEST_TIMEOUT, rx).await {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(_)) => {
+                return Err(McpError::Closed(format!(
+                    "MCP server closed before responding to '{method}'"
+                )))
+            }
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                return Err(McpError::Timeout {
+                    what: format!("MCP request '{method}'"),
+                    after: STDIO_REQUEST_TIMEOUT,
+                });
+            }
+        };
 
         if let Some(err) = resp.error {
-            return Err(ClaudeSDKError::sdk(format!(
-                "MCP error ({}): {}",
-                err.code, err.message
-            )));
+            return Err(McpError::Rpc {
+                code: err.code,
+                message: err.message,
+            });
         }
 
         Ok(resp.result.unwrap_or(Value::Null))
     }
 
     /// Send a JSON-RPC notification (no response expected).
-    pub async fn notify(&self, method: &str, params: Option<Value>) -> Result<()> {
+    pub async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), McpError> {
         #[derive(Serialize)]
         struct JsonRpcNotification {
             jsonrpc: &'static str,
@@ -237,29 +280,31 @@ impl StdioTransport {
             params: Option<Value>,
         }
 
-        let notif = JsonRpcNotification {
+        self.write_line(&JsonRpcNotification {
             jsonrpc: "2.0",
             method: method.to_string(),
             params,
-        };
+        })
+        .await
+    }
+}
 
-        let json = serde_json::to_string(&notif)
-            .map_err(|e| ClaudeSDKError::sdk(format!("Failed to serialize notification: {e}")))?;
+#[async_trait::async_trait]
+impl McpTransport for StdioTransport {
+    async fn request(&self, method: &str, params: Option<Value>) -> Result<Value, McpError> {
+        StdioTransport::request(self, method, params).await
+    }
 
-        let mut stdin = self.stdin.lock().await;
-        stdin
-            .write_all(json.as_bytes())
-            .await
-            .map_err(|e| ClaudeSDKError::sdk(format!("Failed to write notification: {e}")))?;
-        stdin
-            .write_all(b"\n")
-            .await
-            .map_err(|e| ClaudeSDKError::sdk(format!("Failed to write newline: {e}")))?;
-        stdin
-            .flush()
-            .await
-            .map_err(|e| ClaudeSDKError::sdk(format!("Failed to flush: {e}")))?;
+    async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), McpError> {
+        StdioTransport::notify(self, method, params).await
+    }
 
-        Ok(())
+    async fn take_stderr_events(&self) -> Vec<String> {
+        StdioTransport::take_stderr_events(self).await
+    }
+
+    async fn close(&self) {
+        let mut child = self.child.lock().await;
+        let _ = child.start_kill();
     }
 }

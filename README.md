@@ -248,9 +248,11 @@ This is a spike, and it's worth being precise about where the edges are:
 - **Session stores:** `InMemorySessionStore` is always available; **Postgres** and **Redis**
   backends ship behind the `postgres` / `redis-store` features and are verified against real
   servers by `tests/test_stores_live.rs`. **S3 is not implemented yet** — it's on the roadmap.
-- **No ReAct loop, no bespoke HTTP/SSE client, no `#[tool]` macro.** Agent reasoning, tool
-  execution, and transport to the model all live in the `claude` CLI. "SSE" here refers only
-  to a variant of MCP server *configuration*, not an HTTP client this crate implements.
+- **No ReAct loop of its own on the CLI path, and no `#[tool]` macro.** With the subprocess
+  transport, agent reasoning, tool execution, and transport to the model all live in the
+  `claude` CLI. The native transport (`NativeApiTransport`) runs the loop in-process and
+  ships its own MCP client: `stdio`, `sse` and streamable `http` servers are connected once
+  per session, with the CLI's timeouts, session renewal and reconnection behavior.
 - **One known TODO:** wiring the transcript-mirror batcher into the streaming client
   (`client.rs`) is not finished yet, so live sessions don't auto-persist to a `SessionStore`
   through that path.

@@ -12,6 +12,12 @@
 //! - `tools` (nomes de builtins: Read, Write, Edit, Bash, Glob, Grep, ...);
 //! - `sdk_mcp_servers` — cada tool vira `mcp__<servidor>__<tool>` executada
 //!   pela ponte JSON-RPC in-process (sem round-trip pelo cliente);
+//! - `mcp_servers`: servidores externos por `stdio`, `sse` e `http`
+//!   (streamável), conectados uma vez por sessão pelo cliente MCP da crate
+//!   (`crate::mcp`), com as mesmas tools `mcp__<servidor>__<tool>`; um
+//!   servidor que não responde vira `failed` no `mcp_status`, e a sessão
+//!   segue sem ele. `McpServersConfig::Path` lê o `mcpServers` do arquivo,
+//!   como o `--mcp-config` do CLI;
 //! - `resume` / `fork_session` — o histórico vem do JSONL em
 //!   `~/.claude/projects/<key>/<sessão>.jsonl`, o mesmo arquivo que o CLI
 //!   escreveria, e é onde este transporte também escreve;
@@ -239,7 +245,7 @@ impl Transport for NativeApiTransport {
             abort: Mutex::new(CancellationToken::new()),
             model_override: Mutex::new(None),
             permission_mode: Arc::new(std::sync::RwLock::new(initial_mode)),
-            mcp_status: Mutex::new(json!({"mcp_servers": []})),
+            mcp_status: Mutex::new(json!({"mcpServers": pending_mcp_status(&options)})),
             context_usage: Mutex::new(Value::Null),
             rewritten_history: Arc::new(std::sync::Mutex::new(None)),
             counter: AtomicU64::new(1),
@@ -806,14 +812,61 @@ fn unsupported_options(options: &ClaudeAgentOptions) -> Vec<&'static str> {
     if options.continue_conversation {
         unsupported.push("continue_conversation (use resume)");
     }
-    let has_external_mcp = match &options.mcp_servers {
-        crate::types::McpServersConfig::Dict(map) => !map.is_empty(),
-        crate::types::McpServersConfig::Path(_) => true,
-    };
-    if has_external_mcp {
-        unsupported.push("mcp_servers externos (use sdk_mcp_servers)");
-    }
     unsupported
+}
+
+/// Os servidores MCP externos que as opções declaram, no formato que o
+/// cliente entende. `Path` é o `--mcp-config` do CLI: um JSON com a chave
+/// `mcpServers`. Arquivo ilegível vira um status `failed` com o motivo, e não
+/// uma sessão que morre por causa de um servidor.
+fn declared_mcp_servers(
+    options: &ClaudeAgentOptions,
+) -> (HashMap<String, crate::types::McpServerConfig>, Vec<Value>) {
+    match &options.mcp_servers {
+        crate::types::McpServersConfig::Dict(map) => (map.clone(), Vec::new()),
+        crate::types::McpServersConfig::Path(path) => {
+            let read = std::fs::read_to_string(path)
+                .map_err(|e| e.to_string())
+                .and_then(|text| serde_json::from_str::<Value>(&text).map_err(|e| e.to_string()))
+                .and_then(|json| {
+                    let servers = json.get("mcpServers").cloned().unwrap_or(json);
+                    serde_json::from_value::<HashMap<String, crate::types::McpServerConfig>>(
+                        servers,
+                    )
+                    .map_err(|e| e.to_string())
+                });
+            match read {
+                Ok(map) => (map, Vec::new()),
+                Err(error) => (
+                    HashMap::new(),
+                    vec![json!({
+                        "name": path.display().to_string(),
+                        "status": "failed",
+                        "scope": "user",
+                        "error": format!("mcp config file: {error}"),
+                    })],
+                ),
+            }
+        }
+    }
+}
+
+/// O `mcp_status` ANTES de o engine conectar: cada servidor externo declarado
+/// aparece como `pending`, como no CLI, para quem pergunta logo depois do
+/// `connect` ver que há servidores a caminho e não uma lista vazia. O engine
+/// substitui a lista inteira quando as conexões se resolvem.
+fn pending_mcp_status(options: &ClaudeAgentOptions) -> Vec<Value> {
+    let (declared, mut status) = declared_mcp_servers(options);
+    let mut names: Vec<&String> = declared
+        .iter()
+        .filter(|(_, config)| !matches!(config, crate::types::McpServerConfig::Sdk { .. }))
+        .map(|(name, _)| name)
+        .collect();
+    names.sort();
+    status.extend(names.into_iter().map(|name| {
+        json!({"name": name, "status": "pending", "scope": "user"})
+    }));
+    status
 }
 
 async fn engine_main(
@@ -898,7 +951,14 @@ async fn engine_main(
         });
     }
 
-    // mcp_status pré-computado: os servidores in-process com as suas tools.
+    // mcp_status pré-computado: os servidores in-process com as suas tools,
+    // mais os externos, conectados UMA vez por sessão (como o CLI memoiza
+    // `connectToServer`) e mantidos vivos até a sessão acabar.
+    let (declared, mut mcp_report) = declared_mcp_servers(&options);
+    let remote = crate::mcp::connect_mcp_servers(&declared).await;
+    let remote_tools: Vec<Arc<dyn Tool>> = remote.tools.clone();
+    let remote_clients = remote.clients;
+    mcp_report.extend(remote.status);
     {
         let mut servers = Vec::new();
         for server_name in options.sdk_mcp_servers.names() {
@@ -919,7 +979,11 @@ async fn engine_main(
                 }));
             }
         }
-        *shared.mcp_status.lock().await = json!({"mcp_servers": servers});
+        servers.extend(mcp_report);
+        // A chave é a do CLI (`mcpServers`): é o que `McpStatusResponse` lê,
+        // e com a chave antiga o `get_mcp_status` do cliente não parseava a
+        // resposta deste transporte.
+        *shared.mcp_status.lock().await = json!({"mcpServers": servers});
     }
 
     // SessionStart: dispara os hooks registrados (o resultado não bloqueia).
@@ -1086,6 +1150,7 @@ async fn engine_main(
                 todo_store: Arc::clone(&todo_store),
                 client: client.clone(),
                 model: model.clone(),
+                mcp_tools: remote_tools.clone(),
             },
         )
         .await;
@@ -1295,6 +1360,11 @@ async fn engine_main(
             }),
         )
         .await;
+    // Os servidores MCP externos morrem com a sessão: DELETE da sessão HTTP,
+    // stream SSE fechado, processo stdio encerrado.
+    for client in &remote_clients {
+        client.close().await;
+    }
     // user_tx caiu (end_input/close) e a fila drenou: EOF.
 }
 
@@ -1555,6 +1625,10 @@ struct ExecutorSetup {
     todo_store: Arc<std::sync::Mutex<serde_json::Value>>,
     client: AnthropicClient,
     model: String,
+    /// As tools dos servidores MCP externos, já conectados na abertura da
+    /// sessão. Entram pelo mesmo caminho das nativas, inclusive nos
+    /// subagentes: no CLI o pool de tools é um só.
+    mcp_tools: Vec<Arc<dyn Tool>>,
 }
 
 async fn build_executor(
@@ -1571,6 +1645,7 @@ async fn build_executor(
         todo_store,
         client,
         model,
+        mcp_tools,
     } = setup;
     let session_id = session_id.as_str();
     let transcript_path = transcript_path.as_str();
@@ -1578,6 +1653,16 @@ async fn build_executor(
         &options.allowed_tools,
         &options.disallowed_tools,
     );
+    // O pool que os subagentes herdam: as nativas do chamador e as dos
+    // servidores MCP externos, porque uma fronteira que valesse só no nível
+    // de cima cairia com um `Task`, e uma tool que só o pai enxerga não é o
+    // que o CLI faz.
+    let inherited: Vec<Arc<dyn Tool>> = options
+        .native_tools
+        .iter()
+        .cloned()
+        .chain(mcp_tools.iter().cloned())
+        .collect();
 
     let mut registry = ToolRegistry::new();
     match &options.tools {
@@ -1601,7 +1686,7 @@ async fn build_executor(
                 cwd: config.cwd.clone(),
                 tool_results_dir: tool_results_dir.clone(),
                 task_store: Arc::clone(&task_store),
-                native_tools: options.native_tools.clone(),
+                native_tools: inherited.clone(),
                 permission_rules: permission_rules.clone(),
                 tool_name,
             }));
@@ -1611,7 +1696,7 @@ async fn build_executor(
     // As tools do chamador entram ANTES das deny rules, e não depois: uma
     // regra de negação vale para o nome, e trocar quem atende o nome não pode
     // tirar o nome do alcance da regra.
-    register_native_tools(&mut registry, &options.native_tools);
+    register_native_tools(&mut registry, &inherited);
 
     // Deny incondicional tira a tool do request inteiro (filterToolsByDenyRules).
     registry.retain(|name| !permission_rules.is_tool_fully_denied(name));

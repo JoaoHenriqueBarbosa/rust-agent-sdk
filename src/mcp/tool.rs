@@ -7,8 +7,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::mcp::client::McpClient;
+use crate::mcp::client::{McpClient, McpToolDefinition};
 use crate::tools::framework::{Tool, ToolContext, ToolResult, ToolResultContent};
+
+/// `MAX_MCP_DESCRIPTION_LENGTH` do CLI: a descrição que vai ao modelo é
+/// cortada aqui, e a marca de corte diz que foi cortada.
+pub const MAX_MCP_DESCRIPTION_LENGTH: usize = 2048;
 
 /// A tool backed by an MCP server. Implements the `Tool` trait so it can be
 /// registered in the SDK's ToolRegistry alongside built-in tools.
@@ -22,31 +26,41 @@ pub struct McpTool {
     mcp_tool_name: String,
     description: String,
     input_schema: Value,
+    read_only: bool,
     client: Arc<McpClient>,
 }
 
 impl McpTool {
-    pub fn new(
-        server_name: String,
-        tool_name: String,
-        description: String,
-        input_schema: Value,
-        client: Arc<McpClient>,
-    ) -> Self {
+    pub fn new(server_name: &str, definition: &McpToolDefinition, client: Arc<McpClient>) -> Self {
         // Port: getMcpPrefix from mcpStringUtils.js
         // normalizeNameForMCP replaces non-alphanumeric/underscore/dash with _
-        let normalized_server = normalize_name_for_mcp(&server_name);
-        let normalized_tool = normalize_name_for_mcp(&tool_name);
+        let normalized_server = normalize_name_for_mcp(server_name);
+        let normalized_tool = normalize_name_for_mcp(&definition.name);
         let sdk_name = format!("mcp__{normalized_server}__{normalized_tool}");
 
         Self {
             sdk_name,
-            mcp_tool_name: tool_name,
-            description,
-            input_schema,
+            mcp_tool_name: definition.name.clone(),
+            description: truncated(definition.description.as_deref().unwrap_or_default()),
+            input_schema: definition.input_schema.clone(),
+            read_only: definition.is_read_only(),
             client,
         }
     }
+}
+
+/// O `prompt()` da MCPTool do CLI: descrição acima do teto vira prefixo mais
+/// a marca de corte.
+fn truncated(description: &str) -> String {
+    if description.chars().count() <= MAX_MCP_DESCRIPTION_LENGTH {
+        return description.to_string();
+    }
+    let mut cut: String = description
+        .chars()
+        .take(MAX_MCP_DESCRIPTION_LENGTH)
+        .collect();
+    cut.push_str("... [truncated]");
+    cut
 }
 
 /// Port of normalizeNameForMCP from services/mcp/normalization.ts
@@ -77,9 +91,13 @@ impl Tool for McpTool {
     }
 
     fn is_concurrency_safe(&self) -> bool {
-        // MCP tools are generally safe to run concurrently since each call
-        // is an independent JSON-RPC request.
-        true
+        // Port: isConcurrencySafe da MCPTool do CLI é o `readOnlyHint` da
+        // anotação; sem anotação, a tool roda em série.
+        self.read_only
+    }
+
+    fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     async fn execute(&self, input: Value, _context: &ToolContext) -> ToolResult {

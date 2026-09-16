@@ -47,6 +47,7 @@ tempfile = "3"
 pretty_assertions = "1"
 filetime = "0.2"
 serial_test = "3"
+axum = "0.8"
 
 [features]
 default = []
