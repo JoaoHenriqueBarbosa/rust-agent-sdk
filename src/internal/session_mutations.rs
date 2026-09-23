@@ -11,8 +11,8 @@ use crate::types::{ForkSessionResult, SessionKey, SessionStore, SessionStoreEntr
 
 use super::sessions::{
     canonicalize_path, extract_first_prompt_from_head, extract_last_json_string_field,
-    find_project_dir, get_projects_dir, get_worktree_paths, project_key_for_directory,
-    validate_uuid, LITE_READ_BUF_SIZE,
+    find_project_dir, find_project_dir_in, get_projects_dir, get_worktree_paths,
+    project_key_for_directory, validate_uuid, LITE_READ_BUF_SIZE,
 };
 
 // ---------------------------------------------------------------------------
@@ -96,6 +96,17 @@ fn sanitize_unicode(value: &str) -> String {
 // ---------------------------------------------------------------------------
 
 pub fn rename_session(session_id: &str, title: &str, directory: Option<&str>) -> Result<()> {
+    rename_session_with_env(session_id, title, directory, None)
+}
+
+/// [`rename_session`] honrando o `CLAUDE_CONFIG_DIR` de um env explícito, como
+/// [`crate::list_sessions_with_env`].
+pub fn rename_session_with_env(
+    session_id: &str,
+    title: &str,
+    directory: Option<&str>,
+    env: Option<&HashMap<String, String>>,
+) -> Result<()> {
     if validate_uuid(session_id).is_none() {
         return Err(ClaudeSDKError::sdk(format!(
             "Invalid session_id: {session_id}"
@@ -115,7 +126,7 @@ pub fn rename_session(session_id: &str, title: &str, directory: Option<&str>) ->
         ])
     );
 
-    append_to_session(session_id, &data, directory)
+    append_to_session_in(&get_projects_dir(env), session_id, &data, directory)
 }
 
 pub fn tag_session(session_id: &str, tag: Option<&str>, directory: Option<&str>) -> Result<()> {
@@ -540,13 +551,23 @@ fn try_append(path: &Path, data: &str) -> std::result::Result<bool, io::Error> {
 }
 
 fn append_to_session(session_id: &str, data: &str, directory: Option<&str>) -> Result<()> {
+    append_to_session_in(&get_projects_dir(None), session_id, data, directory)
+}
+
+/// [`append_to_session`] sob uma raiz de projetos explícita.
+fn append_to_session_in(
+    projects_dir: &Path,
+    session_id: &str,
+    data: &str,
+    directory: Option<&str>,
+) -> Result<()> {
     let file_name = format!("{session_id}.jsonl");
 
     if let Some(dir) = directory {
         let canonical = canonicalize_path(dir);
 
         // Try the exact/prefix-matched project directory first.
-        if let Some(project_dir) = find_project_dir(&canonical) {
+        if let Some(project_dir) = find_project_dir_in(projects_dir, &canonical) {
             match try_append(&project_dir.join(&file_name), data) {
                 Ok(true) => return Ok(()),
                 Ok(false) => {}
@@ -562,7 +583,7 @@ fn append_to_session(session_id: &str, data: &str, directory: Option<&str>) -> R
             if *wt == canonical {
                 continue;
             }
-            if let Some(wt_project_dir) = find_project_dir(wt) {
+            if let Some(wt_project_dir) = find_project_dir_in(projects_dir, wt) {
                 match try_append(&wt_project_dir.join(&file_name), data) {
                     Ok(true) => return Ok(()),
                     Ok(false) => {}
@@ -579,8 +600,7 @@ fn append_to_session(session_id: &str, data: &str, directory: Option<&str>) -> R
     }
 
     // No directory — search all project directories
-    let projects_dir = get_projects_dir(None);
-    let dirents = match fs::read_dir(&projects_dir) {
+    let dirents = match fs::read_dir(projects_dir) {
         Ok(e) => e,
         Err(_) => {
             return Err(ClaudeSDKError::sdk(format!(

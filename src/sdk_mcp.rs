@@ -412,6 +412,15 @@ pub trait SdkTool: Send + Sync {
 
     /// Executa a tool com os argumentos crus vindos do CLI.
     fn call<'a>(&'a self, arguments: Value) -> ToolFuture<'a>;
+
+    /// As `annotations` do MCP (`readOnlyHint`, `destructiveHint`,
+    /// `idempotentHint`, `openWorldHint`, `title`), que o `tools/list` anuncia
+    /// como o `ToolAnnotations(...).model_dump(exclude_none=True)` do SDK
+    /// Python. O CLI lê `readOnlyHint` para decidir se a tool pode rodar em
+    /// paralelo com outras. `None` (o default) omite o campo.
+    fn annotations(&self) -> Option<Value> {
+        None
+    }
 }
 
 /// Tool tipada: desserializa os argumentos em `A` antes de chamar o handler.
@@ -568,11 +577,17 @@ impl SdkMcpServer {
                     .tools
                     .iter()
                     .map(|t| {
-                        json!({
+                        let mut entry = json!({
                             "name": t.name(),
                             "description": t.description(),
                             "inputSchema": t.input_schema().to_value(),
-                        })
+                        });
+                        if let (Some(annotations), Some(map)) =
+                            (t.annotations(), entry.as_object_mut())
+                        {
+                            map.insert("annotations".to_string(), annotations);
+                        }
+                        entry
                     })
                     .collect();
                 Ok(json!({ "tools": tools }))

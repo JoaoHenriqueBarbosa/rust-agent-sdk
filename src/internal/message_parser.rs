@@ -1,10 +1,10 @@
 use crate::errors::ClaudeSDKError;
 use crate::types::{
-    AssistantMessage, ContentBlock, Message, MessageContent, MirrorErrorMessage, RateLimitEvent,
-    RateLimitInfo, RateLimitStatus, RateLimitType, ResultMessage, ServerToolResultBlock,
-    ServerToolUseBlock, StreamEvent, SystemMessage, TaskNotificationMessage, TaskProgressMessage,
-    TaskStartedMessage, TextBlock, ThinkingBlock, ToolResultBlock, ToolResultContent, ToolUseBlock,
-    UserMessage,
+    AssistantMessage, ContentBlock, DeferredToolUse, HookEventMessage, Message, MessageContent,
+    MirrorErrorMessage, RateLimitEvent, RateLimitInfo, RateLimitStatus, RateLimitType,
+    ResultMessage, ServerToolResultBlock, ServerToolUseBlock, StreamEvent, SystemMessage,
+    TaskNotificationMessage, TaskProgressMessage, TaskStartedMessage, TextBlock, ThinkingBlock,
+    ToolResultBlock, ToolResultContent, ToolUseBlock, UserMessage,
 };
 
 /// Parse a raw JSON message dict into a typed Message.
@@ -32,6 +32,36 @@ pub fn parse_message(
             message: format!("Invalid message data type (expected dict, got {type_name})"),
             data: Some(data.clone()),
         });
+    }
+
+    // Eventos de hook (`include_hook_events`) chegam como `system` com
+    // `subtype` `hook_started`/`hook_response` e viram `HookEventMessage`
+    // antes do tratamento genérico de `system`, como no SDK Python.
+    if data.get("type").and_then(|v| v.as_str()) == Some("system") {
+        if let Some(subtype @ ("hook_started" | "hook_response")) =
+            data.get("subtype").and_then(|v| v.as_str())
+        {
+            let non_empty = |key: &str| {
+                data.get(key)
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+            };
+            let hook_event_name = non_empty("hook_event")
+                .or_else(|| non_empty("hook_name"))
+                .or_else(|| non_empty("hook_event_name"))
+                .unwrap_or("")
+                .to_string();
+            return Ok(Some(Message::HookEvent(HookEventMessage {
+                subtype: subtype.to_string(),
+                data: data.clone(),
+                hook_event_name,
+                session_id: data
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                uuid: data.get("uuid").and_then(|v| v.as_str()).map(String::from),
+            })));
+        }
     }
 
     let message_type = data.get("type").and_then(|v| v.as_str());
@@ -391,6 +421,25 @@ fn parse_result_message(
         })?;
     let num_turns = require_i64(data, "num_turns", "result", data)?;
     let session_id = require_str(data, "session_id", "result", data)?;
+    // `DeferredToolUse(...) if deferred else None`: objeto vazio ou nulo é
+    // ausência; objeto sem `id`, `name` ou `input` é erro de parse (o
+    // `KeyError` do Python).
+    let deferred_tool_use = match data.get("deferred_tool_use") {
+        Some(serde_json::Value::Object(map)) if !map.is_empty() => {
+            let deferred = &data["deferred_tool_use"];
+            Some(DeferredToolUse {
+                id: require_str(deferred, "id", "result", data)?,
+                name: require_str(deferred, "name", "result", data)?,
+                input: deferred.get("input").cloned().ok_or_else(|| {
+                    ClaudeSDKError::MessageParse {
+                        message: "Missing required field in result message: 'input'".into(),
+                        data: Some(data.clone()),
+                    }
+                })?,
+            })
+        }
+        _ => None,
+    };
 
     Ok(Some(Message::Result(ResultMessage {
         subtype,
@@ -428,6 +477,7 @@ fn parse_result_message(
         permission_denials: data
             .get("permission_denials")
             .and_then(|v| v.as_array().cloned()),
+        deferred_tool_use,
         errors: data.get("errors").and_then(|v| {
             v.as_array().map(|a| {
                 a.iter()
@@ -435,6 +485,7 @@ fn parse_result_message(
                     .collect()
             })
         }),
+        api_error_status: data.get("api_error_status").and_then(|v| v.as_i64()),
         uuid: data.get("uuid").and_then(|v| v.as_str()).map(String::from),
     })))
 }

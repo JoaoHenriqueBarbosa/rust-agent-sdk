@@ -10,5 +10,6 @@ pub mod session_store_validation;
 pub mod session_summary;
 pub mod sessions;
 pub mod task;
+pub mod transcript_load;
 pub mod transcript_mirror;
 pub mod transport;

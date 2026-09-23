@@ -6,7 +6,9 @@
 //! modelo inteira e, num gateway de terceiro, é a operação mais propensa a
 //! falhar.
 
-use crate::api::types::{ApiMessage, ContentBlock, Role, ToolResultContent};
+use crate::api::types::{
+    ApiMessage, ContentBlock, Role, ToolResultBlockContent, ToolResultContent,
+};
 
 /// Quantos tool_results recentes sobrevivem intactos.
 pub const MICROCOMPACT_KEEP_RECENT: usize = 5;
@@ -31,10 +33,11 @@ pub fn microcompact_messages(messages: &mut [ApiMessage], keep_recent: usize) ->
         }
         for (block_index, block) in message.content.iter().enumerate() {
             if let ContentBlock::ToolResult {
-                content: Some(blocks),
+                content: Some(content),
                 ..
             } = block
             {
+                let blocks = content.blocks();
                 let has_image = blocks
                     .iter()
                     .any(|c| matches!(c, ToolResultContent::Image { .. }));
@@ -62,13 +65,13 @@ pub fn microcompact_messages(messages: &mut [ApiMessage], keep_recent: usize) ->
     let mut cleared = 0;
     for (message_index, block_index) in candidates.into_iter().take(to_clear) {
         if let ContentBlock::ToolResult {
-            content: Some(blocks),
+            content: Some(content),
             ..
         } = &mut messages[message_index].content[block_index]
         {
-            *blocks = vec![ToolResultContent::Text {
+            *content = ToolResultBlockContent::Blocks(vec![ToolResultContent::Text {
                 text: CLEARED_MESSAGE.to_string(),
-            }];
+            }]);
             cleared += 1;
         }
     }
@@ -103,6 +106,7 @@ mod tests {
             else {
                 panic!("tool_result esperado");
             };
+            let blocks = blocks.blocks();
             let ToolResultContent::Text { text } = &blocks[0] else {
                 panic!("texto esperado");
             };

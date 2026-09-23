@@ -15,11 +15,14 @@ pub fn estimate_block_tokens(block: &ContentBlock) -> usize {
     match block {
         ContentBlock::Text { text, .. } => estimate_tokens(text),
         ContentBlock::Image { .. } => 2000, // Fixed estimate for images (matches TS reference)
+        // Documento conta como imagem no CLI (roughTokenCountEstimationForBlock).
+        ContentBlock::Document { .. } => 2000,
         ContentBlock::ToolUse { input, name, .. } => {
             estimate_tokens(name) + estimate_tokens(&input.to_string())
         }
-        ContentBlock::ToolResult { content, .. } => content.as_ref().map_or(0, |blocks| {
-            blocks
+        ContentBlock::ToolResult { content, .. } => content.as_ref().map_or(0, |content| {
+            content
+                .blocks()
                 .iter()
                 .map(|c| match c {
                     crate::api::types::ToolResultContent::Text { text } => estimate_tokens(text),

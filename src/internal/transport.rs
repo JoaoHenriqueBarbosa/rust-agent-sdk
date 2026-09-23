@@ -74,6 +74,32 @@ pub trait Transport: Send + Sync {
         // Default implementation returns None (no messages)
         Ok(None)
     }
+
+    /// Escritor que funciona em paralelo com a leitura.
+    ///
+    /// O `Query` lê o transporte com `&mut self`, então uma tarefa que fica
+    /// lendo mensagens segura o transporte inteiro, e ninguém mais consegue
+    /// mandar `interrupt`, `set_model` ou a próxima mensagem do usuário
+    /// enquanto a leitura espera. O SDK Python não tem esse problema porque lê
+    /// numa tarefa de fundo; aqui o transporte que consegue escrever sem
+    /// disputar a leitura devolve um escritor próprio, e o
+    /// [`crate::ClientHandle`] usa esse escritor. `None` (o default) diz que o
+    /// transporte não oferece isso.
+    fn concurrent_writer(&self) -> Option<std::sync::Arc<dyn TransportWriter>> {
+        None
+    }
+}
+
+/// Escritor concorrente de um transporte (ver
+/// [`Transport::concurrent_writer`]): escreve frames e fecha a entrada sem
+/// precisar de acesso exclusivo ao transporte.
+#[async_trait::async_trait]
+pub trait TransportWriter: Send + Sync {
+    /// Escreve uma ou mais linhas de frames stream-json.
+    async fn write(&self, data: &str) -> Result<()>;
+
+    /// Fecha a entrada (o equivalente a fechar o stdin do CLI).
+    async fn end_input(&self) -> Result<()>;
 }
 
 /// Default buffer size for subprocess stdout reads.

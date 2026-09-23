@@ -214,7 +214,7 @@ impl StreamingToolExecutor {
                     None => ToolResult::error(format!("No such tool: {name_clone}")),
                 };
 
-                // Check if this is a Bash error — cancel siblings
+                // Check if this is a Bash error: cancel siblings
                 if result.is_error && name_clone == "Bash" {
                     *has_errored.lock().await = true;
                     *errored_desc.lock().await = Self::get_tool_description(&name_clone, &input);
@@ -258,7 +258,7 @@ impl StreamingToolExecutor {
                     results.push(update);
                 }
             } else if tool.status == ToolStatus::Executing && !tool.is_concurrency_safe {
-                // Non-concurrent tool still executing — stop yielding in-order
+                // Non-concurrent tool still executing: stop yielding in-order
                 break;
             }
         }
@@ -310,14 +310,11 @@ impl StreamingToolExecutor {
     pub fn build_tool_results_message(results: &[ToolResultUpdate]) -> ApiMessage {
         let content: Vec<ContentBlock> = results
             .iter()
-            .map(|r| {
-                let api_content = r.result.to_api_content();
-                ContentBlock::ToolResult {
-                    tool_use_id: r.tool_use_id.clone(),
-                    content: Some(api_content),
-                    is_error: if r.result.is_error { Some(true) } else { None },
-                    cache_control: None,
-                }
+            .map(|r| ContentBlock::ToolResult {
+                tool_use_id: r.tool_use_id.clone(),
+                content: Some(r.result.to_api_payload().into()),
+                is_error: if r.result.is_error { Some(true) } else { None },
+                cache_control: None,
             })
             .collect();
 
@@ -419,7 +416,7 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert_eq!(results.len(), 2);
-        // Both should run in parallel — total time should be ~50ms not ~100ms
+        // Both should run in parallel: total time should be ~50ms not ~100ms
         assert!(
             elapsed.as_millis() < 90,
             "took {}ms, expected parallel execution",

@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::api::types::{ApiMessage, ContentBlock, Role, ToolResultContent};
+use crate::api::types::{ApiMessage, ContentBlock, Role};
 
 // ---------------------------------------------------------------------------
 // Port: SYNTHETIC_TOOL_RESULT_PLACEHOLDER from ensureToolResultPairing.js
@@ -209,11 +209,9 @@ pub fn normalize_messages_for_api(messages: &[ApiMessage]) -> Vec<ApiMessage> {
                 ..
             } = block
             {
-                for c in content.iter_mut() {
-                    if let ToolResultContent::Text { ref mut text } = c {
-                        if !text.starts_with("<tool_use_error>") {
-                            *text = format!("<tool_use_error>{text}</tool_use_error>");
-                        }
+                for text in content.texts_mut() {
+                    if !text.starts_with("<tool_use_error>") {
+                        *text = format!("<tool_use_error>{text}</tool_use_error>");
                     }
                 }
             }
@@ -349,9 +347,10 @@ pub fn ensure_tool_result_pairing(messages: &mut Vec<ApiMessage>) {
             .iter()
             .map(|id| ContentBlock::ToolResult {
                 tool_use_id: (*id).clone(),
-                content: Some(vec![ToolResultContent::text(
-                    SYNTHETIC_TOOL_RESULT_PLACEHOLDER,
-                )]),
+                // O CLI põe o placeholder como texto cru.
+                content: Some(crate::api::types::ToolResultBlockContent::Text(
+                    SYNTHETIC_TOOL_RESULT_PLACEHOLDER.to_string(),
+                )),
                 is_error: Some(true),
                 cache_control: None,
             })
@@ -463,27 +462,25 @@ fn apply_budget(
                 ..
             } = block
             {
-                for content in content_blocks.iter_mut() {
-                    if let ToolResultContent::Text { ref mut text } = content {
-                        let original_len = text.len();
-                        if original_len <= max_result_chars {
-                            continue;
-                        }
-                        // Já persistido num turno anterior: não mexer (o
-                        // prefixo precisa ser idêntico entre requests).
-                        if text.starts_with(PERSISTED_MARKER) {
-                            continue;
-                        }
-                        if let Some(dir) = dir {
-                            if let Some(replacement) =
-                                persist_to_disk(text, tool_use_id, dir, original_len)
-                            {
-                                *text = replacement;
-                                continue;
-                            }
-                        }
-                        *text = truncate_middle(text, max_result_chars, original_len);
+                for text in content_blocks.texts_mut() {
+                    let original_len = text.len();
+                    if original_len <= max_result_chars {
+                        continue;
                     }
+                    // Já persistido num turno anterior: não mexer (o
+                    // prefixo precisa ser idêntico entre requests).
+                    if text.starts_with(PERSISTED_MARKER) {
+                        continue;
+                    }
+                    if let Some(dir) = dir {
+                        if let Some(replacement) =
+                            persist_to_disk(text, tool_use_id, dir, original_len)
+                        {
+                            *text = replacement;
+                            continue;
+                        }
+                    }
+                    *text = truncate_middle(text, max_result_chars, original_len);
                 }
             }
         }
@@ -718,7 +715,9 @@ mod tests {
             )]),
             ApiMessage::user(vec![ContentBlock::ToolResult {
                 tool_use_id: "t1".to_string(),
-                content: Some(vec![ToolResultContent::text("some error")]),
+                content: Some(crate::api::types::ToolResultBlockContent::Blocks(vec![
+                    ToolResultContent::text("some error"),
+                ])),
                 is_error: Some(true),
                 cache_control: None,
             }]),
@@ -729,7 +728,7 @@ mod tests {
             ..
         } = n[1].content[0]
         {
-            if let ToolResultContent::Text { text } = &c[0] {
+            if let ToolResultContent::Text { text } = &c.blocks()[0] {
                 assert!(text.starts_with("<tool_use_error>"));
                 assert!(text.ends_with("</tool_use_error>"));
             }
@@ -855,7 +854,9 @@ mod tests {
     fn test_apply_tool_result_budget_no_truncation() {
         let mut messages = vec![ApiMessage::user(vec![ContentBlock::ToolResult {
             tool_use_id: "t1".to_string(),
-            content: Some(vec![ToolResultContent::text("short result")]),
+            content: Some(crate::api::types::ToolResultBlockContent::Blocks(vec![
+                ToolResultContent::text("short result"),
+            ])),
             is_error: None,
             cache_control: None,
         }])];
@@ -865,7 +866,7 @@ mod tests {
             ..
         } = messages[0].content[0]
         {
-            if let ToolResultContent::Text { ref text } = c[0] {
+            if let ToolResultContent::Text { ref text } = c.blocks()[0] {
                 assert_eq!(text, "short result");
             }
         }
@@ -876,7 +877,9 @@ mod tests {
         let large_text = "x".repeat(100_000);
         let mut messages = vec![ApiMessage::user(vec![ContentBlock::ToolResult {
             tool_use_id: "t1".to_string(),
-            content: Some(vec![ToolResultContent::text(&large_text)]),
+            content: Some(crate::api::types::ToolResultBlockContent::Blocks(vec![
+                ToolResultContent::text(&large_text),
+            ])),
             is_error: None,
             cache_control: None,
         }])];
@@ -886,7 +889,7 @@ mod tests {
             ..
         } = messages[0].content[0]
         {
-            if let ToolResultContent::Text { ref text } = c[0] {
+            if let ToolResultContent::Text { ref text } = c.blocks()[0] {
                 assert!(text.len() < 100_000);
                 assert!(text.contains("[Result truncated from 100000 to 80000 characters]"));
             }
@@ -983,7 +986,9 @@ mod tests {
     fn tool_result_msg(id: &str, text: String) -> ApiMessage {
         ApiMessage::user(vec![ContentBlock::ToolResult {
             tool_use_id: id.to_string(),
-            content: Some(vec![ToolResultContent::text(text)]),
+            content: Some(crate::api::types::ToolResultBlockContent::Blocks(vec![
+                ToolResultContent::text(text),
+            ])),
             is_error: None,
             cache_control: None,
         }])
@@ -994,7 +999,7 @@ mod tests {
             ContentBlock::ToolResult {
                 content: Some(blocks),
                 ..
-            } => match &blocks[0] {
+            } => match &blocks.blocks()[0] {
                 ToolResultContent::Text { text } => text.clone(),
                 _ => panic!("texto esperado"),
             },

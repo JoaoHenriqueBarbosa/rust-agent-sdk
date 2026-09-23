@@ -3,6 +3,7 @@ pub mod errors;
 pub mod internal;
 pub mod query;
 pub mod sdk_mcp;
+pub mod testing;
 pub mod types;
 
 /// Optional session-store backends, each gated behind a Cargo feature.
@@ -10,22 +11,22 @@ pub mod types;
 pub mod stores;
 
 // Re-exports for convenience
-pub use client::ClaudeSDKClient;
+pub use client::{ClaudeSDKClient, ClientHandle};
 pub use errors::ClaudeSDKError;
 pub use internal::framer::JsonLineFramer;
 pub use internal::message_parser::parse_message;
 pub use internal::session_import::import_session_to_store;
 pub use internal::session_mutations::{
     delete_session, delete_session_via_store, fork_session, fork_session_via_store, rename_session,
-    rename_session_via_store, tag_session, tag_session_via_store,
+    rename_session_via_store, rename_session_with_env, tag_session, tag_session_via_store,
 };
 pub use internal::session_store::InMemorySessionStore;
 pub use internal::session_summary::{fold_session_summary, summary_entry_to_sdk_info};
 pub use internal::sessions::{
     get_projects_dir, get_session_info, get_session_info_from_store, get_session_messages,
     get_session_messages_from_store, get_subagent_messages, get_subagent_messages_from_store,
-    list_sessions, list_sessions_from_store, list_subagents, list_subagents_from_store,
-    project_key_for_directory,
+    list_sessions, list_sessions_from_store, list_sessions_with_env, list_subagents,
+    list_subagents_from_store, project_key_for_directory,
 };
 pub use internal::task::{spawn_detached, TaskHandle};
 pub use internal::transport::{SubprocessCLITransport, Transport, DEFAULT_MAX_BUFFER_SIZE};
@@ -46,6 +47,7 @@ pub mod agentic;
 pub mod api;
 pub mod compact;
 pub mod mcp;
+pub mod memory;
 pub mod messages;
 pub mod native;
 pub mod session;

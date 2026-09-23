@@ -24,6 +24,25 @@ pub enum StreamUpdate {
     ContentBlockComplete { index: usize, block: ContentBlock },
     /// The message is complete with stop reason and usage.
     MessageComplete { message: AssistantMessage },
+    /// O evento SSE cru, como a API mandou (a ordem das chaves é preservada
+    /// quando o `serde_json` tem `preserve_order`). Vem DEPOIS do update que o
+    /// mesmo evento produziu, como no `queryModel` do CLI, que primeiro trata
+    /// o evento (e entrega a mensagem do bloco no `content_block_stop`) e só
+    /// então repassa o `stream_event`.
+    RawEvent { event: serde_json::Value },
+    /// A resposta HTTP abriu: o `request-id` que a API devolveu no header,
+    /// quando devolveu (o CLI grava como `requestId` nas entradas do
+    /// assistente).
+    ResponseStarted { request_id: Option<String> },
+    /// O stream quebrou e a MESMA chamada vai ser repetida sem streaming (o
+    /// `onStreamingFallback` do `queryModel` do CLI). Tudo que o stream já
+    /// entregou (blocos completos, `tool_use` visto) fica órfão: o consumidor
+    /// descarta esse estado e espera o `MessageComplete` da não-streaming,
+    /// como o `query` do CLI faz ao trocar as mensagens órfãs por tombstone.
+    NonStreamingFallback {
+        /// Por que o stream foi abandonado (mensagem do erro que o quebrou).
+        cause: String,
+    },
 }
 
 /// A complete assistant message accumulated from streaming events.
@@ -136,6 +155,10 @@ pub struct StreamAccumulator {
     message_id: String,
     model: String,
     finalized_blocks: Vec<ContentBlock>,
+    /// Chegou `message_start`.
+    message_started: bool,
+    /// Chegou `message_stop` (o `MessageComplete` já saiu).
+    message_stopped: bool,
 }
 
 impl Default for StreamAccumulator {
@@ -153,13 +176,42 @@ impl StreamAccumulator {
             message_id: String::new(),
             model: String::new(),
             finalized_blocks: Vec::new(),
+            message_started: false,
+            message_stopped: false,
         }
+    }
+
+    /// Fecha um stream que terminou LIMPO (a conexão acabou sem erro), com a
+    /// regra do `queryModel` do CLI:
+    ///
+    /// - sem `message_start`, ou com `message_start` mas sem nenhum bloco
+    ///   completo e sem `stop_reason`, é erro ("Stream ended without receiving
+    ///   any events"), que dispara o fallback sem streaming;
+    /// - com blocos completos ou `stop_reason` mas sem `message_stop`, o CLI
+    ///   segue com o que chegou; aqui isso vira o `MessageComplete` que o
+    ///   `message_stop` teria produzido;
+    /// - com `message_stop`, não há nada a fazer.
+    pub fn end_of_stream(&mut self) -> Result<Option<StreamUpdate>> {
+        if self.message_stopped {
+            return Ok(None);
+        }
+        if !self.message_started || (self.finalized_blocks.is_empty() && self.stop_reason.is_none())
+        {
+            return Err(ClaudeSDKError::sdk(
+                "Stream ended without receiving any events",
+            ));
+        }
+        self.message_stopped = true;
+        Ok(Some(StreamUpdate::MessageComplete {
+            message: self.build_message(),
+        }))
     }
 
     /// Process a single streaming event, returning an optional update.
     pub fn process_event(&mut self, event: StreamEvent) -> Result<Option<StreamUpdate>> {
         match event {
             StreamEvent::MessageStart { message } => {
+                self.message_started = true;
                 self.message_id = message.id;
                 self.model = message.model;
                 if let Some(u) = message.usage {
@@ -328,11 +380,12 @@ impl StreamAccumulator {
             }
 
             StreamEvent::MessageStop => {
+                self.message_stopped = true;
                 let msg = self.build_message();
                 Ok(Some(StreamUpdate::MessageComplete { message: msg }))
             }
 
-            StreamEvent::Ping => Ok(None),
+            StreamEvent::Ping | StreamEvent::Unknown => Ok(None),
 
             StreamEvent::Error { error } => Err(ClaudeSDKError::sdk(format!(
                 "API stream error: {} - {}",

@@ -92,14 +92,38 @@ impl QueryUsage {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum AgenticEvent {
+    /// Uma mensagem de assistente do CLI: UM bloco de conteúdo por mensagem,
+    /// entregue no `content_block_stop` (o `queryModel` do CLI faz assim). O
+    /// `message` é o objeto do `message_start` cru da API com o `content`
+    /// trocado pelo bloco, então `stop_reason` vem nulo e o `usage` é o do
+    /// início (o `message_delta` ainda não chegou).
     #[serde(rename = "assistant")]
     Assistant {
-        /// Nested message object matching TS SDK shape:
-        /// { id, role, model, content, stop_reason, usage, type: "message" }
         message: serde_json::Value,
         parent_tool_use_id: Option<String>,
         uuid: String,
         session_id: String,
+        /// Momento em que a mensagem nasceu (ISO 8601, como o CLI grava).
+        #[serde(skip)]
+        timestamp: String,
+        /// O `request-id` da resposta HTTP, quando a API mandou.
+        #[serde(skip)]
+        request_id: Option<String>,
+        /// Categoria do erro de API (`authentication_failed`,
+        /// `rate_limit`, `invalid_request`, `unknown`, ...), só nas
+        /// mensagens sintetizadas a partir de um erro.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        /// Mensagem sintetizada pela camada de API (`isApiErrorMessage`).
+        #[serde(skip)]
+        is_api_error: bool,
+        /// O `apiError` interno (`max_output_tokens`, `prompt_too_long`).
+        #[serde(skip)]
+        api_error: Option<String>,
+        /// Mensagem retida pelo loop (o `withheld` do CLI): não vira frame
+        /// nem entrada de transcript por enquanto.
+        #[serde(skip)]
+        withheld: bool,
     },
 
     #[serde(rename = "user")]
@@ -108,11 +132,38 @@ pub enum AgenticEvent {
         parent_tool_use_id: Option<String>,
         uuid: String,
         session_id: String,
+        #[serde(skip)]
+        timestamp: String,
+        /// O `data` estruturado da tool que produziu este resultado (o
+        /// `toolUseResult` do CLI).
+        #[serde(skip)]
+        tool_use_result: Option<serde_json::Value>,
+        /// O uuid da mensagem de assistente que pediu a tool (o
+        /// `sourceToolAssistantUUID` do CLI), que encadeia o transcript.
+        #[serde(skip)]
+        source_tool_assistant_uuid: Option<String>,
+        /// Mensagem meta (`isMeta`): conteúdo para o modelo que o usuário
+        /// não escreveu (documento de um Read, aviso de interrupção...).
+        #[serde(skip)]
+        is_meta: bool,
     },
 
+    /// Evento INTERNO (o transporte não o repassa ao cliente): o
+    /// `message_delta` chegou para a resposta `message_id`, cujos blocos já
+    /// saíram um a um. No CLI o `message_delta` muda o `stop_reason` e o
+    /// `usage` (já passado pelo `updateUsage`) do ÚLTIMO bloco entregue, e é
+    /// com esses valores que ele chega ao transcript, gravado depois.
+    #[serde(rename = "assistant_final")]
+    AssistantFinal {
+        message_id: String,
+        stop_reason: Option<String>,
+        usage: serde_json::Value,
+    },
+
+    /// O evento SSE cru da API (`message_start`, `content_block_delta`, ...).
     #[serde(rename = "stream_event")]
     StreamEvent {
-        event: StreamUpdate,
+        event: serde_json::Value,
         parent_tool_use_id: Option<String>,
         uuid: String,
         session_id: String,
@@ -181,6 +232,155 @@ pub struct AgenticLoopOptions {
     /// Fired when the loop rewrites history in place (micro/auto/reactive
     /// compaction) so the caller can keep its own copy in sync.
     pub on_history_rewrite: Option<HistoryRewriteFn>,
+    /// O contexto de usuário (`getUserContext`): a mensagem meta com o
+    /// `<system-reminder>` que `prependUserContext` põe na frente das
+    /// mensagens de CADA chamada ao modelo, sem nunca entrar no histórico.
+    /// O valor é lido uma vez no início da consulta, como o parâmetro
+    /// `userContext` do `query()` do CLI.
+    pub user_context: Option<Arc<crate::memory::UserContextCache>>,
+    /// Limpa o cache do contexto de usuário depois de uma compactação
+    /// completa (`runPostCompactCleanup`, só na conversa principal: um
+    /// subagente compactando não mexe no cache da sessão).
+    pub clear_user_context_on_compact: bool,
+    /// O começo do `system` que a camada de API do CLI acrescenta
+    /// (`getAttributionHeader` + `getCLISyspromptPrefix`). `None` manda só
+    /// o `system_prompt`.
+    pub system_prefix: Option<SystemPrefix>,
+    /// Os campos do frame `system`/`init` que o loop não conhece por conta
+    /// própria (servidores MCP, agentes, fonte da chave...).
+    pub init_info: InitInfo,
+}
+
+/// Versão do CLI de referência que o transporte nativo espelha: vai no
+/// `claude_code_version` do frame `init` e no `cc_version` do cabeçalho de
+/// atribuição, como o CLI 2.1.90 faria.
+pub const CLAUDE_CODE_REFERENCE_VERSION: &str = "2.1.90";
+
+/// `FINGERPRINT_SALT` de `utils/fingerprint.js`.
+const FINGERPRINT_SALT: &str = "59cf53e54c78";
+
+/// Prefixo de identidade do SDK sem `append` (`AGENT_SDK_PREFIX`).
+pub const AGENT_SDK_PREFIX: &str = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
+
+/// Prefixo de identidade do SDK com `append` (`AGENT_SDK_CLAUDE_CODE_PRESET_PREFIX`).
+pub const AGENT_SDK_CLAUDE_CODE_PRESET_PREFIX: &str =
+    "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.";
+
+/// Os dois primeiros blocos do `system` que `services/api/claude` monta.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemPrefix {
+    /// `getCLISyspromptPrefix`: [`AGENT_SDK_PREFIX`] ou
+    /// [`AGENT_SDK_CLAUDE_CODE_PRESET_PREFIX`].
+    pub identity: String,
+    /// O `cc_entrypoint` do cabeçalho de atribuição; `None` desliga o
+    /// cabeçalho (`CLAUDE_CODE_ATTRIBUTION_HEADER` falso).
+    pub attribution_entrypoint: Option<String>,
+}
+
+impl SystemPrefix {
+    /// `getAttributionHeader(computeFingerprintFromMessages(messages))`.
+    pub fn attribution_header(&self, messages: &[ApiMessage]) -> Option<String> {
+        let entrypoint = self.attribution_entrypoint.as_ref()?;
+        let fingerprint = compute_fingerprint(&first_user_text(messages));
+        Some(format!(
+            "x-anthropic-billing-header: cc_version={CLAUDE_CODE_REFERENCE_VERSION}.{fingerprint}; cc_entrypoint={entrypoint};"
+        ))
+    }
+}
+
+/// `extractFirstMessageText`: o texto da primeira mensagem de usuário (string
+/// ou primeiro bloco de texto).
+fn first_user_text(messages: &[ApiMessage]) -> String {
+    let Some(first) = messages.iter().find(|m| m.role == Role::User) else {
+        return String::new();
+    };
+    first
+        .content
+        .iter()
+        .find_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// `computeFingerprint`: as unidades UTF-16 nas posições 4, 7 e 20 (ou `0`)
+/// com sal e versão, sha256, 3 primeiros hex. Unidade de surrogate solta vira
+/// U+FFFD, que é o que o `update` do Node grava para ela em UTF-8.
+fn compute_fingerprint(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let chars: String = [4usize, 7, 20]
+        .iter()
+        .map(|&i| match units.get(i) {
+            None => '0',
+            Some(&unit) => char::from_u32(u32::from(unit)).unwrap_or('\u{FFFD}'),
+        })
+        .collect();
+    let digest = Sha256::digest(
+        format!("{FINGERPRINT_SALT}{chars}{CLAUDE_CODE_REFERENCE_VERSION}").as_bytes(),
+    );
+    digest
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
+        .chars()
+        .take(3)
+        .collect()
+}
+
+/// O que o frame `system`/`init` (`buildSystemInitMessage`) leva além do que
+/// o loop já sabe (cwd, tools, modelo, modo de permissão).
+#[derive(Debug, Clone, PartialEq)]
+pub struct InitInfo {
+    /// `[{name, status}]` dos servidores MCP.
+    pub mcp_servers: Vec<serde_json::Value>,
+    pub slash_commands: Vec<String>,
+    /// `getAnthropicApiKeyWithSource().source`.
+    pub api_key_source: String,
+    /// `getSdkBetas()`: ausente do frame quando `None`.
+    pub betas: Option<Vec<String>>,
+    pub output_style: String,
+    /// Os `agentType` disponíveis para a tool de agente.
+    pub agents: Vec<String>,
+    pub skills: Vec<String>,
+    /// `[{name, path, source}]`.
+    pub plugins: Vec<serde_json::Value>,
+    /// `getFastModeState`: `on`, `off` ou `cooldown`.
+    pub fast_mode_state: String,
+}
+
+impl Default for InitInfo {
+    fn default() -> Self {
+        Self {
+            mcp_servers: Vec::new(),
+            slash_commands: Vec::new(),
+            api_key_source: "none".to_string(),
+            betas: None,
+            output_style: "default".to_string(),
+            agents: Vec::new(),
+            skills: Vec::new(),
+            plugins: Vec::new(),
+            fast_mode_state: "off".to_string(),
+        }
+    }
+}
+
+/// `sdkCompatToolName`: a tool de agente aparece no `init` com o nome antigo
+/// (`Task`), sem repetir quando as duas grafias estão registradas.
+fn init_tool_names(names: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for name in names {
+        let compat = if *name == crate::tools::agent::AGENT_TOOL_NAME {
+            "Task"
+        } else {
+            name
+        };
+        if !out.iter().any(|n| n == compat) {
+            out.push(compat.to_string());
+        }
+    }
+    out
 }
 
 impl std::fmt::Debug for AgenticLoopOptions {
@@ -215,6 +415,10 @@ impl Default for AgenticLoopOptions {
             session_id: None,
             pre_compact_hook: None,
             on_history_rewrite: None,
+            user_context: None,
+            clear_user_context_on_compact: false,
+            system_prefix: None,
+            init_info: InitInfo::default(),
         }
     }
 }
@@ -273,7 +477,7 @@ const MANUAL_COMPACT_BUFFER_TOKENS: usize = 3_000;
 
 // Port: compact boundary marker — inserted as a user message after compaction
 // so that getMessagesAfterCompactBoundary can slice pre-compaction messages.
-const COMPACT_BOUNDARY_MARKER: &str = "[COMPACT_BOUNDARY]";
+pub(crate) const COMPACT_BOUNDARY_MARKER: &str = "[COMPACT_BOUNDARY]";
 
 /// Port of isPromptTooLongMessage from query.ts
 /// Checks if the assistant response text indicates a prompt-too-long error
@@ -339,6 +543,26 @@ fn new_uuid() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// O `timestamp` das mensagens, no formato que o CLI grava
+/// (`new Date().toISOString()`: UTC com milissegundos e `Z`).
+fn now_timestamp() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// Mensagem de usuário sintetizada pelo loop (sem tool que a produziu).
+fn user_event(message: ApiMessage, session_id: &str) -> AgenticEvent {
+    AgenticEvent::User {
+        message,
+        parent_tool_use_id: None,
+        uuid: new_uuid(),
+        session_id: session_id.to_string(),
+        timestamp: now_timestamp(),
+        tool_use_result: None,
+        source_tool_assistant_uuid: None,
+        is_meta: false,
+    }
+}
+
 /// Serialize per-model usage map to a JSON Value, or None if empty.
 fn serialize_model_usage(model_usage: &HashMap<String, QueryUsage>) -> Option<serde_json::Value> {
     if model_usage.is_empty() {
@@ -365,6 +589,12 @@ fn assistant_event(msg: &AssistantMessage, session_id: &str) -> AgenticEvent {
         parent_tool_use_id: None,
         uuid: new_uuid(),
         session_id: session_id.to_string(),
+        timestamp: now_timestamp(),
+        request_id: None,
+        error: None,
+        is_api_error: msg.api_error.is_some(),
+        api_error: msg.api_error.clone(),
+        withheld: false,
     }
 }
 
@@ -411,27 +641,276 @@ fn is_at_blocking_limit(token_count: usize, context_window: usize) -> bool {
     token_count >= blocking_limit
 }
 
-/// Port of yieldMissingToolResultBlocks from query.ts
-/// Creates error tool_result messages for all tool_use blocks in assistant messages
-/// that don't have a matching result yet.
+/// Port of yieldMissingToolResultBlocks from query.ts: um `tool_result` de
+/// erro para cada `tool_use` já entregue nesta iteração, com o
+/// `toolUseResult` (a mensagem de erro) e o `sourceToolAssistantUUID` do
+/// bloco que pediu a tool, como o `createUserMessage` do JS.
 fn yield_missing_tool_result_blocks(
-    assistant_messages: &[AssistantMessage],
+    tool_sources: &[(String, String)],
     error_message: &str,
-) -> Vec<ApiMessage> {
-    let mut result_messages = Vec::new();
-    for assistant_msg in assistant_messages {
-        for block in &assistant_msg.content {
-            if let ContentBlock::ToolUse { id, .. } = block {
-                result_messages.push(ApiMessage::user(vec![ContentBlock::ToolResult {
-                    tool_use_id: id.clone(),
-                    content: Some(vec![ToolResultContent::text(error_message)]),
-                    is_error: Some(true),
-                    cache_control: None,
-                }]));
+    session_id: &str,
+) -> Vec<AgenticEvent> {
+    tool_sources
+        .iter()
+        .map(|(tool_use_id, source_uuid)| AgenticEvent::User {
+            message: ApiMessage::user(vec![ContentBlock::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                // O JS devolve estes erros com o `content` em string.
+                content: Some(crate::api::types::ToolResultBlockContent::Text(
+                    error_message.to_string(),
+                )),
+                is_error: Some(true),
+                cache_control: None,
+            }]),
+            parent_tool_use_id: None,
+            uuid: new_uuid(),
+            session_id: session_id.to_string(),
+            timestamp: now_timestamp(),
+            tool_use_result: Some(serde_json::Value::String(error_message.to_string())),
+            source_tool_assistant_uuid: Some(source_uuid.clone()),
+            is_meta: false,
+        })
+        .collect()
+}
+
+/// O `EMPTY_USAGE` do CLI (`services/api/emptyUsage.js`).
+fn empty_usage() -> serde_json::Value {
+    serde_json::json!({
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 0,
+        "server_tool_use": {"web_search_requests": 0, "web_fetch_requests": 0},
+        "service_tier": "standard",
+        "cache_creation": {"ephemeral_1h_input_tokens": 0, "ephemeral_5m_input_tokens": 0},
+        "inference_geo": "",
+        "iterations": [],
+        "speed": "standard",
+    })
+}
+
+/// Port de `updateUsage` (`services/api/claude/updateUsage.js`): os tokens
+/// de entrada só trocam quando a parte traz um valor positivo; o resto vem
+/// da parte quando ela tem, senão fica o acumulado.
+fn update_usage(usage: &serde_json::Value, part: Option<&serde_json::Value>) -> serde_json::Value {
+    use serde_json::Value;
+    let Some(part) = part.filter(|p| p.is_object()) else {
+        return usage.clone();
+    };
+    let positive_or = |key: &str| -> Value {
+        match part.get(key) {
+            Some(v) if v.as_f64().is_some_and(|n| n > 0.0) => v.clone(),
+            _ => usage.get(key).cloned().unwrap_or(Value::Null),
+        }
+    };
+    let nullish_or = |p: Option<&Value>, u: Option<&Value>| -> Value {
+        match p {
+            Some(v) if !v.is_null() => v.clone(),
+            _ => u.cloned().unwrap_or(Value::Null),
+        }
+    };
+    serde_json::json!({
+        "input_tokens": positive_or("input_tokens"),
+        "cache_creation_input_tokens": positive_or("cache_creation_input_tokens"),
+        "cache_read_input_tokens": positive_or("cache_read_input_tokens"),
+        "output_tokens": nullish_or(part.get("output_tokens"), usage.get("output_tokens")),
+        "server_tool_use": {
+            "web_search_requests": nullish_or(
+                part.pointer("/server_tool_use/web_search_requests"),
+                usage.pointer("/server_tool_use/web_search_requests"),
+            ),
+            "web_fetch_requests": nullish_or(
+                part.pointer("/server_tool_use/web_fetch_requests"),
+                usage.pointer("/server_tool_use/web_fetch_requests"),
+            ),
+        },
+        "service_tier": usage.get("service_tier").cloned().unwrap_or(Value::Null),
+        "cache_creation": {
+            "ephemeral_1h_input_tokens": nullish_or(
+                part.pointer("/cache_creation/ephemeral_1h_input_tokens"),
+                usage.pointer("/cache_creation/ephemeral_1h_input_tokens"),
+            ),
+            "ephemeral_5m_input_tokens": nullish_or(
+                part.pointer("/cache_creation/ephemeral_5m_input_tokens"),
+                usage.pointer("/cache_creation/ephemeral_5m_input_tokens"),
+            ),
+        },
+        "inference_geo": usage.get("inference_geo").cloned().unwrap_or(Value::Null),
+        "iterations": nullish_or(part.get("iterations"), usage.get("iterations")),
+        "speed": nullish_or(part.get("speed"), usage.get("speed")),
+    })
+}
+
+/// A entrega por bloco do `queryModel` do CLI: cada `content_block_stop` vira
+/// uma mensagem de assistente com o objeto do `message_start` e o `content`
+/// trocado pelo bloco (mesmo `message.id` em todas), e o `message_delta`
+/// fecha a resposta com `stop_reason` e `usage` finais.
+#[derive(Default)]
+struct BlockEmitter {
+    /// O `request-id` da resposta HTTP em curso.
+    request_id: Option<String>,
+    /// O `message` cru do `message_start` da resposta em curso.
+    partial_message: Option<serde_json::Value>,
+    /// O `usage` acumulado pelo `updateUsage` (começa no `EMPTY_USAGE`).
+    usage: serde_json::Value,
+    stop_reason: Option<String>,
+    /// Blocos já entregues da resposta em curso.
+    emitted: usize,
+    /// `(tool_use.id, uuid do bloco)` de cada `tool_use` entregue na
+    /// iteração: o `sourceToolAssistantUUID` dos resultados.
+    tool_sources: Vec<(String, String)>,
+}
+
+impl BlockEmitter {
+    /// Uma resposta HTTP nova (ou um retry): o estado da resposta zera, os
+    /// `tool_use` já entregues na iteração continuam.
+    fn start_response(&mut self, request_id: Option<String>) {
+        self.request_id = request_id;
+        self.partial_message = None;
+        self.usage = empty_usage();
+        self.stop_reason = None;
+        self.emitted = 0;
+    }
+
+    /// Acompanha o evento SSE cru (`message_start` e `message_delta`).
+    fn observe(&mut self, event: &serde_json::Value) {
+        match event.get("type").and_then(serde_json::Value::as_str) {
+            Some("message_start") => {
+                let message = event.get("message").cloned().unwrap_or_default();
+                self.usage = update_usage(&empty_usage(), message.get("usage"));
+                self.partial_message = Some(message);
+                self.emitted = 0;
             }
+            Some("message_delta") => {
+                self.usage = update_usage(&self.usage, event.get("usage"));
+                self.stop_reason = event
+                    .pointer("/delta/stop_reason")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+            }
+            _ => {}
         }
     }
-    result_messages
+
+    fn message_id(&self) -> Option<String> {
+        self.partial_message
+            .as_ref()
+            .and_then(|m| m.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    }
+
+    /// A mensagem de um bloco que acabou de fechar (`content_block_stop`).
+    fn block_event(&mut self, block: &ContentBlock, model: &str, session_id: &str) -> AgenticEvent {
+        let block_json = serde_json::to_value(block).unwrap_or_default();
+        let mut message = match self.partial_message.clone() {
+            Some(serde_json::Value::Object(m)) => m,
+            _ => {
+                let mut m = serde_json::Map::new();
+                m.insert("id".into(), serde_json::json!(new_uuid()));
+                m.insert("type".into(), serde_json::json!("message"));
+                m.insert("role".into(), serde_json::json!("assistant"));
+                m.insert("model".into(), serde_json::json!(model));
+                m.insert("content".into(), serde_json::json!([]));
+                m.insert("stop_reason".into(), serde_json::Value::Null);
+                m.insert("stop_sequence".into(), serde_json::Value::Null);
+                m.insert("usage".into(), empty_usage());
+                self.partial_message = Some(serde_json::Value::Object(m.clone()));
+                m
+            }
+        };
+        message.insert("content".into(), serde_json::json!([block_json]));
+        let uuid = new_uuid();
+        if let ContentBlock::ToolUse { id, .. } = block {
+            self.tool_sources.push((id.clone(), uuid.clone()));
+        }
+        self.emitted += 1;
+        AgenticEvent::Assistant {
+            message: serde_json::Value::Object(message),
+            parent_tool_use_id: None,
+            uuid,
+            session_id: session_id.to_string(),
+            timestamp: now_timestamp(),
+            request_id: self.request_id.clone(),
+            error: None,
+            is_api_error: false,
+            api_error: None,
+            withheld: false,
+        }
+    }
+
+    /// O fechamento da resposta cujos blocos já saíram; `None` quando nenhum
+    /// bloco saiu por aqui (resposta não streamada ou sintetizada).
+    fn final_event(&self) -> Option<AgenticEvent> {
+        if self.emitted == 0 {
+            return None;
+        }
+        Some(AgenticEvent::AssistantFinal {
+            message_id: self.message_id()?,
+            stop_reason: self.stop_reason.clone(),
+            usage: self.usage.clone(),
+        })
+    }
+
+    /// Uma resposta inteira que não passou pela entrega por bloco (o
+    /// fallback não streamado): sai numa mensagem só, como o CLI a grava.
+    fn whole_message_event(&mut self, msg: &AssistantMessage, session_id: &str) -> AgenticEvent {
+        let mut event = assistant_event(msg, session_id);
+        if let AgenticEvent::Assistant {
+            uuid, request_id, ..
+        } = &mut event
+        {
+            *request_id = self.request_id.clone();
+            for block in &msg.content {
+                if let ContentBlock::ToolUse { id, .. } = block {
+                    self.tool_sources.push((id.clone(), uuid.clone()));
+                }
+            }
+        }
+        event
+    }
+
+    /// O `sourceToolAssistantUUID` de um `tool_use`.
+    fn source_of(&self, tool_use_id: &str) -> Option<String> {
+        self.tool_sources
+            .iter()
+            .find(|(id, _)| id == tool_use_id)
+            .map(|(_, uuid)| uuid.clone())
+    }
+}
+
+/// O `createAssistantAPIErrorMessage` que o `queryModel` do CLI entrega
+/// quando a resposta para em `max_tokens`: o loop o retém enquanto tenta
+/// recuperar e só o entrega quando a recuperação se esgota.
+fn max_output_tokens_error_event(max_output_tokens: u32, session_id: &str) -> AgenticEvent {
+    let synthetic = crate::internal::transcript_load::synthetic_assistant_message(
+        &format!(
+            "API Error: Claude's response exceeded the {max_output_tokens} output token maximum. \
+             To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable."
+        ),
+        Some("max_output_tokens"),
+        Some("max_output_tokens"),
+    );
+    AgenticEvent::Assistant {
+        message: synthetic.get("message").cloned().unwrap_or_default(),
+        parent_tool_use_id: None,
+        uuid: synthetic
+            .get("uuid")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(new_uuid),
+        session_id: session_id.to_string(),
+        timestamp: synthetic
+            .get("timestamp")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(now_timestamp),
+        request_id: None,
+        error: Some("max_output_tokens".to_string()),
+        is_api_error: true,
+        api_error: Some("max_output_tokens".to_string()),
+        withheld: false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -484,16 +963,30 @@ impl AgenticLoop {
         messages: &[ApiMessage],
         max_tokens_override: Option<u32>,
         model: &str,
+        user_context: Option<&ApiMessage>,
     ) -> CreateMessageRequest {
         let tool_definitions = self.tool_executor.registry.api_definitions();
+        // `prependUserContext` acontece antes do `normalizeMessagesForAPI` da
+        // camada de API: a mensagem meta se funde com o primeiro turno do
+        // usuário, e só existe no corpo que sai.
+        let messages: Vec<ApiMessage> = match user_context {
+            Some(context) => {
+                let mut with_context = Vec::with_capacity(messages.len() + 1);
+                with_context.push(context.clone());
+                with_context.extend_from_slice(messages);
+                normalize_messages_for_api(&with_context)
+            }
+            None => messages.to_vec(),
+        };
+        let system = self.system_blocks(&messages);
         CreateMessageRequest {
             model: model.to_string(),
             max_tokens: max_tokens_override.unwrap_or(self.options.max_tokens),
-            messages: messages.to_vec(),
-            system: if self.options.system_prompt.is_empty() {
+            messages,
+            system: if system.is_empty() {
                 None
             } else {
-                Some(self.options.system_prompt.clone())
+                Some(system)
             },
             tools: if tool_definitions.is_empty() {
                 None
@@ -509,6 +1002,87 @@ impl AgenticLoop {
             top_k: None,
             thinking: self.options.thinking.clone(),
         }
+    }
+
+    /// `runPostCompactCleanup`: na conversa principal, a compactação esquece o
+    /// contexto de usuário memoizado, e a próxima consulta relê as memórias.
+    fn post_compact_cleanup(&self) {
+        if self.options.clear_user_context_on_compact {
+            if let Some(cache) = &self.options.user_context {
+                cache.clear();
+            }
+        }
+    }
+
+    /// Os campos do frame `init` na ordem de `buildSystemInitMessage`
+    /// (`session_id` e `uuid` são do envelope do evento).
+    fn init_data(&self, model: &str) -> serde_json::Value {
+        let info = &self.options.init_info;
+        let mut data = serde_json::Map::new();
+        data.insert(
+            "cwd".into(),
+            self.tool_executor
+                .context
+                .working_directory
+                .display()
+                .to_string()
+                .into(),
+        );
+        data.insert(
+            "tools".into(),
+            serde_json::json!(init_tool_names(&self.tool_executor.registry.names())),
+        );
+        data.insert("mcp_servers".into(), serde_json::json!(info.mcp_servers));
+        data.insert("model".into(), model.into());
+        data.insert(
+            "permissionMode".into(),
+            serde_json::to_value(self.tool_executor.context.mode())
+                .unwrap_or(serde_json::Value::Null),
+        );
+        data.insert(
+            "slash_commands".into(),
+            serde_json::json!(info.slash_commands),
+        );
+        data.insert("apiKeySource".into(), info.api_key_source.clone().into());
+        if let Some(betas) = &info.betas {
+            data.insert("betas".into(), serde_json::json!(betas));
+        }
+        data.insert(
+            "claude_code_version".into(),
+            CLAUDE_CODE_REFERENCE_VERSION.into(),
+        );
+        data.insert("output_style".into(), info.output_style.clone().into());
+        data.insert("agents".into(), serde_json::json!(info.agents));
+        data.insert("skills".into(), serde_json::json!(info.skills));
+        data.insert("plugins".into(), serde_json::json!(info.plugins));
+        data.insert(
+            "fast_mode_state".into(),
+            info.fast_mode_state.clone().into(),
+        );
+        serde_json::Value::Object(data)
+    }
+
+    /// O `system` que sai: cabeçalho de atribuição e prefixo de identidade
+    /// (quando configurados) seguidos do prompt, como o
+    /// `services/api/claude` do CLI monta (`filter(Boolean)` tira os vazios).
+    fn system_blocks(&self, messages: &[ApiMessage]) -> Vec<SystemBlock> {
+        let mut blocks = Vec::new();
+        if let Some(prefix) = &self.options.system_prefix {
+            if let Some(header) = prefix.attribution_header(messages) {
+                blocks.push(SystemBlock::text(header));
+            }
+            if !prefix.identity.is_empty() {
+                blocks.push(SystemBlock::text(prefix.identity.clone()));
+            }
+        }
+        blocks.extend(
+            self.options
+                .system_prompt
+                .iter()
+                .filter(|b| !b.text.is_empty())
+                .cloned(),
+        );
+        blocks
     }
 
     fn sys_text(&self) -> String {
@@ -546,15 +1120,19 @@ impl AgenticLoop {
                 usage_anchor: None,
             };
 
-            // Yield system init
+            // O contexto de usuário é lido UMA vez por consulta (o parâmetro
+            // `userContext` do `query()`): uma compactação no meio limpa o
+            // cache para a próxima consulta, mas esta segue com o valor lido.
+            let user_context_message: Option<ApiMessage> = self
+                .options
+                .user_context
+                .as_ref()
+                .and_then(|cache| cache.message());
+
+            // `buildSystemInitMessage`, uma vez por consulta.
             yield Ok(AgenticEvent::System {
                 subtype: "init".to_string(),
-                data: serde_json::json!({
-                    "model": current_model,
-                    "tools": self.tool_executor.registry.names(),
-                    "cwd": self.tool_executor.context.working_directory.display().to_string(),
-                    "permissionMode": format!("{:?}", self.tool_executor.context.permission_mode),
-                }),
+                data: self.init_data(&current_model),
                 uuid: new_uuid(),
                 session_id: sid.clone(),
             });
@@ -652,6 +1230,7 @@ impl AgenticLoop {
                             messages_for_query = compacted;
                             // Port: insert compact boundary as first message after compaction
                             insert_compact_boundary(&mut messages_for_query);
+                            self.post_compact_cleanup();
                             self.auto_compact.record_success();
                             compaction_happened = true;
                             state.usage_anchor = None;
@@ -765,6 +1344,9 @@ impl AgenticLoop {
                 let mut tool_results: Vec<ApiMessage> = Vec::new();
                 let mut tool_use_blocks: Vec<ToolUseBlock> = Vec::new();
                 let mut needs_follow_up = false;
+                // A entrega por bloco desta iteração (o `assistantMessages`
+                // do JS guarda as mensagens por bloco; aqui ficam os uuids).
+                let mut blocks = BlockEmitter::default();
 
                 // Variables that survive the fallback loop
                 let mut final_assistant: Option<AssistantMessage> = None;
@@ -774,11 +1356,9 @@ impl AgenticLoop {
                 // Port: let attemptWithFallback = true;
                 //       while (attemptWithFallback) { attemptWithFallback = false; try { ... } }
                 let mut attempt_with_fallback = true;
-                // Erro no MEIO do stream (conexão caindo, gateway instável)
-                // re-tenta a chamada inteira em vez de perder o turno — um
-                // tool_use quase completo descartado custa um turno de LLM.
-                let mut stream_retries = 0u32;
-                const MAX_STREAM_RETRIES: u32 = 3;
+                // O `max_tokens` do request, para a mensagem de erro de
+                // `max_output_tokens` do CLI.
+                let mut request_max_tokens = 0u32;
 
                 while attempt_with_fallback {
                     attempt_with_fallback = false;
@@ -787,7 +1367,9 @@ impl AgenticLoop {
                         &messages_for_query,
                         state.max_output_tokens_override,
                         &current_model,
+                        user_context_message.as_ref(),
                     );
+                    request_max_tokens = request.max_tokens;
 
                     let api_start = Instant::now();
                     let stream_result = self.client.create_message_with_fallback(request).await;
@@ -809,6 +1391,7 @@ impl AgenticLoop {
                                     Ok(compacted) => {
                                         let mut compacted_with_boundary = compacted;
                                         insert_compact_boundary(&mut compacted_with_boundary);
+                                        self.post_compact_cleanup();
                                         state.messages = compacted_with_boundary;
                                         state.usage_anchor = None;
                                         state.has_attempted_reactive_compact = true;
@@ -837,14 +1420,10 @@ impl AgenticLoop {
                             if is_overloaded {
                                 if let Some(ref fallback) = self.options.fallback_model {
                                     if *fallback != current_model {
-                                        for msg in yield_missing_tool_result_blocks(&assistant_messages, "Model fallback triggered") {
-                                            yield Ok(AgenticEvent::User {
-                                                message: msg,
-                                                parent_tool_use_id: None,
-                                                uuid: new_uuid(),
-                                                session_id: sid.clone(),
-                                            });
+                                        for ev in yield_missing_tool_result_blocks(&blocks.tool_sources, "Model fallback triggered", &sid) {
+                                            yield Ok(ev);
                                         }
+                                        blocks.tool_sources.clear();
                                         yield Ok(AgenticEvent::System {
                                             subtype: "model_fallback".to_string(),
                                             data: serde_json::json!({
@@ -880,21 +1459,55 @@ impl AgenticLoop {
 
                         match update_result {
                             Ok(update) => {
-                                // Track tool_use blocks as they complete
+                                if let StreamUpdate::ResponseStarted { ref request_id } = update {
+                                    blocks.start_response(request_id.clone());
+                                }
+
+                                // O stream quebrou e a camada de API repete a
+                                // chamada sem streaming (o `onStreamingFallback`
+                                // do CLI): o que o stream já entregou vira
+                                // órfão, como o `query` do CLI faz ao marcar
+                                // essas mensagens como tombstone. A resposta
+                                // da não-streaming chega inteira no
+                                // `MessageComplete` seguinte, com o mesmo
+                                // `request-id` do stream.
+                                if let StreamUpdate::NonStreamingFallback { .. } = update {
+                                    let request_id = blocks.request_id.clone();
+                                    blocks.start_response(request_id);
+                                    blocks.tool_sources.clear();
+                                    assistant_messages.clear();
+                                    tool_use_blocks.clear();
+                                    needs_follow_up = false;
+                                    current_assistant_in_stream = None;
+                                    continue;
+                                }
+
+                                // Cada bloco que fecha sai já como mensagem de
+                                // assistente (o `content_block_stop` do
+                                // `queryModel`), antes do `stream_event` dele.
                                 if let StreamUpdate::ContentBlockComplete { ref block, .. } = update {
                                     if matches!(block, ContentBlock::ToolUse { .. }) {
                                         needs_follow_up = true;
                                     }
+                                    yield Ok(blocks.block_event(block, &current_model, &sid));
                                 }
 
                                 if let StreamUpdate::MessageComplete { ref message } = update {
                                     current_assistant_in_stream = Some(message.clone());
                                 }
 
+                                if let StreamUpdate::RawEvent { ref event } = update {
+                                    blocks.observe(event);
+                                }
+
                                 // Yield streaming events
-                                if self.options.include_stream_events {
+                                // Só o evento SSE cru vira `stream_event`, como o
+                                // `queryModel` do CLI repassa.
+                                if let (true, StreamUpdate::RawEvent { event }) =
+                                    (self.options.include_stream_events, update)
+                                {
                                     yield Ok(AgenticEvent::StreamEvent {
-                                        event: update,
+                                        event,
                                         parent_tool_use_id: None,
                                         uuid: new_uuid(),
                                         session_id: sid.clone(),
@@ -909,14 +1522,10 @@ impl AgenticLoop {
                                 if is_overloaded {
                                     if let Some(ref fallback) = self.options.fallback_model {
                                         if *fallback != current_model {
-                                            for msg in yield_missing_tool_result_blocks(&assistant_messages, "Model fallback triggered") {
-                                                yield Ok(AgenticEvent::User {
-                                                    message: msg,
-                                                    parent_tool_use_id: None,
-                                                    uuid: new_uuid(),
-                                                    session_id: sid.clone(),
-                                                });
+                                            for ev in yield_missing_tool_result_blocks(&blocks.tool_sources, "Model fallback triggered", &sid) {
+                                                yield Ok(ev);
                                             }
+                                            blocks.tool_sources.clear();
                                             yield Ok(AgenticEvent::System {
                                                 subtype: "model_fallback".to_string(),
                                                 data: serde_json::json!({
@@ -936,24 +1545,13 @@ impl AgenticLoop {
                                     }
                                 }
 
+                                // O stream quebrado já foi repetido sem
+                                // streaming pela camada de API; um erro que
+                                // chega até aqui (a não-streaming também
+                                // falhou, ou o fallback está desligado)
+                                // encerra o turno, como no CLI.
                                 if !attempt_with_fallback {
-                                    if stream_retries < MAX_STREAM_RETRIES {
-                                        stream_retries += 1;
-                                        // Backoff curto e crescente; o retry
-                                        // de ABERTURA já mora no client — este
-                                        // cobre a conexão que morreu no meio.
-                                        tokio::time::sleep(std::time::Duration::from_millis(
-                                            500 * u64::from(stream_retries),
-                                        ))
-                                        .await;
-                                        assistant_messages.clear();
-                                        tool_use_blocks.clear();
-                                        needs_follow_up = false;
-                                        current_assistant_in_stream = None;
-                                        attempt_with_fallback = true;
-                                    } else {
-                                        stream_error = Some(err_str);
-                                    }
+                                    stream_error = Some(err_str);
                                 }
                                 break;
                             }
@@ -972,13 +1570,8 @@ impl AgenticLoop {
                 // ─── Handle stream/API error ──────────────────────────
                 // Port: catch (error) { yield* yieldMissingToolResultBlocks(...); yield error; return }
                 if let Some(ref err_str) = stream_error {
-                    for msg in yield_missing_tool_result_blocks(&assistant_messages, err_str) {
-                        yield Ok(AgenticEvent::User {
-                            message: msg,
-                            parent_tool_use_id: None,
-                            uuid: new_uuid(),
-                            session_id: sid.clone(),
-                        });
+                    for ev in yield_missing_tool_result_blocks(&blocks.tool_sources, err_str, &sid) {
+                        yield Ok(ev);
                     }
                     yield Ok(AgenticEvent::Result {
                         subtype: "error_during_execution".to_string(),
@@ -1005,13 +1598,8 @@ impl AgenticLoop {
                 //   return { reason: "aborted_streaming" }
                 // }
                 if self.abort.is_cancelled() {
-                    for msg in yield_missing_tool_result_blocks(&assistant_messages, "Interrupted by user") {
-                        yield Ok(AgenticEvent::User {
-                            message: msg,
-                            parent_tool_use_id: None,
-                            uuid: new_uuid(),
-                            session_id: sid.clone(),
-                        });
+                    for ev in yield_missing_tool_result_blocks(&blocks.tool_sources, "Interrupted by user", &sid) {
+                        yield Ok(ev);
                     }
                     yield Ok(AgenticEvent::Result {
                         subtype: "error_during_execution".to_string(),
@@ -1094,9 +1682,15 @@ impl AgenticLoop {
                 // max_output_tokens stop and there are no tool calls.
                 let is_withheld = is_withheld_max_output_tokens(&assistant_msg) && !needs_follow_up;
 
-                if !is_withheld {
-                    // Port: if (!withheld) yield yieldMessage
-                    yield Ok(assistant_event(&assistant_msg, &sid));
+                // Os blocos já saíram um a um; o que falta é o fechamento
+                // (`message_delta`). Uma resposta que não veio por bloco (o
+                // fallback não streamado) sai inteira, e um erro de API
+                // sintetizado de prompt longo fica retido (o `isWithheld413`
+                // do JS) até a compactação reativa decidir.
+                if let Some(final_event) = blocks.final_event() {
+                    yield Ok(final_event);
+                } else if !is_prompt_too_long_message(&assistant_msg) {
+                    yield Ok(blocks.whole_message_event(&assistant_msg, &sid));
                 }
 
                 assistant_messages.push(assistant_msg.clone());
@@ -1118,6 +1712,7 @@ impl AgenticLoop {
                                 Ok(compacted) => {
                                     let mut compacted_with_boundary = compacted;
                                     insert_compact_boundary(&mut compacted_with_boundary);
+                                    self.post_compact_cleanup();
                                     state.messages = compacted_with_boundary;
                                     state.has_attempted_reactive_compact = true;
                                     state.transition = Some(Transition::ReactiveCompactRetry);
@@ -1141,7 +1736,7 @@ impl AgenticLoop {
                         }
                         // Compact not attempted or failed — yield error and break
                         // Port: return yield lastMessage, { reason: "prompt_too_long" }
-                        yield Ok(assistant_event(&assistant_msg, &sid));
+                        yield Ok(blocks.whole_message_event(&assistant_msg, &sid));
                         yield Ok(AgenticEvent::Result {
                             subtype: "error_during_execution".to_string(),
                             duration_ms: start_time.elapsed().as_millis() as u64,
@@ -1188,8 +1783,9 @@ impl AgenticLoop {
                             continue 'query_loop;
                         }
 
-                        // Recovery exhausted — surface the withheld message
-                        yield Ok(assistant_event(&assistant_msg, &sid));
+                        // Recuperação esgotada: sai o erro de API que o
+                        // `queryModel` montou e o loop vinha retendo.
+                        yield Ok(max_output_tokens_error_event(request_max_tokens, &sid));
                     }
 
                     // ─── API error message check ─────────────────────
@@ -1261,13 +1857,14 @@ impl AgenticLoop {
                             let mut next_messages = messages_for_query;
                             next_messages.push(assistant_msg.to_api_message());
 
+                            // O `createUserMessage({content, isMeta: true})`
+                            // do `handleStopHooks`.
                             for blocking_msg in &hook_result.blocking_messages {
-                                yield Ok(AgenticEvent::User {
-                                    message: blocking_msg.clone(),
-                                    parent_tool_use_id: None,
-                                    uuid: new_uuid(),
-                                    session_id: sid.clone(),
-                                });
+                                let mut event = user_event(blocking_msg.clone(), &sid);
+                                if let AgenticEvent::User { is_meta, .. } = &mut event {
+                                    *is_meta = true;
+                                }
+                                yield Ok(event);
                             }
 
                             next_messages.extend(hook_result.blocking_messages);
@@ -1307,18 +1904,60 @@ impl AgenticLoop {
 
                 // Stream tool results incrementally — yield each as it completes
                 let mut all_execution_results: Vec<crate::tools::framework::ToolExecutionResult> = Vec::new();
+                // As mensagens `isMeta` que as tools anexam depois do próprio
+                // tool_result (`result.newMessages`), na ordem em que saíram.
+                let mut meta_messages: Vec<ApiMessage> = Vec::new();
+                // O turno foi interrompido por um deny com `interrupt: true`
+                // (e não pelo interrupt do cliente): no JS o `abort()` desse
+                // caso não tem o motivo "interrupt", e o loop emite a
+                // mensagem de interrupção antes de encerrar.
+                let mut interrupted_by_denial = false;
                 {
                     use futures::stream::StreamExt as _;
                     let mut result_stream = self.tool_executor.execute_all_stream(tool_use_blocks.clone());
                     while let Some(exec_result) = result_stream.next().await {
                         // Yield an individual tool_result message for each completed tool
                         let single_msg = self.tool_executor.build_tool_results_message(vec![exec_result.clone()]);
+                        // O frame leva o `toolUseResult` da tool, como o JS.
                         yield Ok(AgenticEvent::User {
                             message: single_msg,
                             parent_tool_use_id: None,
                             uuid: new_uuid(),
                             session_id: sid.clone(),
+                            timestamp: now_timestamp(),
+                            tool_use_result: exec_result.result.tool_use_result.clone(),
+                            // O bloco de assistente que pediu a tool: é o pai
+                            // desta entrada no transcript.
+                            source_tool_assistant_uuid: blocks.source_of(&exec_result.tool_use_id),
+                            is_meta: false,
                         });
+                        // Port: `checkPermissionsAndCallTool` empurra cada
+                        // `result.newMessages` logo depois do tool_result da
+                        // mesma tool; são mensagens `isMeta` (o documento do
+                        // PDF, as páginas extraídas, a nota da imagem
+                        // redimensionada) e é assim que o conteúdo chega ao
+                        // modelo.
+                        for message in &exec_result.result.new_messages {
+                            yield Ok(AgenticEvent::User {
+                                message: message.clone(),
+                                parent_tool_use_id: None,
+                                uuid: new_uuid(),
+                                session_id: sid.clone(),
+                                timestamp: now_timestamp(),
+                                tool_use_result: None,
+                                source_tool_assistant_uuid: None,
+                                is_meta: true,
+                            });
+                            meta_messages.push(message.clone());
+                        }
+                        // Port: deny com `interrupt` chama
+                        // `toolUseContext.abortController.abort()` na hora. O
+                        // transporte que decide a permissão pode já ter
+                        // cancelado; cancelar de novo não muda nada.
+                        if exec_result.interrupt && exec_result.denied {
+                            interrupted_by_denial = true;
+                            self.abort.cancel();
+                        }
                         all_execution_results.push(exec_result);
                     }
                 }
@@ -1340,6 +1979,11 @@ impl AgenticLoop {
                 // Build combined tool_results message for conversation history
                 let tool_results_msg = self.tool_executor.build_tool_results_message(all_execution_results);
                 tool_results.push(tool_results_msg.clone());
+                // As mensagens meta vão ao histórico DEPOIS do bloco de
+                // tool_results: no JS elas se fundem com os resultados na
+                // normalização para a API, e o `hoistToolResults` põe os
+                // tool_result na frente, que é esta mesma ordem.
+                tool_results.extend(meta_messages);
 
                 // ─── Track file reads for post-compact restoration ───
                 for tu in &tool_use_blocks {
@@ -1355,6 +1999,25 @@ impl AgenticLoop {
                 //   return { reason: "aborted_tools" }
                 // }
                 if self.abort.is_cancelled() {
+                    // Port: `if (signal.reason !== "interrupt") yield
+                    // createUserInterruptionMessage({ toolUse: true })`. O
+                    // interrupt do cliente não gera a mensagem; o deny com
+                    // `interrupt` gera, e ela fica no histórico do próximo
+                    // turno.
+                    if interrupted_by_denial {
+                        yield Ok(AgenticEvent::User {
+                            message: ApiMessage::user(vec![ContentBlock::text(
+                                crate::tools::framework::INTERRUPT_MESSAGE_FOR_TOOL_USE,
+                            )]),
+                            parent_tool_use_id: None,
+                            uuid: new_uuid(),
+                            session_id: sid.clone(),
+                            timestamp: now_timestamp(),
+                            tool_use_result: None,
+                            source_tool_assistant_uuid: None,
+                            is_meta: false,
+                        });
+                    }
                     yield Ok(AgenticEvent::Result {
                         subtype: "error_during_execution".to_string(),
                         duration_ms: start_time.elapsed().as_millis() as u64,
@@ -1530,32 +2193,88 @@ mod tests {
 
     #[test]
     fn test_yield_missing_tool_result_blocks() {
-        let msg = AssistantMessage {
-            id: "msg_1".to_string(),
-            model: "test".to_string(),
-            content: vec![
-                ContentBlock::text("Let me help"),
-                ContentBlock::tool_use("t1", "Bash", serde_json::json!({})),
-                ContentBlock::tool_use("t2", "Read", serde_json::json!({})),
-            ],
-            stop_reason: StopReason::ToolUse,
-            usage: Usage::default(),
-            api_error: None,
+        let mut blocks = BlockEmitter::default();
+        blocks.start_response(Some("req_1".to_string()));
+        blocks.observe(&serde_json::json!({
+            "type": "message_start",
+            "message": {"id": "msg_1", "type": "message", "role": "assistant", "model": "m",
+                        "content": [], "stop_reason": null, "stop_sequence": null,
+                        "usage": {"input_tokens": 3, "output_tokens": 1}}
+        }));
+        let first = blocks.block_event(
+            &ContentBlock::tool_use("t1", "Bash", serde_json::json!({})),
+            "m",
+            "s",
+        );
+        blocks.block_event(
+            &ContentBlock::tool_use("t2", "Read", serde_json::json!({})),
+            "m",
+            "s",
+        );
+        let AgenticEvent::Assistant {
+            uuid: first_uuid,
+            message,
+            request_id,
+            ..
+        } = first
+        else {
+            panic!("bloco sem mensagem de assistente");
         };
+        assert_eq!(message["id"], "msg_1");
+        assert_eq!(message["content"][0]["id"], "t1");
+        assert_eq!(request_id.as_deref(), Some("req_1"));
 
-        let results = yield_missing_tool_result_blocks(&[msg], "Interrupted");
+        let results = yield_missing_tool_result_blocks(&blocks.tool_sources, "Interrupted", "s");
         assert_eq!(results.len(), 2);
         for r in &results {
-            assert_eq!(r.role, Role::User);
-            assert_eq!(r.content.len(), 1);
+            let AgenticEvent::User {
+                message,
+                tool_use_result,
+                ..
+            } = r
+            else {
+                panic!("resultado sem mensagem de usuário");
+            };
+            assert_eq!(message.role, Role::User);
             assert!(matches!(
-                &r.content[0],
+                &message.content[0],
                 ContentBlock::ToolResult {
                     is_error: Some(true),
                     ..
                 }
             ));
+            assert_eq!(
+                tool_use_result.as_ref(),
+                Some(&serde_json::json!("Interrupted"))
+            );
         }
+        let AgenticEvent::User {
+            source_tool_assistant_uuid,
+            ..
+        } = &results[0]
+        else {
+            unreachable!()
+        };
+        assert_eq!(source_tool_assistant_uuid.as_ref(), Some(&first_uuid));
+
+        blocks.observe(&serde_json::json!({
+            "type": "message_delta",
+            "delta": {"stop_reason": "tool_use"},
+            "usage": {"output_tokens": 9}
+        }));
+        let Some(AgenticEvent::AssistantFinal {
+            message_id,
+            stop_reason,
+            usage,
+        }) = blocks.final_event()
+        else {
+            panic!("sem fechamento");
+        };
+        assert_eq!(message_id, "msg_1");
+        assert_eq!(stop_reason.as_deref(), Some("tool_use"));
+        assert_eq!(usage["input_tokens"], 3);
+        assert_eq!(usage["output_tokens"], 9);
+        assert_eq!(usage["service_tier"], "standard");
     }
 
     #[test]

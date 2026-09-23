@@ -14,8 +14,7 @@ use tokio::sync::Mutex;
 
 use rust_agent_sdk::{
     ClaudeAgentOptions, ClaudeSDKClient, HookEvent, HookJSONOutput, HookMatcher,
-    HookSpecificOutput, Message, NativeApiTransport, PermissionMode, PermissionResult,
-    PermissionResultAllow, ToolsConfig,
+    HookSpecificOutput, Message, NativeApiTransport, PermissionMode, PermissionResult, ToolsConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -189,12 +188,6 @@ async fn fixture(spec: Spec, api: &MockApi) -> Fixture {
     }
 }
 
-fn allow_all() -> rust_agent_sdk::CanUseToolFn {
-    Arc::new(|_name, _input, _ctx| {
-        Box::pin(async { PermissionResult::Allow(PermissionResultAllow::default()) })
-    })
-}
-
 fn result_of(messages: &[Message]) -> Option<rust_agent_sdk::ResultMessage> {
     messages.iter().find_map(|m| match m {
         Message::Result(r) => Some(r.clone()),
@@ -242,18 +235,45 @@ async fn bypass_permissions_runs_tools_without_can_use_tool() {
     assert!(result.permission_denials.unwrap_or_default().is_empty());
 }
 
+/// Em plan mode o CLI não recusa a mutação por conta própria: o Write passa
+/// pelo `checkWritePermissionForTool`, que responde `ask` (plan não é
+/// acceptEdits), e a pergunta chega ao `can_use_tool`. Quem recusa é o
+/// cliente, e a mensagem dele é o que o modelo lê.
 #[tokio::test]
-async fn plan_mode_denies_mutating_tools_with_a_teaching_message() {
+async fn plan_mode_sends_mutating_tools_to_can_use_tool() {
     let api = MockApi::start(vec![
-        sse_tool_call("Write", &json!({"file_path": "/tmp/x", "content": "y"})),
+        // Caminho que não existe: arquivo existente sem leitura prévia seria
+        // recusado pelo `validateInput` do Write antes da permissão.
+        sse_tool_call(
+            "Write",
+            &json!({
+                "file_path": std::env::temp_dir()
+                    .join(format!("plano-{}", uuid::Uuid::new_v4()))
+                    .join("x.txt"),
+                "content": "y"
+            }),
+        ),
         sse_text("entendi"),
     ])
     .await;
+    let asked: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let asked_cb = Arc::clone(&asked);
+    let deny_in_plan: rust_agent_sdk::CanUseToolFn = Arc::new(move |name, _input, _ctx| {
+        let asked = Arc::clone(&asked_cb);
+        Box::pin(async move {
+            asked.lock().await.push(name);
+            PermissionResult::Deny(rust_agent_sdk::PermissionResultDeny {
+                behavior: "deny".to_string(),
+                message: "Apresente o plano com ExitPlanMode antes de escrever.".to_string(),
+                interrupt: false,
+            })
+        })
+    });
     let mut fx = fixture(
         Spec {
             tools: Some(vec!["Write".to_string(), "Read".to_string()]),
             permission_mode: Some(PermissionMode::Plan),
-            can_use_tool: Some(allow_all()),
+            can_use_tool: Some(deny_in_plan),
             ..Default::default()
         },
         &api,
@@ -261,11 +281,12 @@ async fn plan_mode_denies_mutating_tools_with_a_teaching_message() {
     .await;
     let messages = run_one(&mut fx, "escreva um arquivo").await;
     let result = result_of(&messages).expect("result");
-    // Contrato: em plan mode a mutação NÃO roda e a recusa ensina o caminho.
+    // Contrato: a pergunta chegou ao cliente e a recusa dele chegou ao modelo.
+    assert_eq!(asked.lock().await.as_slice(), ["Write".to_string()]);
     let second = api.requests().await[1].to_string();
     assert!(
-        second.contains("plan mode is active"),
-        "a recusa de plan mode não chegou ao modelo: {second}"
+        second.contains("Apresente o plano com ExitPlanMode"),
+        "a recusa do cliente não chegou ao modelo: {second}"
     );
     let denials = result.permission_denials.unwrap_or_default();
     assert_eq!(denials.len(), 1);
@@ -552,7 +573,8 @@ async fn bash_background_registers_a_task_and_task_output_reads_it() {
     );
     let third = requests[2].to_string();
     assert!(
-        third.contains("status:"),
+        // O TaskOutput do CLI devolve o estado em tags (`<status>...</status>`).
+        third.contains("<status>"),
         "TaskOutput não devolveu status: {third}"
     );
 }
@@ -648,9 +670,19 @@ fn sse_server_web_search(answer: &str) -> String {
     ])
 }
 
+/// No CLI 2.1.90 o WebSearch é uma tool CLIENTE: o request principal a
+/// declara com `input_schema`, e a busca de verdade sai numa chamada
+/// aninhada com a server tool `web_search_20250305`
+/// (`tools/WebSearchTool/WebSearchTool.js`). A chamada aninhada em si é
+/// coberta em `tests/test_native_tools_web.rs`.
 #[tokio::test]
-async fn web_search_is_declared_as_a_server_tool_and_never_executed_locally() {
-    let api = MockApi::start(vec![sse_server_web_search("O bitcoin está caro.")]).await;
+async fn web_search_is_declared_as_a_client_tool() {
+    let api = MockApi::start(vec![
+        sse_tool_call_id("toolu_ws", "WebSearch", &json!({"query": "preço bitcoin"})),
+        sse_server_web_search("O bitcoin está caro."),
+        sse_text("respondido"),
+    ])
+    .await;
     let mut fx = fixture(
         Spec {
             tools: Some(vec!["WebSearch".to_string()]),
@@ -661,32 +693,20 @@ async fn web_search_is_declared_as_a_server_tool_and_never_executed_locally() {
     )
     .await;
     let messages = run_one(&mut fx, "qual o preço do bitcoin?").await;
+    assert_eq!(result_of(&messages).expect("result").subtype, "success");
 
-    // Contrato: a definição enviada é a da SERVER tool — tipo versionado, sem
-    // input_schema — e não uma tool cliente qualquer.
     let first = &api.requests().await[0];
     let tools = first["tools"].as_array().expect("tools no request");
     let ws = tools
         .iter()
-        .find(|t| t["name"] == "web_search")
-        .expect("web_search declarada");
-    assert_eq!(ws["type"], "web_search_20250305");
+        .find(|t| t["name"] == "WebSearch")
+        .expect("WebSearch declarada");
+    assert!(ws.get("type").is_none(), "tool cliente não leva type: {ws}");
+    assert_eq!(ws["input_schema"]["required"], json!(["query"]));
     assert!(
-        ws.get("input_schema").is_none(),
-        "server tool não leva input_schema: {ws}"
+        !tools.iter().any(|t| t["type"] == "web_search_20250305"),
+        "a server tool não vai no request principal"
     );
-    assert!(
-        ws.get("cache_control").is_none(),
-        "server tool não aceita cache_control: {ws}"
-    );
-
-    // Contrato: o resultado do servidor encerra o turno sem uma segunda
-    // request — o SDK não executou nada localmente.
-    assert_eq!(api.requests().await.len(), 1);
-    let result = result_of(&messages).expect("result");
-    assert_eq!(result.subtype, "success");
-    assert!(!result.is_error);
-    assert_eq!(result.result.as_deref(), Some("O bitcoin está caro."));
 }
 
 // ---------------------------------------------------------------------------
@@ -830,7 +850,8 @@ async fn an_oversized_tool_result_is_persisted_and_the_next_request_carries_the_
         "output grande não virou referência: {}",
         &second[..second.len().min(600)]
     );
-    assert!(second.contains("Use the Read tool"));
+    // O texto é o `buildLargeToolResultMessage` do CLI.
+    assert!(second.contains("Preview (first 2KB):"));
     // Contrato: o arquivo com o conteúdo COMPLETO existe em disco.
     let path_start = second.find("saved to: ").expect("caminho no bloco") + "saved to: ".len();
     let rest = &second[path_start..];

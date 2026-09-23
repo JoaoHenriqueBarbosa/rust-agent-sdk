@@ -464,6 +464,12 @@ pub enum HookSpecificOutput {
 }
 
 // Hook JSON output
+//
+// A variante `Sync` é grande e a `Async` pequena, mas o enum espelha o JSON
+// que o hook devolve e é construído por literal por quem escreve hooks:
+// encaixotar a variante mudaria a API pública por um ganho irrelevante (um
+// valor por chamada de hook).
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum HookJSONOutput {
@@ -1039,6 +1045,22 @@ pub struct TaskNotificationMessage {
     pub usage: Option<serde_json::Value>,
 }
 
+/// Evento de ciclo de vida de hook (`system` com `subtype` `hook_started` ou
+/// `hook_response`), que o CLI emite com `include_hook_events`. É um
+/// `SystemMessage` no SDK Python: `subtype` e `data` guardam o frame cru.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HookEventMessage {
+    // SystemMessage base fields
+    pub subtype: String,
+    pub data: serde_json::Value,
+    // Own fields
+    /// `hook_event`, ou `hook_name`, ou `hook_event_name` do frame (vazio
+    /// quando nenhum veio).
+    pub hook_event_name: String,
+    pub session_id: Option<String>,
+    pub uuid: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MirrorErrorMessage {
     // SystemMessage base fields
@@ -1064,8 +1086,25 @@ pub struct ResultMessage {
     pub structured_output: Option<serde_json::Value>,
     pub model_usage: Option<serde_json::Value>,
     pub permission_denials: Option<Vec<serde_json::Value>>,
+    /// A chamada de tool adiada por um hook PreToolUse que respondeu
+    /// `permissionDecision: "defer"`: a execução para e o resultado a traz
+    /// para o chamador decidir se retoma.
+    pub deferred_tool_use: Option<DeferredToolUse>,
     pub errors: Option<Vec<String>>,
+    /// O status HTTP (429, 500, 529...) da chamada à API que falhou, quando
+    /// `is_error` é verdadeiro e o `subtype` é `success`; `None` nos outros
+    /// casos.
+    pub api_error_status: Option<i64>,
     pub uuid: Option<String>,
+}
+
+/// A chamada de tool adiada que o `ResultMessage` carrega
+/// (`deferred_tool_use` do SDK Python).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeferredToolUse {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
 }
 
 impl ResultMessage {
@@ -1091,7 +1130,9 @@ impl ResultMessage {
             structured_output: None,
             model_usage: None,
             permission_denials: None,
+            deferred_tool_use: None,
             errors: None,
+            api_error_status: None,
             uuid: None,
         }
     }
@@ -1156,6 +1197,9 @@ pub struct RateLimitEvent {
 // Message enum
 // ---------------------------------------------------------------------------
 
+// Os variantes espelham os dataclasses do SDK Python por valor; encaixotar o
+// `ResultMessage` mudaria a API pública só por tamanho.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     User(UserMessage),
@@ -1165,6 +1209,7 @@ pub enum Message {
     TaskProgress(TaskProgressMessage),
     TaskNotification(TaskNotificationMessage),
     MirrorError(MirrorErrorMessage),
+    HookEvent(HookEventMessage),
     Result(ResultMessage),
     Stream(StreamEvent),
     RateLimit(RateLimitEvent),
@@ -1180,6 +1225,7 @@ impl Message {
                 | Message::TaskProgress(_)
                 | Message::TaskNotification(_)
                 | Message::MirrorError(_)
+                | Message::HookEvent(_)
         )
     }
 }

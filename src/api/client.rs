@@ -21,6 +21,117 @@ const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
 const DEFAULT_MAX_TOKENS: u32 = 16384;
 
+/// Teto de `max_tokens` da chamada sem streaming que substitui um stream
+/// quebrado (`MAX_NON_STREAMING_TOKENS` do CLI).
+pub const MAX_NON_STREAMING_TOKENS: u32 = 64_000;
+
+/// Timeout de inatividade do watchdog de stream quando
+/// `CLAUDE_STREAM_IDLE_TIMEOUT_MS` não diz outro (90s, como no CLI).
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 90_000;
+
+/// Mensagem do erro que o watchdog produz ao abandonar um stream parado.
+const STREAM_IDLE_TIMEOUT_MESSAGE: &str = "Stream idle timeout - no chunks received";
+
+/// Mensagem do erro de timeout do próprio cliente HTTP durante a leitura do
+/// stream. No CLI esse é o "Streaming timeout (SDK abort)", que vira
+/// `APIConnectionTimeoutError` e NÃO passa pelo fallback sem streaming.
+const STREAM_REQUEST_TIMEOUT_MESSAGE: &str = "Request timed out";
+
+/// `isEnvTruthy` do CLI.
+fn is_env_truthy(value: Option<&str>) -> bool {
+    value.is_some_and(|v| {
+        matches!(
+            v.trim().to_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+/// Como o cliente reage a um stream que quebra: o CLI repete a MESMA chamada
+/// sem streaming, e um model-router atrás de `ANTHROPIC_BASE_URL` pode mandar
+/// essa segunda chamada para outro provider. Cada campo vem da mesma variável
+/// de ambiente que o CLI lê.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamFallbackConfig {
+    /// `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK`: o erro do stream sobe
+    /// direto, sem a chamada sem streaming. Não vale para o 404 na abertura
+    /// do stream, que no CLI cai na não-streaming mesmo assim.
+    pub disabled: bool,
+    /// Watchdog de inatividade (`CLAUDE_ENABLE_STREAM_WATCHDOG`, desligado por
+    /// padrão): sem evento por este tempo (`CLAUDE_STREAM_IDLE_TIMEOUT_MS`,
+    /// 90s por padrão), o stream é abandonado e a chamada vai sem streaming.
+    pub idle_timeout: Option<Duration>,
+    /// Timeout de cada tentativa da chamada sem streaming: `API_TIMEOUT_MS`,
+    /// ou 300s (120s com `CLAUDE_CODE_REMOTE`).
+    pub non_streaming_timeout: Duration,
+}
+
+impl StreamFallbackConfig {
+    /// Monta a configuração a partir de um leitor de variáveis de ambiente
+    /// (o transporte nativo passa o env das opções sobreposto ao do processo).
+    pub fn from_env(get: impl Fn(&str) -> Option<String>) -> Self {
+        let disabled = is_env_truthy(get("CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK").as_deref());
+        let idle_timeout =
+            is_env_truthy(get("CLAUDE_ENABLE_STREAM_WATCHDOG").as_deref()).then(|| {
+                let ms = get("CLAUDE_STREAM_IDLE_TIMEOUT_MS")
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+                    .filter(|ms| *ms > 0)
+                    .unwrap_or(DEFAULT_STREAM_IDLE_TIMEOUT_MS);
+                Duration::from_millis(ms)
+            });
+        let non_streaming_timeout = get("API_TIMEOUT_MS")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+            .map(Duration::from_millis)
+            .unwrap_or_else(|| {
+                if is_env_truthy(get("CLAUDE_CODE_REMOTE").as_deref()) {
+                    Duration::from_secs(120)
+                } else {
+                    Duration::from_secs(300)
+                }
+            });
+        Self {
+            disabled,
+            idle_timeout,
+            non_streaming_timeout,
+        }
+    }
+}
+
+impl Default for StreamFallbackConfig {
+    /// Lida do ambiente do processo.
+    fn default() -> Self {
+        Self::from_env(|key| std::env::var(key).ok())
+    }
+}
+
+/// `adjustParamsForNonStreaming` do CLI: `max_tokens` limitado ao teto, e o
+/// orçamento de thinking abaixo dele.
+pub fn adjust_params_for_non_streaming(request: &mut CreateMessageRequest, max_tokens_cap: u32) {
+    let capped = request.max_tokens.min(max_tokens_cap);
+    if let Some(thinking) = request.thinking.as_mut() {
+        if thinking.r#type == "enabled" {
+            if let Some(budget) = thinking.budget_tokens.filter(|b| *b > 0) {
+                thinking.budget_tokens = Some(budget.min(capped.saturating_sub(1)));
+            }
+        }
+    }
+    request.max_tokens = capped;
+}
+
+/// `is529Error` do CLI: status 529, ou o corpo do erro com `overloaded_error`
+/// (é o caso do `event: error` no meio do SSE, que chega com HTTP 200).
+fn is_529_error(error: &ClaudeSDKError) -> bool {
+    match error {
+        ClaudeSDKError::Process {
+            exit_code: Some(529),
+            ..
+        }
+        | ClaudeSDKError::OverloadedFallback { .. } => true,
+        other => other.to_string().contains("overloaded_error"),
+    }
+}
+
 /// Client for the Anthropic Messages API.
 #[derive(Debug, Clone)]
 pub struct AnthropicClient {
@@ -32,6 +143,7 @@ pub struct AnthropicClient {
     pub default_model: String,
     pub default_max_tokens: u32,
     pub retry_config: RetryConfig,
+    pub stream_fallback: StreamFallbackConfig,
 }
 
 impl AnthropicClient {
@@ -56,6 +168,7 @@ impl AnthropicClient {
             default_model: DEFAULT_MODEL.to_string(),
             default_max_tokens: DEFAULT_MAX_TOKENS,
             retry_config: RetryConfig::default(),
+            stream_fallback: StreamFallbackConfig::default(),
         }
     }
 
@@ -81,6 +194,11 @@ impl AnthropicClient {
 
     pub fn with_retry_config(mut self, config: RetryConfig) -> Self {
         self.retry_config = config;
+        self
+    }
+
+    pub fn with_stream_fallback(mut self, config: StreamFallbackConfig) -> Self {
+        self.stream_fallback = config;
         self
     }
 
@@ -151,7 +269,35 @@ impl AnthropicClient {
     }
 
     /// Non-streaming message creation (for compaction, summarization, etc.).
-    pub async fn create_message(&self, mut request: CreateMessageRequest) -> Result<ApiResponse> {
+    pub async fn create_message(&self, request: CreateMessageRequest) -> Result<ApiResponse> {
+        self.create_message_with_retry(request, 0, None).await
+    }
+
+    /// A chamada sem streaming que substitui um stream quebrado
+    /// (`executeNonStreamingRequest` do CLI): mesmos parâmetros e headers,
+    /// `max_tokens` limitado a [`MAX_NON_STREAMING_TOKENS`], timeout próprio
+    /// por tentativa e o retry de sempre, que já começa contando o 529 do
+    /// stream quando foi um 529 que o quebrou.
+    pub async fn create_message_non_streaming_fallback(
+        &self,
+        mut request: CreateMessageRequest,
+        initial_consecutive_529s: u32,
+    ) -> Result<ApiResponse> {
+        adjust_params_for_non_streaming(&mut request, MAX_NON_STREAMING_TOKENS);
+        self.create_message_with_retry(
+            request,
+            initial_consecutive_529s,
+            Some(self.stream_fallback.non_streaming_timeout),
+        )
+        .await
+    }
+
+    async fn create_message_with_retry(
+        &self,
+        mut request: CreateMessageRequest,
+        initial_consecutive_529s: u32,
+        timeout: Option<Duration>,
+    ) -> Result<ApiResponse> {
         request.stream = false;
 
         let url = format!("{}/v1/messages", self.base_url);
@@ -159,16 +305,18 @@ impl AnthropicClient {
         let mut body = request_body(&request)?;
 
         let mut attempt = 0u32;
-        let mut consecutive_529s = 0u32;
+        let mut consecutive_529s = initial_consecutive_529s;
 
         loop {
-            let response = self
+            let mut builder = self
                 .http_client
                 .post(&url)
                 .headers(headers.clone())
-                .body(body.clone())
-                .send()
-                .await;
+                .body(body.clone());
+            if let Some(timeout) = timeout {
+                builder = builder.timeout(timeout);
+            }
+            let response = builder.send().await;
 
             match response {
                 Ok(resp) => {
@@ -274,10 +422,17 @@ impl AnthropicClient {
 
         let response = self.send_with_retry(&url, &headers, &mut request).await?;
 
+        let request_id = response
+            .headers()
+            .get("request-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
         let byte_stream = response.bytes_stream();
-        let stream = sse_to_stream_updates(byte_stream);
+        let stream = sse_to_stream_updates(byte_stream, self.stream_fallback.idle_timeout);
+        let started =
+            futures::stream::once(async move { Ok(StreamUpdate::ResponseStarted { request_id }) });
 
-        Ok(Box::pin(stream))
+        Ok(Box::pin(started.chain(stream)))
     }
 
     /// Wrap a non-streaming ApiResponse as a stream yielding the equivalent StreamUpdate events.
@@ -285,33 +440,50 @@ impl AnthropicClient {
     pub fn wrap_response_as_stream(
         response: ApiResponse,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamUpdate>> + Send>> {
-        let assistant_msg = AssistantMessage {
-            id: response.id,
-            model: response.model,
-            content: response.content,
-            stop_reason: StopReason::from(response.stop_reason.as_ref()),
-            usage: response.usage,
-            api_error: None,
-        };
         let update = StreamUpdate::MessageComplete {
-            message: assistant_msg,
+            message: assistant_from_response(response),
         };
         Box::pin(futures::stream::once(async move { Ok(update) }))
     }
 
-    /// Streaming message creation with non-streaming fallback.
+    /// Chamada streaming com o fallback sem streaming do `queryModel` do CLI.
     ///
-    /// First tries `create_message_stream`. If the stream errors AFTER receiving
-    /// at least one event (partial response), falls back to `create_message`
-    /// (non-streaming) and wraps the result as a single `MessageComplete` event.
-    /// If the stream errors BEFORE any events, returns the error directly
-    /// (letting the caller's retry logic handle it).
+    /// A abertura do stream passa pelo retry de sempre. Depois que a resposta
+    /// abriu (HTTP 200), QUALQUER erro na leitura do stream, antes ou depois
+    /// do primeiro evento, faz a MESMA chamada ser repetida uma vez sem
+    /// streaming: `event: error` no SSE (o que um model-router manda quando o
+    /// provider primário cai), conexão cortada, JSON inválido, stream que
+    /// termina sem `message_start` ou sem nenhum bloco e sem `stop_reason`, e
+    /// o watchdog de inatividade. Não caem no fallback o timeout do próprio
+    /// cliente HTTP, nem nada quando `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK`
+    /// está ligado. Um 404 na abertura do stream também cai na não-streaming,
+    /// e esse ignora a variável, como no CLI.
+    ///
+    /// O consumidor recebe [`StreamUpdate::NonStreamingFallback`] antes do
+    /// `MessageComplete` que a não-streaming produziu.
     pub async fn create_message_with_fallback(
         &self,
         request: CreateMessageRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamUpdate>> + Send>>> {
         let fallback_request = request.clone();
-        let stream = self.create_message_stream(request).await?;
+        let stream = match self.create_message_stream(request).await {
+            Ok(stream) => stream,
+            Err(err) if is_not_found(&err) => {
+                let response = self
+                    .create_message_non_streaming_fallback(fallback_request, 0)
+                    .await?;
+                let updates = vec![
+                    Ok(StreamUpdate::NonStreamingFallback {
+                        cause: err.to_string(),
+                    }),
+                    Ok(StreamUpdate::MessageComplete {
+                        message: assistant_from_response(response),
+                    }),
+                ];
+                return Ok(Box::pin(futures::stream::iter(updates)));
+            }
+            Err(err) => return Err(err),
+        };
 
         let client = self.clone();
         let wrapper_stream = FallbackStream::new(stream, client, fallback_request);
@@ -437,12 +609,44 @@ fn request_body(request: &CreateMessageRequest) -> Result<String> {
         .map_err(|e| ClaudeSDKError::sdk(format!("Failed to serialize request: {e}")))
 }
 
+/// A resposta sem streaming no formato da mensagem que o stream fecharia.
+fn assistant_from_response(response: ApiResponse) -> AssistantMessage {
+    AssistantMessage {
+        id: response.id,
+        model: response.model,
+        content: response.content,
+        stop_reason: StopReason::from(response.stop_reason.as_ref()),
+        usage: response.usage,
+        api_error: None,
+    }
+}
+
+/// A abertura do stream voltou 404 (o `CannotRetryError` com status 404 que
+/// o CLI desvia para a não-streaming).
+fn is_not_found(error: &ClaudeSDKError) -> bool {
+    matches!(
+        error,
+        ClaudeSDKError::Process {
+            exit_code: Some(404),
+            ..
+        }
+    )
+}
+
 // ---------------------------------------------------------------------------
 // SSE byte stream → StreamUpdate stream
 // ---------------------------------------------------------------------------
 
 /// Convert a raw byte stream (SSE) into a stream of StreamUpdate events.
-fn sse_to_stream_updates<S>(byte_stream: S) -> impl Stream<Item = Result<StreamUpdate>>
+///
+/// Com `idle_timeout`, é o watchdog do CLI: o prazo recomeça a cada evento
+/// do stream (o `ping` não conta, o iterador do SDK nem o entrega), e quando
+/// estoura o stream é abandonado com erro. Um stream que termina limpo passa
+/// pela regra de [`StreamAccumulator::end_of_stream`].
+fn sse_to_stream_updates<S>(
+    byte_stream: S,
+    idle_timeout: Option<Duration>,
+) -> impl Stream<Item = Result<StreamUpdate>>
 where
     S: Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send + 'static,
 {
@@ -451,10 +655,27 @@ where
     tokio::spawn(async move {
         let mut accumulator = StreamAccumulator::new();
         let mut buffer = String::new();
+        let mut idle_deadline = idle_timeout.map(|d| tokio::time::Instant::now() + d);
 
         tokio::pin!(byte_stream);
 
-        while let Some(chunk_result) = byte_stream.next().await {
+        loop {
+            let next = match idle_deadline {
+                Some(deadline) => match tokio::time::timeout_at(deadline, byte_stream.next()).await
+                {
+                    Ok(next) => next,
+                    Err(_) => {
+                        let _ = tx
+                            .send(Err(ClaudeSDKError::sdk(STREAM_IDLE_TIMEOUT_MESSAGE)))
+                            .await;
+                        return;
+                    }
+                },
+                None => byte_stream.next().await,
+            };
+            let Some(chunk_result) = next else {
+                break;
+            };
             match chunk_result {
                 Ok(chunk) => {
                     let text = match std::str::from_utf8(&chunk) {
@@ -477,8 +698,16 @@ where
                         buffer = buffer[event_end + 2..].to_string();
 
                         if let Some(data) = extract_sse_data(&event_text) {
+                            let raw: Option<serde_json::Value> = serde_json::from_str(data).ok();
                             match parse_sse_data(data) {
                                 Ok(stream_event) => {
+                                    if !matches!(
+                                        stream_event,
+                                        StreamEvent::Ping | StreamEvent::Unknown
+                                    ) {
+                                        idle_deadline =
+                                            idle_timeout.map(|d| tokio::time::Instant::now() + d);
+                                    }
                                     match accumulator.process_event(stream_event) {
                                         Ok(Some(update)) => {
                                             if tx.send(Ok(update)).await.is_err() {
@@ -488,6 +717,17 @@ where
                                         Ok(None) => {}
                                         Err(e) => {
                                             let _ = tx.send(Err(e)).await;
+                                            return;
+                                        }
+                                    }
+                                    // O evento cru sai DEPOIS do que ele produziu,
+                                    // na ordem do `queryModel` do CLI.
+                                    if let Some(event) = raw {
+                                        if tx
+                                            .send(Ok(StreamUpdate::RawEvent { event }))
+                                            .await
+                                            .is_err()
+                                        {
                                             return;
                                         }
                                     }
@@ -501,13 +741,24 @@ where
                     }
                 }
                 Err(e) => {
-                    let _ = tx
-                        .send(Err(ClaudeSDKError::cli_connection(format!(
-                            "Stream read error: {e}"
-                        ))))
-                        .await;
+                    let error = if e.is_timeout() {
+                        ClaudeSDKError::cli_connection(STREAM_REQUEST_TIMEOUT_MESSAGE)
+                    } else {
+                        ClaudeSDKError::cli_connection(format!("Stream read error: {e}"))
+                    };
+                    let _ = tx.send(Err(error)).await;
                     return;
                 }
+            }
+        }
+
+        match accumulator.end_of_stream() {
+            Ok(Some(update)) => {
+                let _ = tx.send(Ok(update)).await;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                let _ = tx.send(Err(e)).await;
             }
         }
     });
@@ -535,8 +786,11 @@ fn extract_sse_data(event_text: &str) -> Option<&str> {
 // FallbackStream — wraps a streaming response with non-streaming fallback
 // ---------------------------------------------------------------------------
 
-/// Stream wrapper that falls back to a non-streaming API call when the inner
-/// stream errors after having already yielded at least one event.
+/// Envolve um stream já aberto e, quando a leitura dele falha, repete a
+/// MESMA chamada uma única vez sem streaming (o `catch (streamingError)` do
+/// `queryModel` do CLI). O que o stream já entregou continua entregue; o
+/// consumidor recebe [`StreamUpdate::NonStreamingFallback`] e depois o
+/// `MessageComplete` da não-streaming, ou o erro dela.
 struct FallbackStream {
     inner: Pin<Box<dyn Stream<Item = Result<StreamUpdate>> + Send>>,
 }
@@ -549,59 +803,53 @@ impl FallbackStream {
     ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<StreamUpdate>>(64);
 
-        // Spawn a task that drives the inner stream, counts events, and
-        // triggers the fallback if needed.
         tokio::spawn(async move {
-            let mut events_received = false;
             tokio::pin!(inner);
 
             while let Some(item) = inner.next().await {
-                match item {
+                let stream_error = match item {
                     Ok(update) => {
-                        events_received = true;
                         if tx.send(Ok(update)).await.is_err() {
                             return; // consumer dropped
                         }
+                        continue;
                     }
-                    Err(e) => {
-                        if !events_received {
-                            // No events received yet — propagate error directly
-                            let _ = tx.send(Err(e)).await;
-                            return;
-                        }
+                    Err(e) => e,
+                };
 
-                        // Events were received before the error — fall back to
-                        // non-streaming API call.
-                        let _ = tx
-                            .send(Ok(StreamUpdate::TextDelta {
-                                index: 0,
-                                text: String::new(), // empty delta signals fallback transition
-                            }))
-                            .await;
-
-                        match client.create_message(request).await {
-                            Ok(response) => {
-                                let assistant_msg = AssistantMessage {
-                                    id: response.id,
-                                    model: response.model,
-                                    content: response.content,
-                                    stop_reason: StopReason::from(response.stop_reason.as_ref()),
-                                    usage: response.usage,
-                                    api_error: None,
-                                };
-                                let _ = tx
-                                    .send(Ok(StreamUpdate::MessageComplete {
-                                        message: assistant_msg,
-                                    }))
-                                    .await;
-                            }
-                            Err(fallback_err) => {
-                                let _ = tx.send(Err(fallback_err)).await;
-                            }
-                        }
-                        return;
-                    }
+                // O timeout do próprio cliente HTTP é o "Streaming timeout
+                // (SDK abort)" do CLI, que sobe como erro; e a variável de
+                // ambiente desliga o fallback.
+                let is_client_timeout = matches!(
+                    &stream_error,
+                    ClaudeSDKError::CliConnection(message) if message == STREAM_REQUEST_TIMEOUT_MESSAGE
+                );
+                if is_client_timeout || client.stream_fallback.disabled {
+                    let _ = tx.send(Err(stream_error)).await;
+                    return;
                 }
+
+                let initial_529s = u32::from(is_529_error(&stream_error));
+                if tx
+                    .send(Ok(StreamUpdate::NonStreamingFallback {
+                        cause: stream_error.to_string(),
+                    }))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+
+                // Consumidor que desistiu (interrupção) cancela a chamada.
+                let outcome = tokio::select! {
+                    result = client.create_message_non_streaming_fallback(request, initial_529s) => result,
+                    () = tx.closed() => return,
+                };
+                let update = outcome.map(|response| StreamUpdate::MessageComplete {
+                    message: assistant_from_response(response),
+                });
+                let _ = tx.send(update).await;
+                return;
             }
         });
 
@@ -658,6 +906,77 @@ mod tests {
         );
         assert!(headers.get("anthropic-beta").is_some());
         assert!(headers.get("x-client-request-id").is_some());
+    }
+
+    #[test]
+    fn stream_fallback_config_reads_the_cli_env_vars() {
+        let config = |pairs: &[(&str, &str)]| {
+            let map: std::collections::HashMap<String, String> = pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect();
+            StreamFallbackConfig::from_env(|key| map.get(key).cloned())
+        };
+
+        let defaults = config(&[]);
+        assert!(!defaults.disabled);
+        assert_eq!(defaults.idle_timeout, None);
+        assert_eq!(defaults.non_streaming_timeout, Duration::from_secs(300));
+
+        let custom = config(&[
+            ("CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK", "true"),
+            ("CLAUDE_ENABLE_STREAM_WATCHDOG", "1"),
+            ("API_TIMEOUT_MS", "4500"),
+        ]);
+        assert!(custom.disabled);
+        assert_eq!(custom.idle_timeout, Some(Duration::from_secs(90)));
+        assert_eq!(custom.non_streaming_timeout, Duration::from_millis(4500));
+
+        let remote = config(&[
+            ("CLAUDE_CODE_REMOTE", "yes"),
+            ("CLAUDE_ENABLE_STREAM_WATCHDOG", "on"),
+            ("CLAUDE_STREAM_IDLE_TIMEOUT_MS", "2000"),
+        ]);
+        assert_eq!(remote.non_streaming_timeout, Duration::from_secs(120));
+        assert_eq!(remote.idle_timeout, Some(Duration::from_secs(2)));
+
+        // O watchdog só liga com a variável própria.
+        assert_eq!(
+            config(&[("CLAUDE_STREAM_IDLE_TIMEOUT_MS", "2000")]).idle_timeout,
+            None
+        );
+    }
+
+    #[test]
+    fn non_streaming_params_cap_max_tokens_and_the_thinking_budget() {
+        let mut request = CreateMessageRequest::new("m", 100_000, Vec::new());
+        request.thinking = Some(ThinkingParam::enabled(80_000));
+        adjust_params_for_non_streaming(&mut request, MAX_NON_STREAMING_TOKENS);
+        assert_eq!(request.max_tokens, 64_000);
+        assert_eq!(
+            request.thinking.as_ref().and_then(|t| t.budget_tokens),
+            Some(63_999)
+        );
+
+        let mut small = CreateMessageRequest::new("m", 8_000, Vec::new());
+        small.thinking = Some(ThinkingParam::enabled(4_000));
+        adjust_params_for_non_streaming(&mut small, MAX_NON_STREAMING_TOKENS);
+        assert_eq!(small.max_tokens, 8_000);
+        assert_eq!(
+            small.thinking.as_ref().and_then(|t| t.budget_tokens),
+            Some(4_000)
+        );
+    }
+
+    #[test]
+    fn overloaded_stream_errors_count_as_529() {
+        assert!(is_529_error(&ClaudeSDKError::sdk(
+            "API stream error: overloaded_error - Overloaded"
+        )));
+        assert!(is_529_error(&ClaudeSDKError::process("x", Some(529), None)));
+        assert!(!is_529_error(&ClaudeSDKError::sdk(
+            "API stream error: api_error - boom"
+        )));
     }
 
     #[test]

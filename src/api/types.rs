@@ -94,6 +94,10 @@ pub enum ContentBlock {
     },
     #[serde(rename = "image")]
     Image { source: ImageSource },
+    /// Documento (PDF) em base64: o bloco que o Read do CLI manda numa
+    /// mensagem de usuário `isMeta` separada do tool_result.
+    #[serde(rename = "document")]
+    Document { source: DocumentSource },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -104,7 +108,7 @@ pub enum ContentBlock {
     ToolResult {
         tool_use_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        content: Option<Vec<ToolResultContent>>,
+        content: Option<ToolResultBlockContent>,
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -149,6 +153,17 @@ impl ContentBlock {
         }
     }
 
+    /// `{type: "document", source: {type: "base64", media_type, data}}`.
+    pub fn document_base64(media_type: impl Into<String>, data: impl Into<String>) -> Self {
+        Self::Document {
+            source: DocumentSource {
+                r#type: "base64".to_string(),
+                media_type: media_type.into(),
+                data: data.into(),
+            },
+        }
+    }
+
     pub fn tool_use(
         id: impl Into<String>,
         name: impl Into<String>,
@@ -171,11 +186,72 @@ impl ContentBlock {
             content: if content.is_empty() {
                 None
             } else {
-                Some(content)
+                Some(ToolResultBlockContent::Blocks(content))
             },
             is_error: if is_error { Some(true) } else { None },
             cache_control: None,
         }
+    }
+}
+
+/// O `content` de um bloco `tool_result`: texto cru (a forma que a maioria
+/// das tools do CLI devolve) ou lista de blocos (MCP, imagem).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ToolResultBlockContent {
+    Text(String),
+    Blocks(Vec<ToolResultContent>),
+}
+
+impl ToolResultBlockContent {
+    /// Os blocos, com o texto cru virando um bloco de texto.
+    pub fn blocks(&self) -> Vec<ToolResultContent> {
+        match self {
+            Self::Text(text) => vec![ToolResultContent::text(text.clone())],
+            Self::Blocks(blocks) => blocks.clone(),
+        }
+    }
+
+    /// Referências mutáveis a cada texto (o texto cru, ou o de cada bloco de
+    /// texto), para quem reescreve o conteúdo no lugar.
+    pub fn texts_mut(&mut self) -> Vec<&mut String> {
+        match self {
+            Self::Text(text) => vec![text],
+            Self::Blocks(blocks) => blocks
+                .iter_mut()
+                .filter_map(|b| match b {
+                    ToolResultContent::Text { text } => Some(text),
+                    _ => None,
+                })
+                .collect(),
+        }
+    }
+
+    /// O texto de todos os blocos de texto, concatenado.
+    pub fn text(&self) -> String {
+        match self {
+            Self::Text(text) => text.clone(),
+            Self::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(|b| match b {
+                    ToolResultContent::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+        }
+    }
+}
+
+impl From<Vec<ToolResultContent>> for ToolResultBlockContent {
+    fn from(blocks: Vec<ToolResultContent>) -> Self {
+        Self::Blocks(blocks)
+    }
+}
+
+impl From<String> for ToolResultBlockContent {
+    fn from(text: String) -> Self {
+        Self::Text(text)
     }
 }
 
@@ -206,6 +282,14 @@ impl ToolResultContent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageSource {
+    pub r#type: String,
+    pub media_type: String,
+    pub data: String,
+}
+
+/// Fonte de um bloco `document` (hoje só `base64`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentSource {
     pub r#type: String,
     pub media_type: String,
     pub data: String,
@@ -270,10 +354,32 @@ pub struct ToolDefinition {
     /// Server tools NÃO levam input_schema — fica `null` e é omitido.
     #[serde(skip_serializing_if = "serde_json::Value::is_null", default)]
     pub input_schema: serde_json::Value,
+    /// Domínios permitidos da server tool `web_search` (o `allowed_domains`
+    /// que o WebSearchTool do CLI manda na chamada aninhada).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub allowed_domains: Option<Vec<String>>,
+    /// Domínios bloqueados da server tool `web_search`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub blocked_domains: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub max_uses: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
+}
+
+impl Default for ToolDefinition {
+    fn default() -> Self {
+        Self {
+            r#type: None,
+            name: String::new(),
+            description: None,
+            input_schema: serde_json::Value::Null,
+            allowed_domains: None,
+            blocked_domains: None,
+            max_uses: None,
+            cache_control: None,
+        }
+    }
 }
 
 impl ToolDefinition {
@@ -282,10 +388,8 @@ impl ToolDefinition {
         Self {
             r#type: Some("web_search_20250305".to_string()),
             name: "web_search".to_string(),
-            description: None,
-            input_schema: serde_json::Value::Null,
             max_uses,
-            cache_control: None,
+            ..Self::default()
         }
     }
 }
@@ -396,6 +500,10 @@ pub enum StreamEvent {
     Ping,
     #[serde(rename = "error")]
     Error { error: ApiError },
+    /// Tipo de evento que o SDK não conhece: o CLI ignora (o `switch` de
+    /// `queryModel` não tem caso para ele) e segue o stream.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -449,6 +557,9 @@ pub enum Delta {
     ThinkingDelta { thinking: String },
     #[serde(rename = "signature_delta")]
     SignatureDelta { signature: String },
+    /// `citations_delta` e qualquer delta novo: o CLI não acumula nada deles.
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Clone, Deserialize)]

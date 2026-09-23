@@ -57,14 +57,45 @@ use crate::types::{
     ClaudeAgentOptions, SystemPrompt, SystemPromptConfig, ThinkingConfig, ToolsConfig,
 };
 
-/// Teto de espera por uma resposta do cliente a um `control_request` nosso
-/// (can_use_tool / hook_callback). Estourar vira recusa/ausência — nunca
-/// pendura a run.
-const CONTROL_ROUNDTRIP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// Teto default de um `hook_callback` (`TOOL_HOOK_EXECUTION_TIMEOUT_MS` do
+/// CLI), quando o matcher não traz `timeout`. O `can_use_tool` não tem teto:
+/// o usuário pode deixar um formulário aberto o tempo que quiser, e só o
+/// interrupt do turno encerra a espera.
+const TOOL_HOOK_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Por que uma espera por resposta do cliente terminou sem resposta.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoundtripFailure {
+    /// O turno já estava interrompido antes do envio (`Request aborted`).
+    AbortedBeforeSend,
+    /// Interrupt do turno durante a espera (`AbortError`).
+    Aborted,
+    /// Estourou o teto pedido.
+    TimedOut,
+    /// O canal com o cliente caiu antes da resposta.
+    Closed,
+}
+
+impl RoundtripFailure {
+    /// O texto que o `${error}` do CLI produziria para este motivo.
+    fn js_error(self) -> &'static str {
+        match self {
+            RoundtripFailure::AbortedBeforeSend => "Error: Request aborted",
+            RoundtripFailure::Aborted | RoundtripFailure::TimedOut => "AbortError",
+            RoundtripFailure::Closed => {
+                "Error: Tool permission stream closed before response received"
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Estado compartilhado entre write()/engine
 // ---------------------------------------------------------------------------
+
+/// Os `hook_callback` por evento: id do callback e `timeout` (segundos) do
+/// matcher que o registrou.
+type HookCallbacks = HashMap<String, Vec<(String, Option<f64>)>>;
 
 struct Shared {
     /// Frames a caminho do cliente (o que `read_message` entrega).
@@ -72,8 +103,9 @@ struct Shared {
     /// Respostas pendentes aos `control_request` QUE NÓS emitimos.
     pending: Mutex<HashMap<String, oneshot::Sender<Value>>>,
     /// Ids de callback de hook por evento, capturados do `initialize`
-    /// (ex.: "PostToolUse" -> ["hook_0"]).
-    hooks: Mutex<HashMap<String, Vec<String>>>,
+    /// (ex.: "PostToolUse" -> [("hook_0", None)]), cada um com o `timeout`
+    /// (segundos) do seu matcher, quando veio.
+    hooks: Mutex<HookCallbacks>,
     /// Token de cancelamento do turno em curso (interrupt).
     abort: Mutex<CancellationToken>,
     /// Override de modelo vindo de `set_model`.
@@ -119,8 +151,20 @@ impl Shared {
         format!("ntr_{n}")
     }
 
-    /// Emite um control_request ao cliente e espera a resposta.
-    async fn control_roundtrip(&self, body: Value) -> Option<Value> {
+    /// Emite um control_request ao cliente e espera a resposta, como o
+    /// `StructuredIO.sendRequest` do CLI: sem teto próprio (`timeout = None`
+    /// espera o quanto o cliente levar), cancelada pelo interrupt do turno
+    /// em curso. Cancelar ou estourar o `timeout` avisa o cliente com um
+    /// `control_cancel_request`.
+    async fn control_roundtrip(
+        &self,
+        body: Value,
+        timeout: Option<std::time::Duration>,
+    ) -> std::result::Result<Value, RoundtripFailure> {
+        let cancel = self.abort.lock().await.clone();
+        if cancel.is_cancelled() {
+            return Err(RoundtripFailure::AbortedBeforeSend);
+        }
         let request_id = self.next_request_id();
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(request_id.clone(), tx);
@@ -131,15 +175,27 @@ impl Shared {
         });
         if self.outbound.send(frame).is_err() {
             self.pending.lock().await.remove(&request_id);
-            return None;
+            return Err(RoundtripFailure::Closed);
         }
-        match tokio::time::timeout(CONTROL_ROUNDTRIP_TIMEOUT, rx).await {
-            Ok(Ok(value)) => Some(value),
-            _ => {
-                self.pending.lock().await.remove(&request_id);
-                None
+        let deadline = async {
+            match timeout {
+                Some(limit) => tokio::time::sleep(limit).await,
+                None => std::future::pending::<()>().await,
             }
-        }
+        };
+        let failure = tokio::select! {
+            answer = rx => {
+                return answer.map_err(|_| RoundtripFailure::Closed);
+            }
+            _ = cancel.cancelled() => RoundtripFailure::Aborted,
+            _ = deadline => RoundtripFailure::TimedOut,
+        };
+        self.pending.lock().await.remove(&request_id);
+        let _ = self.outbound.send(json!({
+            "type": "control_cancel_request",
+            "request_id": request_id,
+        }));
+        Err(failure)
     }
 
     /// Dispara todos os `hook_callback` registrados para um evento e devolve
@@ -154,7 +210,7 @@ impl Shared {
             .cloned()
             .unwrap_or_default();
         let mut responses = Vec::new();
-        for callback_id in ids {
+        for (callback_id, timeout_secs) in ids {
             let mut input = base_input.clone();
             if let Some(obj) = input.as_object_mut() {
                 obj.insert("hook_event_name".to_string(), json!(event));
@@ -163,16 +219,27 @@ impl Shared {
                 .get("tool_use_id")
                 .cloned()
                 .unwrap_or(Value::Null);
+            // `createHookCallback`: o `timeout` do matcher (segundos) ou o
+            // `TOOL_HOOK_EXECUTION_TIMEOUT_MS`, somado ao abort do turno.
+            // Estourar ou ser cancelado vale como hook que não fez nada (`{}`).
+            let limit = timeout_secs
+                .filter(|s| *s > 0.0)
+                .map(std::time::Duration::from_secs_f64)
+                .unwrap_or(TOOL_HOOK_EXECUTION_TIMEOUT);
             let response = self
-                .control_roundtrip(json!({
-                    "subtype": "hook_callback",
-                    "callback_id": callback_id,
-                    "input": input,
-                    "tool_use_id": tool_use_id,
-                }))
+                .control_roundtrip(
+                    json!({
+                        "subtype": "hook_callback",
+                        "callback_id": callback_id,
+                        "input": input,
+                        "tool_use_id": tool_use_id,
+                    }),
+                    Some(limit),
+                )
                 .await;
-            if let Some(r) = response {
-                responses.push(r);
+            match response {
+                Ok(r) => responses.push(r),
+                Err(_) => responses.push(json!({})),
             }
         }
         responses
@@ -191,9 +258,104 @@ pub struct NativeApiTransport {
     options: Option<ClaudeAgentOptions>,
     shared: Option<Arc<Shared>>,
     outbound_rx: Option<mpsc::UnboundedReceiver<Value>>,
-    user_tx: Option<mpsc::UnboundedSender<Value>>,
+    /// Canal dos frames de usuário para o engine. Fica num slot compartilhado
+    /// com o [`NativeWriter`]: fechar a entrada é esvaziar o slot, e isso vale
+    /// para os dois lados ao mesmo tempo.
+    user_tx: UserSlot,
     engine: Option<tokio::task::JoinHandle<()>>,
     ready: bool,
+}
+
+/// Slot do canal de frames de usuário, compartilhado entre o transporte e o
+/// escritor concorrente.
+type UserSlot = Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<Value>>>>;
+
+/// Escritor concorrente do transporte nativo: o mesmo tratamento de frames
+/// do `write`, sem precisar do transporte emprestado (a leitura segue livre
+/// numa outra tarefa).
+struct NativeWriter {
+    shared: Arc<Shared>,
+    user_tx: UserSlot,
+}
+
+#[async_trait::async_trait]
+impl crate::internal::transport::TransportWriter for NativeWriter {
+    async fn write(&self, data: &str) -> Result<()> {
+        write_frames(&self.shared, &self.user_tx, data).await
+    }
+
+    async fn end_input(&self) -> Result<()> {
+        close_input(&self.shared, &self.user_tx);
+        Ok(())
+    }
+}
+
+/// Marca a entrada como fechada e derruba o canal: o engine drena a fila e
+/// encerra o stream de saída (EOF para `read_message`).
+fn close_input(shared: &Shared, user_tx: &UserSlot) {
+    shared.input_closed.store(true, Ordering::Relaxed);
+    if let Ok(mut slot) = user_tx.lock() {
+        *slot = None;
+    }
+}
+
+/// Trata as linhas escritas pelo cliente: frames de usuário vão para o
+/// engine, `control_request` é atendido na hora e `control_response` destrava
+/// quem esperava por ela.
+async fn write_frames(shared: &Arc<Shared>, user_tx: &UserSlot, data: &str) -> Result<()> {
+    for line in data.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let frame: Value = serde_json::from_str(line).map_err(|e| {
+            ClaudeSDKError::sdk(format!("invalid frame written to native transport: {e}"))
+        })?;
+        match frame.get("type").and_then(Value::as_str) {
+            Some("user") => {
+                if shared.input_closed.load(Ordering::Relaxed) {
+                    return Err(ClaudeSDKError::cli_connection(
+                        "Transport is not ready for writing",
+                    ));
+                }
+                let tx = user_tx
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.clone())
+                    .ok_or_else(|| {
+                        ClaudeSDKError::cli_connection("Transport is not ready for writing")
+                    })?;
+                tx.send(frame)
+                    .map_err(|_| ClaudeSDKError::cli_connection("engine terminated"))?;
+            }
+            Some("control_request") => {
+                handle_client_control(shared, &frame).await;
+            }
+            Some("control_response") => {
+                let response = &frame["response"];
+                let request_id = response
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                if let Some(tx) = shared.pending.lock().await.remove(&request_id) {
+                    // Erro do cliente vira payload de recusa implícita: o
+                    // consumidor interpreta a ausência de "behavior"/output.
+                    let payload =
+                        if response.get("subtype").and_then(Value::as_str) == Some("success") {
+                            response.get("response").cloned().unwrap_or(json!({}))
+                        } else {
+                            json!({"error": response.get("error").cloned().unwrap_or(Value::Null)})
+                        };
+                    let _ = tx.send(payload);
+                }
+            }
+            _ => {
+                // Frame desconhecido na entrada: ignorado, como o CLI faz.
+            }
+        }
+    }
+    Ok(())
 }
 
 impl NativeApiTransport {
@@ -205,7 +367,7 @@ impl NativeApiTransport {
             options: Some(options),
             shared: None,
             outbound_rx: None,
-            user_tx: None,
+            user_tx: Arc::new(std::sync::Mutex::new(None)),
             engine: None,
             ready: false,
         }
@@ -255,7 +417,9 @@ impl Transport for NativeApiTransport {
         let engine = tokio::spawn(engine_main(options, Arc::clone(&shared), user_rx));
         self.shared = Some(shared);
         self.outbound_rx = Some(outbound_rx);
-        self.user_tx = Some(user_tx);
+        if let Ok(mut slot) = self.user_tx.lock() {
+            *slot = Some(user_tx);
+        }
         self.engine = Some(engine);
         self.ready = true;
         Ok(())
@@ -265,7 +429,9 @@ impl Transport for NativeApiTransport {
         if let Some(shared) = &self.shared {
             shared.abort.lock().await.cancel();
         }
-        self.user_tx = None;
+        if let Ok(mut slot) = self.user_tx.lock() {
+            *slot = None;
+        }
         if let Some(engine) = self.engine.take() {
             engine.abort();
         }
@@ -280,70 +446,31 @@ impl Transport for NativeApiTransport {
             .shared
             .as_ref()
             .ok_or_else(|| ClaudeSDKError::cli_connection("Transport is not ready for writing"))?;
-        for line in data.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let frame: Value = serde_json::from_str(line).map_err(|e| {
-                ClaudeSDKError::sdk(format!("invalid frame written to native transport: {e}"))
-            })?;
-            match frame.get("type").and_then(Value::as_str) {
-                Some("user") => {
-                    if shared.input_closed.load(Ordering::Relaxed) {
-                        return Err(ClaudeSDKError::cli_connection(
-                            "Transport is not ready for writing",
-                        ));
-                    }
-                    let tx = self.user_tx.as_ref().ok_or_else(|| {
-                        ClaudeSDKError::cli_connection("Transport is not ready for writing")
-                    })?;
-                    tx.send(frame)
-                        .map_err(|_| ClaudeSDKError::cli_connection("engine terminated"))?;
-                }
-                Some("control_request") => {
-                    handle_client_control(shared, &frame).await;
-                }
-                Some("control_response") => {
-                    let response = &frame["response"];
-                    let request_id = response
-                        .get("request_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    if let Some(tx) = shared.pending.lock().await.remove(&request_id) {
-                        // Erro do cliente vira payload de recusa implícita: o
-                        // consumidor interpreta a ausência de "behavior"/output.
-                        let payload = if response.get("subtype").and_then(Value::as_str)
-                            == Some("success")
-                        {
-                            response.get("response").cloned().unwrap_or(json!({}))
-                        } else {
-                            json!({"error": response.get("error").cloned().unwrap_or(Value::Null)})
-                        };
-                        let _ = tx.send(payload);
-                    }
-                }
-                _ => {
-                    // Frame desconhecido na entrada: ignorado, como o CLI faz.
-                }
-            }
-        }
-        Ok(())
+        write_frames(shared, &self.user_tx, data).await
     }
 
     async fn end_input(&mut self) -> Result<()> {
-        if let Some(shared) = &self.shared {
-            shared.input_closed.store(true, Ordering::Relaxed);
+        match &self.shared {
+            Some(shared) => close_input(shared, &self.user_tx),
+            None => {
+                if let Ok(mut slot) = self.user_tx.lock() {
+                    *slot = None;
+                }
+            }
         }
-        // Derrubar o canal de user frames faz o engine drenar a fila e
-        // encerrar o stream de saída (EOF para `read_message`).
-        self.user_tx = None;
         Ok(())
     }
 
     fn is_ready(&self) -> bool {
         self.ready
+    }
+
+    fn concurrent_writer(&self) -> Option<Arc<dyn crate::internal::transport::TransportWriter>> {
+        let shared = Arc::clone(self.shared.as_ref()?);
+        Some(Arc::new(NativeWriter {
+            shared,
+            user_tx: Arc::clone(&self.user_tx),
+        }))
     }
 
     async fn read_message(&mut self) -> Result<Option<Value>> {
@@ -387,11 +514,15 @@ async fn handle_client_control(shared: &Arc<Shared>, frame: &Value) {
                     let mut ids = Vec::new();
                     if let Some(list) = matchers.as_array() {
                         for matcher in list {
+                            let timeout = matcher.get("timeout").and_then(Value::as_f64);
                             if let Some(cb_ids) =
                                 matcher.get("hookCallbackIds").and_then(Value::as_array)
                             {
                                 ids.extend(
-                                    cb_ids.iter().filter_map(Value::as_str).map(str::to_string),
+                                    cb_ids
+                                        .iter()
+                                        .filter_map(Value::as_str)
+                                        .map(|id| (id.to_string(), timeout)),
                                 );
                             }
                         }
@@ -683,13 +814,14 @@ fn resolve_config(options: &ClaudeAgentOptions) -> Result<EngineConfig> {
     })
 }
 
-/// Prompt base do preset `claude_code` — o CLI monta o seu por dentro; o
-/// nativo oferece um preset coerente (identidade + ambiente) em vez de vazio.
+/// Prompt base do preset `claude_code`: o CLI monta o seu por dentro; o
+/// nativo oferece um preset coerente (tarefa + ambiente) em vez de vazio. A
+/// identidade não mora aqui: é o bloco de prefixo que a camada de API põe
+/// antes (ver [`system_prefix`]).
 fn preset_system_prompt(config: &EngineConfig, model: &str) -> String {
     let today = chrono_free_date();
     format!(
-        "You are Claude Code, Anthropic's official CLI for Claude.\n\
-         You are an interactive agent that helps users with software engineering tasks. \
+        "You are an interactive agent that helps users with software engineering tasks. \
          Use the tools available to you to assist the user.\n\n\
          Here is useful information about the environment you are running in:\n\
          <env>\n\
@@ -730,25 +862,144 @@ fn system_prompt_blocks(
     config: &EngineConfig,
     model: &str,
 ) -> Vec<SystemBlock> {
-    match &options.system_prompt {
-        Some(SystemPromptConfig::String(s)) if !s.is_empty() => vec![SystemBlock::text(s.clone())],
+    // O `systemPrompt` do `QueryEngine` (`[custom] ou default, + append`) que
+    // o `splitSysPromptPrefix` junta com "\n\n" num bloco só, depois do
+    // cabeçalho e do prefixo. Sem `system_prompt` o SDK Python passa
+    // `--system-prompt ""`: prompt vazio, que o `filter(Boolean)` descarta, e
+    // o `system` fica só com cabeçalho e prefixo.
+    let parts: Vec<String> = match &options.system_prompt {
+        Some(SystemPromptConfig::String(s)) => vec![s.clone()],
         // Preset `claude_code`: o nativo monta um prompt base coerente
-        // (identidade + ambiente) e concatena o `append`.
+        // (tarefa + ambiente) e concatena o `append`.
         Some(SystemPromptConfig::Structured(SystemPrompt::Preset { append, .. })) => {
-            let mut blocks = vec![SystemBlock::text(preset_system_prompt(config, model))];
-            if let Some(extra) = append.as_ref().filter(|s| !s.is_empty()) {
-                blocks.push(SystemBlock::text(extra.clone()));
-            }
-            blocks
+            let mut parts = vec![preset_system_prompt(config, model)];
+            parts.extend(append.clone().filter(|s| !s.is_empty()));
+            parts
         }
         Some(SystemPromptConfig::Structured(SystemPrompt::File { path })) => {
-            std::fs::read_to_string(path)
-                .ok()
-                .filter(|s| !s.is_empty())
-                .map(|s| vec![SystemBlock::text(s)])
-                .unwrap_or_default()
+            std::fs::read_to_string(path).ok().into_iter().collect()
         }
-        _ => Vec::new(),
+        None => Vec::new(),
+    };
+    let joined = parts
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if joined.is_empty() {
+        Vec::new()
+    } else {
+        vec![SystemBlock::text(joined)]
+    }
+}
+
+/// `getAttributionHeader` + `getCLISyspromptPrefix` numa sessão SDK
+/// (`isNonInteractive`): o prefixo de identidade depende só de haver
+/// `append` (o do preset), e o cabeçalho leva o `CLAUDE_CODE_ENTRYPOINT` que
+/// o transporte subprocess daria ao CLI (`sdk-rs`, ou o do `env` das
+/// opções), a menos que `CLAUDE_CODE_ATTRIBUTION_HEADER` esteja definido e
+/// falso.
+fn system_prefix(options: &ClaudeAgentOptions) -> crate::agentic::SystemPrefix {
+    let has_append = matches!(
+        &options.system_prompt,
+        Some(SystemPromptConfig::Structured(SystemPrompt::Preset { append: Some(a), .. })) if !a.is_empty()
+    );
+    let identity = if has_append {
+        crate::agentic::AGENT_SDK_CLAUDE_CODE_PRESET_PREFIX
+    } else {
+        crate::agentic::AGENT_SDK_PREFIX
+    };
+    let header_flag = options
+        .env
+        .get("CLAUDE_CODE_ATTRIBUTION_HEADER")
+        .cloned()
+        .or_else(|| std::env::var("CLAUDE_CODE_ATTRIBUTION_HEADER").ok());
+    let header_off = matches!(
+        header_flag
+            .map(|v| v.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("0" | "false" | "no" | "off")
+    );
+    crate::agentic::SystemPrefix {
+        identity: identity.to_string(),
+        attribution_entrypoint: (!header_off).then(|| {
+            options
+                .env
+                .get("CLAUDE_CODE_ENTRYPOINT")
+                .cloned()
+                .unwrap_or_else(|| "sdk-rs".to_string())
+        }),
+    }
+}
+
+/// O contexto de usuário da sessão: as memórias das fontes pedidas (todas,
+/// sem `setting_sources`, que é o CLI sem `--setting-sources`), a partir do
+/// cwd da sessão, memoizado como o `getUserContext` do CLI.
+fn user_context_cache(
+    options: &ClaudeAgentOptions,
+    config: &EngineConfig,
+) -> Arc<crate::memory::UserContextCache> {
+    let memory_config = crate::memory::MemoryConfig::from_env(
+        std::path::Path::new(&config.cwd),
+        options.setting_sources.as_deref(),
+        &options.env,
+    );
+    Arc::new(crate::memory::UserContextCache::new(
+        memory_config,
+        options.env.clone(),
+    ))
+}
+
+/// Os campos do `init` que dependem da sessão e não do loop.
+fn init_info(options: &ClaudeAgentOptions, mcp_status: &Value) -> crate::agentic::InitInfo {
+    let mcp_servers = mcp_status
+        .get("mcpServers")
+        .and_then(Value::as_array)
+        .map(|servers| {
+            servers
+                .iter()
+                .map(|s| json!({"name": s.get("name"), "status": s.get("status")}))
+                .collect()
+        })
+        .unwrap_or_default();
+    // Os tipos que a tool de agente do nativo aceita: o general-purpose e os
+    // das opções (builtins primeiro, como o `getAgentDefinitions`).
+    let wants_agent = match &options.tools {
+        Some(ToolsConfig::List(names)) => names.iter().any(|n| n == "Task" || n == "Agent"),
+        _ => true,
+    };
+    let agents = if wants_agent {
+        let mut custom: Vec<String> = options
+            .agents
+            .as_ref()
+            .map(|a| {
+                a.keys()
+                    .filter(|k| *k != "general-purpose")
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        custom.sort();
+        std::iter::once("general-purpose".to_string())
+            .chain(custom)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let betas: Vec<String> = options
+        .betas
+        .iter()
+        .filter_map(|b| serde_json::to_value(b).ok())
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    crate::agentic::InitInfo {
+        mcp_servers,
+        // O nativo exige a chave no ambiente: é o `ANTHROPIC_API_KEY` que o
+        // CLI não interativo reporta.
+        api_key_source: "ANTHROPIC_API_KEY".to_string(),
+        betas: (!betas.is_empty()).then_some(betas),
+        agents,
+        ..crate::agentic::InitInfo::default()
     }
 }
 
@@ -794,16 +1045,32 @@ fn unsupported_options(options: &ClaudeAgentOptions) -> Vec<&'static str> {
     if options.settings.is_some() {
         unsupported.push("settings");
     }
-    if options.setting_sources.is_some() {
-        unsupported.push("setting_sources");
-    }
-    if options.skills.is_some() {
+    // `setting_sources` tem tradução: decide quais memórias (`CLAUDE.md`)
+    // entram no contexto de usuário (ver `crate::memory`).
+    //
+    // `skills`: o nativo não tem skills. `[]` é o "nenhuma skill" do SDK
+    // Python (vai no `initialize` e o CLI esvazia a lista), que é exatamente
+    // o que o nativo já faz; só `"all"` ou uma lista com nomes pede algo que
+    // não existe aqui.
+    let wants_skills = match &options.skills {
+        None => false,
+        Some(Value::Array(names)) => !names.is_empty(),
+        Some(_) => true,
+    };
+    if wants_skills {
         unsupported.push("skills");
     }
     if options.sandbox.is_some() {
         unsupported.push("sandbox");
     }
-    if options.permission_prompt_tool_name.is_some() {
+    // `stdio` é o marcador que o cliente põe quando há `can_use_tool` (o
+    // pedido de permissão vai pelo protocolo de controle), e esse caminho o
+    // nativo atende; outro nome seria uma tool MCP de permissão.
+    if options
+        .permission_prompt_tool_name
+        .as_deref()
+        .is_some_and(|name| name != "stdio")
+    {
         unsupported.push("permission_prompt_tool_name");
     }
     if options.task_budget.is_some() {
@@ -863,9 +1130,11 @@ fn pending_mcp_status(options: &ClaudeAgentOptions) -> Vec<Value> {
         .map(|(name, _)| name)
         .collect();
     names.sort();
-    status.extend(names.into_iter().map(|name| {
-        json!({"name": name, "status": "pending", "scope": "user"})
-    }));
+    status.extend(
+        names
+            .into_iter()
+            .map(|name| json!({"name": name, "status": "pending", "scope": "user"})),
+    );
     status
 }
 
@@ -896,18 +1165,54 @@ async fn engine_main(
         }
     };
 
-    // Identidade e histórico da sessão (resume/fork).
+    // Identidade e histórico da sessão (resume/fork), como o
+    // `loadInitialMessages` do modo print: a conversa é a cadeia do
+    // transcript desserializada (`loadConversationForResume`), e o request
+    // a vê pelo `normalizeMessagesForAPI`.
+    let mut transcript = TranscriptState::default();
     let (session_id, mut history) = match (&options.resume, options.fork_session) {
         (Some(resume_id), fork) => {
-            let loaded = storage.load(resume_id).await.unwrap_or_default();
+            let loaded = match storage.load_conversation(resume_id).await {
+                Ok(Some(conversation)) => conversation,
+                Ok(None) => {
+                    let _ = shared.outbound.send(json!({
+                        "type": "error",
+                        "error": format!("No conversation found with session ID: {resume_id}"),
+                    }));
+                    return;
+                }
+                Err(e) => {
+                    let _ = shared.outbound.send(json!({
+                        "type": "error",
+                        "error": format!("Failed to resume session: {e}"),
+                    }));
+                    return;
+                }
+            };
+            // `--fork-session` com `--session-id` usa o id pedido para a
+            // sessão nova, como o CLI; sem ele, um uuid novo.
             let sid = if fork {
-                uuid::Uuid::new_v4().to_string()
+                options
+                    .session_id
+                    .clone()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
             } else {
                 resume_id.clone()
             };
-            (sid, loaded)
+            let history = crate::internal::transcript_load::messages_for_api(&loaded.messages);
+            transcript.resume_from(loaded, fork);
+            (sid, history)
         }
-        (None, _) => (uuid::Uuid::new_v4().to_string(), Vec::new()),
+        // `--session-id`: a sessão nova nasce com o id que o chamador escolheu
+        // (quem monta o diretório de trabalho antes da primeira mensagem
+        // precisa do id antes do CLI existir).
+        (None, _) => (
+            options
+                .session_id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            Vec::new(),
+        ),
     };
 
     let mut client = AnthropicClient::new(config.api_key.clone());
@@ -917,6 +1222,11 @@ async fn engine_main(
     if let Some(model) = &config.model {
         client = client.with_model(model.clone());
     }
+    // O fallback sem streaming lê o env das opções sobreposto ao do processo.
+    client =
+        client.with_stream_fallback(crate::api::client::StreamFallbackConfig::from_env(|key| {
+            env_of(&options, key)
+        }));
     // Betas das options viram header (o único permitido pelo SDK é o 1M).
     let mut context_window_tokens = 200_000usize;
     for beta in &options.betas {
@@ -929,7 +1239,6 @@ async fn engine_main(
     }
 
     let transcript_path = storage.session_path(&session_id).display().to_string();
-    let mut last_uuid: Option<String> = None;
 
     // A geração de título fica armada aqui, com tudo que ela precisa: a partir
     // deste ponto um `generate_session_title` tem sessão, transcript e cliente.
@@ -1031,7 +1340,17 @@ async fn engine_main(
     let task_store = Arc::new(crate::tools::task_store::TaskStore::new());
     let todo_store = Arc::new(std::sync::Mutex::new(serde_json::json!([])));
 
+    // `getUserContext` memoizado pela sessão inteira (o "processo" do CLI):
+    // as memórias são lidas na primeira consulta e relidas só depois de uma
+    // compactação da conversa principal.
+    let user_context = user_context_cache(&options, &config);
+
     while let Some(frame) = user_rx.recv().await {
+        // Token de cancelamento novo por corrida (interrupt cancela SÓ o
+        // turno), criado já na chegada do prompt: as esperas pelo cliente
+        // (hooks do UserPromptSubmit inclusive) são canceladas por ele, e o
+        // interrupt de um turno anterior não pode cancelar as deste.
+        *shared.abort.lock().await = CancellationToken::new();
         if let Some(budget) = options.max_budget_usd {
             if session_cost_usd >= budget {
                 let _ = shared.outbound.send(json!({
@@ -1055,6 +1374,7 @@ async fn engine_main(
         if content.is_empty() {
             continue;
         }
+        let mut prompt_attachments: Vec<Value> = Vec::new();
 
         // UserPromptSubmit: pode BLOQUEAR o prompt ou anexar contexto.
         {
@@ -1087,11 +1407,14 @@ async fn engine_main(
                     );
                     break;
                 }
+                // O `processUserInput` do CLI: o contexto vira um anexo
+                // `hook_additional_context` (gravado depois do prompt), que
+                // chega ao modelo como `<system-reminder>` fundido ao prompt.
                 if let Some(ctx) = r
                     .pointer("/hookSpecificOutput/additionalContext")
                     .and_then(Value::as_str)
                 {
-                    content.push(ContentBlock::text(ctx.to_string()));
+                    prompt_attachments.push(user_prompt_context_attachment(ctx));
                 }
             }
             if let Some(reason) = blocked_reason {
@@ -1106,29 +1429,64 @@ async fn engine_main(
             }
         }
 
-        // Persiste o turno do usuário no JSONL (e espelha).
-        match storage
-            .append_user(&session_id, &content, last_uuid.as_deref(), &config.cwd)
-            .await
+        // Persiste o turno do usuário no JSONL (e espelha), como o
+        // `recordTranscript` do `submitMessage`: o que o resume trouxe e o
+        // arquivo ainda não tem, o prompt (com o conteúdo do jeito que veio
+        // e o `uuid` do frame, quando veio) e os anexos dos hooks.
         {
-            Ok((uuid, entry)) => {
-                last_uuid = Some(uuid);
-                if config.mirror {
-                    emit_mirror(&shared, &transcript_path, entry);
-                }
-            }
-            Err(e) => {
+            transcript.prompt_id = Some(uuid::Uuid::new_v4().to_string());
+            let raw_content = frame
+                .pointer("/message/content")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let prompt = crate::internal::transcript_load::user_message_value(
+                raw_content,
+                crate::internal::transcript_load::UserMessageFlags {
+                    uuid: frame
+                        .get("uuid")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    ..Default::default()
+                },
+            );
+            let mut messages = std::mem::take(&mut transcript.pending_resumed);
+            messages.push(prompt);
+            messages.extend(prompt_attachments.iter().cloned());
+            if let Err(e) = transcript
+                .record(
+                    &storage,
+                    &shared,
+                    &config,
+                    &session_id,
+                    &transcript_path,
+                    messages,
+                )
+                .await
+            {
                 let _ = shared.outbound.send(json!({
                     "type": "error",
                     "error": format!("failed to persist user turn: {e}"),
                 }));
             }
         }
+        // Os anexos sobem para antes do prompt (`reorderAttachmentsForAPI`) e
+        // o prompt se funde a eles (`mergeUserMessages`), como no request do
+        // CLI.
+        if !prompt_attachments.is_empty() {
+            let mut sequence = prompt_attachments;
+            sequence.push(crate::internal::transcript_load::user_message_value(
+                serde_json::to_value(&content).unwrap_or_default(),
+                Default::default(),
+            ));
+            content = crate::internal::transcript_load::messages_for_api(&sequence)
+                .into_iter()
+                .flat_map(|m| m.content)
+                .collect();
+        }
         history.push(ApiMessage::user(content));
 
-        // Token de cancelamento novo por corrida (interrupt cancela SÓ o turno).
-        let abort = CancellationToken::new();
-        *shared.abort.lock().await = abort.clone();
+        // O token da corrida, criado na chegada do prompt.
+        let abort = shared.abort.lock().await.clone();
 
         let model = {
             let override_ = shared.model_override.lock().await.clone();
@@ -1151,6 +1509,8 @@ async fn engine_main(
                 client: client.clone(),
                 model: model.clone(),
                 mcp_tools: remote_tools.clone(),
+                user_context: Arc::clone(&user_context),
+                abort: abort.clone(),
             },
         )
         .await;
@@ -1261,6 +1621,10 @@ async fn engine_main(
             pre_compact_hook: Some(pre_compact),
             on_history_rewrite: Some(on_history_rewrite),
             context_window_tokens,
+            user_context: Some(Arc::clone(&user_context)),
+            clear_user_context_on_compact: true,
+            system_prefix: Some(system_prefix(&options)),
+            init_info: init_info(&options, &*shared.mcp_status.lock().await),
             ..AgenticLoopOptions::default()
         };
 
@@ -1273,11 +1637,15 @@ async fn engine_main(
                     // Compaction reescreveu o histórico dentro do loop: o
                     // snapshot chega ANTES do evento de boundary — aplicar
                     // aqui é o que faz a compactação sobreviver entre turnos.
+                    let mut compacted: Option<Vec<ApiMessage>> = None;
                     if let AgenticEvent::System { subtype, .. } = &ev {
                         if subtype == "microcompact" || subtype == "compact_boundary" {
                             if let Ok(mut slot) = shared.rewritten_history.lock() {
                                 if let Some(snapshot) = slot.take() {
                                     history = snapshot;
+                                    if subtype == "compact_boundary" {
+                                        compacted = Some(history.clone());
+                                    }
                                 }
                             }
                         }
@@ -1289,21 +1657,30 @@ async fn engine_main(
                     {
                         session_cost_usd += *cost;
                     }
-                    track_history(&mut history, &ev);
-                    persist_event(
-                        &storage,
-                        &shared,
-                        &config,
-                        &session_id,
-                        &transcript_path,
-                        &mut last_uuid,
-                        &ev,
-                    )
-                    .await;
-                    match serde_json::to_value(&ev) {
-                        Ok(frame) => {
-                            if shared.outbound.send(frame).is_err() {
-                                return;
+                    track_history(&mut history, &mut transcript.history_assistant_id, &ev);
+                    if let Err(e) = transcript
+                        .persist_event(
+                            &storage,
+                            &shared,
+                            &config,
+                            &session_id,
+                            &transcript_path,
+                            &ev,
+                            compacted.as_deref(),
+                        )
+                        .await
+                    {
+                        let _ = shared.outbound.send(json!({
+                            "type": "error",
+                            "error": format!("failed to persist transcript: {e}"),
+                        }));
+                    }
+                    match sdk_frames(&ev) {
+                        Ok(frames) => {
+                            for frame in frames {
+                                if shared.outbound.send(frame).is_err() {
+                                    return;
+                                }
                             }
                         }
                         Err(e) => {
@@ -1321,6 +1698,17 @@ async fn engine_main(
                     }));
                 }
             }
+        }
+        // Blocos de uma resposta cortada no meio (interrupt, erro) vão para o
+        // transcript do jeito que saíram, como o CLI os grava.
+        if let Err(e) = transcript
+            .flush_assistant(&storage, &shared, &config, &session_id, &transcript_path)
+            .await
+        {
+            let _ = shared.outbound.send(json!({
+                "type": "error",
+                "error": format!("failed to persist transcript: {e}"),
+            }));
         }
 
         // Estimativa de contexto atualizada para o get_context_usage.
@@ -1348,7 +1736,9 @@ async fn engine_main(
             });
         }
     }
-    // SessionEnd antes do EOF: o cliente ainda está lendo o stream.
+    // SessionEnd antes do EOF: o cliente ainda está lendo o stream. Um token
+    // novo, para o interrupt do último turno não cancelar a espera do hook.
+    *shared.abort.lock().await = CancellationToken::new();
     shared
         .run_hooks(
             "SessionEnd",
@@ -1366,6 +1756,92 @@ async fn engine_main(
         client.close().await;
     }
     // user_tx caiu (end_input/close) e a fila drenou: EOF.
+}
+
+/// Os frames stream-json de um evento do loop, como o `normalizeMessage` do
+/// `QueryEngine` do CLI os emite.
+///
+/// Para mensagem de usuário, duas coisas do JS: a mensagem `isMeta` sai com
+/// `isSynthetic: true` (o documento que o Read anexa, por exemplo), e a
+/// mensagem com mais de um bloco sai partida em um frame por bloco
+/// (`normalizeMessages`), com o uuid derivado pelo `deriveUUID`. O histórico e
+/// o transcript continuam com a mensagem inteira, como no JS.
+///
+/// Para mensagem de assistente: o `message` ganha `context_management: null`
+/// quando não tem, e uma mensagem com vários blocos (a do fallback não
+/// streamado) também sai partida. O fechamento interno da resposta
+/// (`AssistantFinal`) não vira frame. A de usuário leva ainda `timestamp` e
+/// `tool_use_result`.
+fn sdk_frames(event: &AgenticEvent) -> serde_json::Result<Vec<Value>> {
+    if let AgenticEvent::AssistantFinal { .. } = event {
+        return Ok(Vec::new());
+    }
+    let frame = serde_json::to_value(event)?;
+    if let AgenticEvent::Assistant { message, uuid, .. } = event {
+        let mut frame = frame;
+        if let Some(inner) = frame.get_mut("message").and_then(Value::as_object_mut) {
+            if !inner.contains_key("context_management") {
+                inner.insert("context_management".into(), Value::Null);
+            }
+        }
+        let blocks = message
+            .get("content")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if blocks.len() <= 1 {
+            return Ok(vec![frame]);
+        }
+        return Ok(blocks
+            .into_iter()
+            .enumerate()
+            .map(|(index, block)| {
+                let mut part = frame.clone();
+                part["message"]["content"] = Value::Array(vec![block]);
+                part["uuid"] = Value::String(derive_js_uuid(uuid, index));
+                part
+            })
+            .collect());
+    }
+    let AgenticEvent::User {
+        message,
+        uuid,
+        is_meta,
+        timestamp,
+        tool_use_result,
+        ..
+    } = event
+    else {
+        return Ok(vec![frame]);
+    };
+    let mut frame = frame;
+    if let Some(object) = frame.as_object_mut() {
+        object.insert("timestamp".into(), Value::String(timestamp.clone()));
+        if *is_meta {
+            object.insert("isSynthetic".into(), Value::Bool(true));
+        }
+        if let Some(result) = tool_use_result {
+            object.insert("tool_use_result".into(), result.clone());
+        }
+    }
+    if message.content.len() <= 1 {
+        return Ok(vec![frame]);
+    }
+    let mut frames = Vec::with_capacity(message.content.len());
+    for (index, block) in message.content.iter().enumerate() {
+        let mut part = frame.clone();
+        part["message"]["content"] = serde_json::to_value(vec![block])?;
+        part["uuid"] = Value::String(derive_js_uuid(uuid, index));
+        frames.push(part);
+    }
+    Ok(frames)
+}
+
+/// O `deriveUUID` do JS: os 24 primeiros caracteres do uuid pai e o índice
+/// em 12 dígitos hexadecimais.
+fn derive_js_uuid(parent: &str, index: usize) -> String {
+    let prefix: String = parent.chars().take(24).collect();
+    format!("{prefix}{index:012x}")
 }
 
 /// Extrai o conteúdo do frame `{"type":"user","message":{"content":...}}`.
@@ -1388,117 +1864,468 @@ fn emit_mirror(shared: &Arc<Shared>, transcript_path: &str, entry: Value) {
     }));
 }
 
+/// Espelha entradas gravadas num frame `transcript_mirror`.
+fn emit_mirror_entries(shared: &Arc<Shared>, transcript_path: &str, entries: Vec<Value>) {
+    if entries.is_empty() {
+        return;
+    }
+    let _ = shared.outbound.send(json!({
+        "type": "transcript_mirror",
+        "filePath": transcript_path,
+        "entries": entries,
+    }));
+}
+
 /// Mantém o histórico entre turnos do usuário a partir dos eventos do loop.
-fn track_history(history: &mut Vec<ApiMessage>, event: &AgenticEvent) {
+/// Os blocos de uma resposta chegam um a um com o mesmo `message.id` e se
+/// juntam numa mensagem só (o `normalizeMessagesForAPI` do CLI faz isso a
+/// cada request); o erro de API sintetizado não vai ao modelo.
+fn track_history(
+    history: &mut Vec<ApiMessage>,
+    last_assistant_id: &mut Option<String>,
+    event: &AgenticEvent,
+) {
     match event {
-        AgenticEvent::Assistant { message, .. } => {
-            if let Some(content) = message.get("content") {
-                if let Ok(blocks) = serde_json::from_value::<Vec<ContentBlock>>(content.clone()) {
-                    history.push(ApiMessage {
-                        role: Role::Assistant,
-                        content: blocks,
-                    });
+        AgenticEvent::Assistant {
+            message,
+            is_api_error,
+            ..
+        } => {
+            let model = message.get("model").and_then(Value::as_str);
+            if *is_api_error && model == Some(crate::internal::transcript_load::SYNTHETIC_MODEL) {
+                return;
+            }
+            let blocks: Vec<ContentBlock> = message
+                .get("content")
+                .and_then(Value::as_array)
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .filter_map(|b| serde_json::from_value(b.clone()).ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let id = message
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if let Some(last) = history.last_mut() {
+                if last.role == Role::Assistant && id.is_some() && *last_assistant_id == id {
+                    last.content.extend(blocks);
+                    return;
                 }
             }
+            history.push(ApiMessage {
+                role: Role::Assistant,
+                content: blocks,
+            });
+            *last_assistant_id = id;
         }
         AgenticEvent::User { message, .. } => {
             history.push(message.clone());
+            *last_assistant_id = None;
         }
         _ => {}
     }
 }
 
-/// Persiste o evento no JSONL do CLI e espelha quando o mirror está ligado.
-async fn persist_event(
-    storage: &SessionStorage,
-    shared: &Arc<Shared>,
-    config: &EngineConfig,
-    session_id: &str,
-    transcript_path: &str,
-    last_uuid: &mut Option<String>,
-    event: &AgenticEvent,
-) {
-    let appended = match event {
-        AgenticEvent::Assistant { message, .. } => {
-            let blocks: Vec<ContentBlock> = message
-                .get("content")
-                .cloned()
-                .and_then(|c| serde_json::from_value(c).ok())
-                .unwrap_or_default();
-            let model = message
-                .get("model")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let stop_reason = message
-                .get("stop_reason")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            storage
-                .append_assistant(
-                    session_id,
-                    &blocks,
-                    &model,
-                    stop_reason.as_deref(),
-                    last_uuid.as_deref(),
-                    &config.cwd,
-                )
-                .await
-                .ok()
-        }
-        AgenticEvent::User { message, .. } => storage
-            .append_user(
-                session_id,
-                &message.content,
-                last_uuid.as_deref(),
-                &config.cwd,
-            )
-            .await
-            .ok(),
-        _ => None,
+/// O anexo `hook_additional_context` que o `processUserInput` do CLI cria
+/// para o `additionalContext` de um hook UserPromptSubmit.
+fn user_prompt_context_attachment(context: &str) -> Value {
+    // `applyTruncation`: acima de 10 mil caracteres o contexto é cortado.
+    const MAX_HOOK_OUTPUT_LENGTH: usize = 10_000;
+    let content = if context.encode_utf16().count() > MAX_HOOK_OUTPUT_LENGTH {
+        let cut: Vec<u16> = context
+            .encode_utf16()
+            .take(MAX_HOOK_OUTPUT_LENGTH)
+            .collect();
+        format!(
+            "{}\u{2026} [output truncated - exceeded {MAX_HOOK_OUTPUT_LENGTH} characters]",
+            String::from_utf16_lossy(&cut)
+        )
+    } else {
+        context.to_string()
     };
-    if let Some((uuid, entry)) = appended {
-        *last_uuid = Some(uuid);
-        if config.mirror {
-            emit_mirror(shared, transcript_path, entry);
+    json!({
+        "attachment": {
+            "type": "hook_additional_context",
+            "content": [content],
+            "hookName": "UserPromptSubmit",
+            "toolUseID": format!("hook-{}", uuid::Uuid::new_v4()),
+            "hookEvent": "UserPromptSubmit",
+        },
+        "type": "attachment",
+        "uuid": uuid::Uuid::new_v4().to_string(),
+        "timestamp": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    })
+}
+
+/// O que o `recordTranscript` do CLI acompanha entre gravações.
+#[derive(Default)]
+struct TranscriptState {
+    /// O uuid da última mensagem gravada que participa da cadeia.
+    last_uuid: Option<String>,
+    /// O `promptId` do prompt em curso (o `getPromptId` do CLI).
+    prompt_id: Option<String>,
+    /// Mensagens do resume que o arquivo desta sessão ainda não tem (as
+    /// sintéticas do resume; no fork, a conversa inteira), gravadas junto
+    /// com o primeiro prompt.
+    pending_resumed: Vec<Value>,
+    /// Blocos de assistente já entregues ao cliente esperando o fechamento
+    /// da resposta para irem ao transcript.
+    pending_assistant: Vec<Value>,
+    /// O `message.id` da última mensagem de assistente do histórico.
+    history_assistant_id: Option<String>,
+}
+
+impl TranscriptState {
+    /// O estado depois do `loadConversationForResume`: no resume, as
+    /// mensagens que o arquivo já tem ficam, e a cadeia continua da última
+    /// delas antes da primeira que falta (o `startingParentUuid` do
+    /// `recordTranscript`); no fork o arquivo novo recebe a conversa toda.
+    fn resume_from(
+        &mut self,
+        loaded: crate::internal::transcript_load::LoadedConversation,
+        fork: bool,
+    ) {
+        if fork {
+            self.pending_resumed = loaded.messages;
+            self.last_uuid = None;
+            return;
+        }
+        let mut seen_new = false;
+        for message in loaded.messages {
+            let uuid = message.get("uuid").and_then(Value::as_str).unwrap_or("");
+            if loaded.recorded.contains(uuid) {
+                if !seen_new && message.get("type").and_then(Value::as_str) != Some("progress") {
+                    self.last_uuid = Some(uuid.to_string());
+                }
+            } else {
+                seen_new = true;
+                self.pending_resumed.push(message);
+            }
         }
     }
+
+    /// Grava mensagens internas em cadeia e espelha as entradas.
+    async fn record(
+        &mut self,
+        storage: &SessionStorage,
+        shared: &Arc<Shared>,
+        config: &EngineConfig,
+        session_id: &str,
+        transcript_path: &str,
+        messages: Vec<Value>,
+    ) -> crate::errors::Result<()> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+        let write = storage
+            .append_chain(
+                session_id,
+                &messages,
+                self.last_uuid.as_deref(),
+                self.prompt_id.as_deref(),
+            )
+            .await?;
+        self.last_uuid = write.last_uuid;
+        if config.mirror {
+            emit_mirror_entries(shared, transcript_path, write.entries);
+        }
+        Ok(())
+    }
+
+    /// Grava os blocos de assistente pendentes.
+    async fn flush_assistant(
+        &mut self,
+        storage: &SessionStorage,
+        shared: &Arc<Shared>,
+        config: &EngineConfig,
+        session_id: &str,
+        transcript_path: &str,
+    ) -> crate::errors::Result<()> {
+        let pending = std::mem::take(&mut self.pending_assistant);
+        self.record(
+            storage,
+            shared,
+            config,
+            session_id,
+            transcript_path,
+            pending,
+        )
+        .await
+    }
+
+    /// Persiste o evento do loop como o `QueryEngine` do CLI: os blocos de
+    /// assistente esperam o `message_delta` (o `stop_reason` e o `usage`
+    /// finais entram no último bloco, que o CLI ainda não tinha gravado),
+    /// resultados de tool e mensagens meta vão na hora, e o compact boundary
+    /// grava a marca e o histórico compactado.
+    #[allow(clippy::too_many_arguments)]
+    async fn persist_event(
+        &mut self,
+        storage: &SessionStorage,
+        shared: &Arc<Shared>,
+        config: &EngineConfig,
+        session_id: &str,
+        transcript_path: &str,
+        event: &AgenticEvent,
+        compacted: Option<&[ApiMessage]>,
+    ) -> crate::errors::Result<()> {
+        match event {
+            AgenticEvent::Assistant { .. } => {
+                self.pending_assistant
+                    .push(assistant_transcript_message(event));
+                Ok(())
+            }
+            AgenticEvent::AssistantFinal {
+                message_id,
+                stop_reason,
+                usage,
+            } => {
+                let last = self.pending_assistant.iter_mut().rev().find(|m| {
+                    m.pointer("/message/id").and_then(Value::as_str) == Some(message_id.as_str())
+                });
+                if let Some(inner) = last
+                    .and_then(|m| m.get_mut("message"))
+                    .and_then(Value::as_object_mut)
+                {
+                    inner.insert("usage".into(), usage.clone());
+                    inner.insert(
+                        "stop_reason".into(),
+                        stop_reason.clone().map_or(Value::Null, Value::String),
+                    );
+                }
+                self.flush_assistant(storage, shared, config, session_id, transcript_path)
+                    .await
+            }
+            AgenticEvent::User {
+                message,
+                uuid,
+                timestamp,
+                tool_use_result,
+                source_tool_assistant_uuid,
+                is_meta,
+                ..
+            } => {
+                self.flush_assistant(storage, shared, config, session_id, transcript_path)
+                    .await?;
+                let internal = crate::internal::transcript_load::user_message_value(
+                    serde_json::to_value(&message.content).unwrap_or_default(),
+                    crate::internal::transcript_load::UserMessageFlags {
+                        is_meta: *is_meta,
+                        uuid: Some(uuid.clone()),
+                        timestamp: Some(timestamp.clone()),
+                        tool_use_result: tool_use_result.clone(),
+                        source_tool_assistant_uuid: source_tool_assistant_uuid.clone(),
+                        ..Default::default()
+                    },
+                );
+                self.record(
+                    storage,
+                    shared,
+                    config,
+                    session_id,
+                    transcript_path,
+                    vec![internal],
+                )
+                .await
+            }
+            AgenticEvent::System {
+                subtype,
+                data,
+                uuid,
+                ..
+            } if subtype == "compact_boundary" => {
+                self.flush_assistant(storage, shared, config, session_id, transcript_path)
+                    .await?;
+                let mut messages = vec![compact_boundary_message(uuid, data)];
+                messages.extend(compacted_transcript_messages(compacted.unwrap_or_default()));
+                self.record(
+                    storage,
+                    shared,
+                    config,
+                    session_id,
+                    transcript_path,
+                    messages,
+                )
+                .await
+            }
+            AgenticEvent::Result { .. } | AgenticEvent::System { .. } => {
+                self.flush_assistant(storage, shared, config, session_id, transcript_path)
+                    .await
+            }
+            AgenticEvent::StreamEvent { .. } => Ok(()),
+        }
+    }
+}
+
+/// A mensagem interna de assistente do CLI para um evento do loop: a do
+/// `queryModel` (`{message, requestId, type, uuid, timestamp}`), ou a do
+/// `createAssistantAPIErrorMessage` para um erro de API sintetizado.
+fn assistant_transcript_message(event: &AgenticEvent) -> Value {
+    let AgenticEvent::Assistant {
+        message,
+        uuid,
+        timestamp,
+        request_id,
+        error,
+        is_api_error,
+        api_error,
+        ..
+    } = event
+    else {
+        return Value::Null;
+    };
+    let mut m = serde_json::Map::new();
+    let synthetic = message.get("model").and_then(Value::as_str)
+        == Some(crate::internal::transcript_load::SYNTHETIC_MODEL);
+    if synthetic {
+        m.insert("type".into(), json!("assistant"));
+        m.insert("uuid".into(), json!(uuid));
+        m.insert("timestamp".into(), json!(timestamp));
+        m.insert("message".into(), message.clone());
+        if let Some(api_error) = api_error {
+            m.insert("apiError".into(), json!(api_error));
+        }
+        if let Some(error) = error {
+            m.insert("error".into(), json!(error));
+        }
+        m.insert("isApiErrorMessage".into(), json!(is_api_error));
+    } else {
+        m.insert("message".into(), message.clone());
+        if let Some(request_id) = request_id {
+            m.insert("requestId".into(), json!(request_id));
+        }
+        m.insert("type".into(), json!("assistant"));
+        m.insert("uuid".into(), json!(uuid));
+        m.insert("timestamp".into(), json!(timestamp));
+        if *is_api_error {
+            if let Some(api_error) = api_error {
+                m.insert("apiError".into(), json!(api_error));
+            }
+            m.insert("isApiErrorMessage".into(), json!(true));
+        }
+    }
+    Value::Object(m)
+}
+
+/// O `createCompactBoundaryMessage` do CLI para o evento de boundary.
+fn compact_boundary_message(uuid: &str, data: &Value) -> Value {
+    let trigger = data
+        .pointer("/compact_metadata/trigger")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let mut metadata = serde_json::Map::new();
+    metadata.insert("trigger".into(), trigger);
+    if let Some(pre_tokens) = data.pointer("/compact_metadata/pre_tokens") {
+        metadata.insert("preTokens".into(), pre_tokens.clone());
+    }
+    json!({
+        "type": "system",
+        "subtype": "compact_boundary",
+        "content": "Conversation compacted",
+        "isMeta": false,
+        "timestamp": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "uuid": uuid,
+        "level": "info",
+        "compactMetadata": Value::Object(metadata),
+    })
+}
+
+/// O histórico que a compactação deixou, como as mensagens que o CLI grava
+/// depois do boundary: o resumo (`isCompactSummary`,
+/// `isVisibleInTranscriptOnly`) e o que foi reanexado (meta).
+fn compacted_transcript_messages(compacted: &[ApiMessage]) -> Vec<Value> {
+    use crate::internal::transcript_load::{user_message_value, UserMessageFlags};
+    let after_marker = compacted
+        .iter()
+        .position(|m| {
+            m.role == Role::User
+                && m.content.len() == 1
+                && matches!(&m.content[0], ContentBlock::Text { text, .. } if text == crate::agentic::COMPACT_BOUNDARY_MARKER)
+        })
+        .map_or(0, |i| i + 1);
+    let mut summary_written = false;
+    compacted[after_marker..]
+        .iter()
+        .map(|m| {
+            let content = serde_json::to_value(&m.content).unwrap_or_default();
+            if m.role == Role::Assistant {
+                return json!({
+                    "message": {
+                        "id": uuid::Uuid::new_v4().to_string(),
+                        "type": "message",
+                        "role": "assistant",
+                        "model": crate::internal::transcript_load::SYNTHETIC_MODEL,
+                        "content": content,
+                        "stop_reason": null,
+                        "stop_sequence": null,
+                    },
+                    "type": "assistant",
+                    "uuid": uuid::Uuid::new_v4().to_string(),
+                    "timestamp": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                });
+            }
+            let flags = if summary_written {
+                UserMessageFlags {
+                    is_meta: true,
+                    ..Default::default()
+                }
+            } else {
+                summary_written = true;
+                UserMessageFlags {
+                    is_compact_summary: true,
+                    is_visible_in_transcript_only: true,
+                    ..Default::default()
+                }
+            };
+            user_message_value(content, flags)
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
 // Tools: builtins nomeadas + ponte MCP + permissão/hooks via control_request
 // ---------------------------------------------------------------------------
 
-fn register_named_builtins(registry: &mut ToolRegistry, names: &[String]) {
+/// Registra a builtin de nome `name` (nome do CLI ou alias antigo, como
+/// `KillShell`), com as que dependem do modelo da sessão já ajustadas a ele:
+/// o Read tira a linha de PDF do prompt para os modelos que não leem PDF
+/// (`isPDFSupported` do JS) e o Bash põe o modelo na linha de atribuição.
+///
+/// Nome repetido (`TaskStop` e `KillShell` na mesma lista) registra uma vez
+/// só, porque duas tools homônimas no request são rejeitadas pela API.
+/// Nome desconhecido é ignorado de propósito: a lista vem do chamador, e um
+/// nome do CLI sem builtin nativa não pode derrubar a sessão inteira.
+fn register_builtin(registry: &mut ToolRegistry, name: &str, model: &str) {
     use crate::tools::*;
+    let tool: Box<dyn Tool> = match name {
+        "Read" => Box::new(file_read::FileReadTool::for_model(Some(model))),
+        "Bash" => Box::new(bash::BashTool::with_main_model(model)),
+        other => match ToolRegistry::builtin(other) {
+            Some(tool) => tool,
+            None => return,
+        },
+    };
+    if registry.get(tool.name()).is_none() {
+        registry.register(tool);
+    }
+}
+
+/// As builtins pedidas pelo nome, na ordem da lista.
+fn register_named_builtins(registry: &mut ToolRegistry, names: &[String], model: &str) {
     for name in names {
-        match name.as_str() {
-            "Bash" => registry.register(Box::new(bash::BashTool::default())),
-            "Read" => registry.register(Box::new(file_read::FileReadTool)),
-            "Write" => registry.register(Box::new(file_write::FileWriteTool)),
-            "Edit" => registry.register(Box::new(file_edit::FileEditTool)),
-            "Glob" => registry.register(Box::new(glob_tool::GlobTool)),
-            "Grep" => registry.register(Box::new(grep::GrepTool)),
-            "NotebookEdit" => registry.register(Box::new(notebook::NotebookEditTool)),
-            "TodoWrite" => registry.register(Box::new(todo::TodoWriteTool)),
-            "WebFetch" => registry.register(Box::new(web_fetch::WebFetchTool)),
-            "WebSearch" | "web_search" => {
-                registry.register(Box::new(web_search::WebSearchTool::default()))
-            }
-            "AskUserQuestion" => registry.register(Box::new(ask_user::AskUserQuestionTool)),
-            "TaskCreate" => registry.register(Box::new(tasks::TaskCreateTool)),
-            "TaskGet" => registry.register(Box::new(tasks::TaskGetTool)),
-            "TaskList" => registry.register(Box::new(tasks::TaskListTool)),
-            "TaskUpdate" => registry.register(Box::new(tasks::TaskUpdateTool)),
-            "TaskStop" => registry.register(Box::new(tasks::TaskStopTool)),
-            "TaskOutput" => registry.register(Box::new(tasks::TaskOutputTool)),
-            "EnterPlanMode" => registry.register(Box::new(plan_mode::EnterPlanModeTool)),
-            "ExitPlanMode" => registry.register(Box::new(plan_mode::ExitPlanModeTool)),
-            // Nome desconhecido: silencioso de propósito — a lista vem do
-            // chamador e um nome CLI sem builtin nativo não pode derrubar a
-            // sessão inteira.
-            _ => {}
-        }
+        register_builtin(registry, name, model);
+    }
+}
+
+/// O conjunto default do CLI (`DEFAULT_TOOL_NAMES`), com as builtins que
+/// dependem do modelo ajustadas a ele. O `Agent` fica de fora aqui: quem o
+/// registra é o engine, com o cliente da API.
+fn register_default_builtins(registry: &mut ToolRegistry, model: &str) {
+    for name in crate::tools::framework::DEFAULT_TOOL_NAMES {
+        register_builtin(registry, name, model);
     }
 }
 
@@ -1558,11 +2385,12 @@ fn subagent_registry(
     tools: Option<&Vec<String>>,
     native_tools: &[Arc<dyn Tool>],
     permission_rules: &crate::tools::permission::PermissionRules,
+    model: &str,
 ) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     match tools {
-        Some(names) => register_named_builtins(&mut registry, names),
-        None => registry.register_defaults(),
+        Some(names) => register_named_builtins(&mut registry, names, model),
+        None => register_default_builtins(&mut registry, model),
     }
     // O subagente roda no MESMO processo, então a fronteira do pai vale aqui
     // também: sem isto, delegar uma tarefa devolveria as builtins sem
@@ -1584,6 +2412,14 @@ fn subagent_registry(
 /// executor do subagente nasceria com `PermissionRules::default()`, que não
 /// nega nada, e a metade fina da fronteira sumiria um nível abaixo sem quebrar
 /// teste nenhum.
+///
+/// O resto do contexto segue o `runAgent` do JS para um subagente síncrono:
+/// `mainLoopModel` é o modelo resolvido do subagente, o `agentId` é novo, o
+/// `abortController` é o MESMO do pai (interromper o turno interrompe o
+/// subagente, e um deny com `interrupt` dentro dele interrompe o pai), o
+/// `readFileState` nasce vazio, e a chamada de modelo, o modelo pequeno e as
+/// skills são os da sessão.
+#[allow(clippy::too_many_arguments)]
 fn subagent_executor(
     registry: ToolRegistry,
     parent: &ToolContext,
@@ -1591,6 +2427,8 @@ fn subagent_executor(
     tool_results_dir: &std::path::Path,
     task_store: &Arc<crate::tools::task_store::TaskStore>,
     permission_rules: &crate::tools::permission::PermissionRules,
+    model: &str,
+    agent_id: String,
 ) -> ToolExecutor {
     let context = ToolContext {
         working_directory: std::path::PathBuf::from(cwd),
@@ -1608,8 +2446,23 @@ fn subagent_executor(
         denied_env_prefixes: parent.denied_env_prefixes.clone(),
         task_store: Some(Arc::clone(task_store)),
         todo_store: None,
+        model_call: parent.model_call.clone(),
+        main_model: Some(model.to_string()),
+        small_fast_model: parent.small_fast_model.clone(),
+        agent_id: Some(agent_id),
+        skill_directories: parent.skill_directories.clone(),
+        abort: parent.abort.clone(),
+        non_interactive: parent.non_interactive,
+        ..ToolContext::default()
     };
     ToolExecutor::new(registry, context).with_permission_rules(permission_rules.clone())
+}
+
+/// O `createAgentId` do JS: `a` seguido de 16 dígitos hexadecimais.
+fn create_agent_id() -> String {
+    let bytes: [u8; 8] = rand::random();
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!("a{hex}")
 }
 
 /// O que o executor precisa da sessão viva, além das opções e do estado
@@ -1629,6 +2482,13 @@ struct ExecutorSetup {
     /// sessão. Entram pelo mesmo caminho das nativas, inclusive nos
     /// subagentes: no CLI o pool de tools é um só.
     mcp_tools: Vec<Arc<dyn Tool>>,
+    /// O contexto de usuário da sessão, que o subagente também recebe (o
+    /// `runAgent` do CLI chama o mesmo `getUserContext` memoizado).
+    user_context: Arc<crate::memory::UserContextCache>,
+    /// O cancelamento do turno (o `abortController` do JS): o mesmo token do
+    /// loop, para que as tools abortem no interrupt e para que um deny com
+    /// `interrupt: true` encerre o turno.
+    abort: CancellationToken,
 }
 
 async fn build_executor(
@@ -1646,6 +2506,8 @@ async fn build_executor(
         client,
         model,
         mcp_tools,
+        user_context,
+        abort,
     } = setup;
     let session_id = session_id.as_str();
     let transcript_path = transcript_path.as_str();
@@ -1666,31 +2528,32 @@ async fn build_executor(
 
     let mut registry = ToolRegistry::new();
     match &options.tools {
-        Some(ToolsConfig::List(names)) => register_named_builtins(&mut registry, names),
+        Some(ToolsConfig::List(names)) => register_named_builtins(&mut registry, names, &model),
         // Preset/ausente: o conjunto default de builtins.
-        Some(ToolsConfig::Preset(_)) | None => registry.register_defaults(),
+        Some(ToolsConfig::Preset(_)) | None => register_default_builtins(&mut registry, &model),
     }
-    // Subagente in-process: registrado como `Task` (nome que os modelos
-    // conhecem) e `Agent` (nome atual do CLI). Só quando as tools não vieram
-    // por lista explícita sem ele.
+    // Subagente in-process: registrado só como `Agent`, o nome do CLI.
+    // `Task` é alias antigo (`LEGACY_AGENT_TOOL_NAME`): vale na lista de
+    // tools pedidas, mas não vira uma segunda tool no request. Só quando as
+    // tools não vieram por lista explícita sem ele.
     let wants_agent = match &options.tools {
         Some(ToolsConfig::List(names)) => names.iter().any(|n| n == "Task" || n == "Agent"),
         _ => true,
     };
     if wants_agent {
-        for tool_name in ["Task", "Agent"] {
-            registry.register(Box::new(NativeAgentTool {
-                client: client.clone(),
-                model: model.clone(),
-                agents: options.agents.clone().unwrap_or_default(),
-                cwd: config.cwd.clone(),
-                tool_results_dir: tool_results_dir.clone(),
-                task_store: Arc::clone(&task_store),
-                native_tools: inherited.clone(),
-                permission_rules: permission_rules.clone(),
-                tool_name,
-            }));
-        }
+        registry.register(Box::new(NativeAgentTool {
+            client: client.clone(),
+            model: model.clone(),
+            agents: options.agents.clone().unwrap_or_default(),
+            cwd: config.cwd.clone(),
+            tool_results_dir: tool_results_dir.clone(),
+            task_store: Arc::clone(&task_store),
+            native_tools: inherited.clone(),
+            permission_rules: permission_rules.clone(),
+            tool_name: "Agent",
+            user_context: Arc::clone(&user_context),
+            system_prefix: system_prefix(options),
+        }));
     }
 
     // As tools do chamador entram ANTES das deny rules, e não depois: uma
@@ -1807,45 +2670,42 @@ async fn build_executor(
 
     // can_use_tool: round-trip pelo cliente. Sem resposta = recusa dita.
     let permission_shared = Arc::clone(shared);
+    let permission_abort = abort.clone();
     let permission_callback: crate::tools::framework::PermissionCallbackFn =
         Arc::new(move |request| {
             let shared = Arc::clone(&permission_shared);
+            let abort = permission_abort.clone();
             Box::pin(async move {
+                // Sem teto, como o `createCanUseTool` do CLI: só o interrupt
+                // do turno (ou o cliente sumindo) encerra a espera, e isso
+                // vira recusa com o texto do CLI.
                 let response = shared
-                    .control_roundtrip(json!({
-                        "subtype": "can_use_tool",
-                        "tool_name": request.tool_name,
-                        "input": request.input,
-                        "tool_use_id": request.tool_use_id,
-                    }))
+                    .control_roundtrip(can_use_tool_request(&request), None)
                     .await;
                 match response {
-                    Some(payload) => match payload.get("behavior").and_then(Value::as_str) {
-                        Some("allow") => PermissionOutcome::Allow {
-                            updated_input: payload.get("updatedInput").cloned(),
-                        },
-                        Some("deny") => PermissionOutcome::Deny {
-                            message: payload
-                                .get("message")
-                                .and_then(Value::as_str)
-                                .unwrap_or("Permission denied")
-                                .to_string(),
-                        },
-                        _ => PermissionOutcome::Deny {
-                            message: payload
-                                .get("error")
-                                .and_then(Value::as_str)
-                                .unwrap_or("permission decision unavailable")
-                                .to_string(),
-                        },
-                    },
-                    None => PermissionOutcome::Deny {
-                        message: "permission decision unavailable (client gone or timed out)"
-                            .to_string(),
+                    Ok(payload) => {
+                        let outcome = permission_outcome(&payload);
+                        // O deny com `interrupt` aborta o turno NA HORA, como o
+                        // `abortController.abort()` do JS: as tools que rodam
+                        // em paralelo param e as que não começaram nem começam.
+                        if matches!(outcome, PermissionOutcome::DenyAndInterrupt { .. }) {
+                            abort.cancel();
+                        }
+                        outcome
+                    }
+                    Err(failure) => PermissionOutcome::Deny {
+                        message: format!("Tool permission request failed: {}", failure.js_error()),
                     },
                 }
             })
         });
+
+    // O que as tools recebem do motor, como o `toolUseContext` do JS: a
+    // chamada de modelo da sessão (o resumo do WebFetch e a busca do
+    // WebSearch saem pelo mesmo cliente, mesma chave e mesma base URL), o
+    // `mainLoopModel`, o modelo pequeno, as skills das fontes habilitadas e o
+    // cancelamento do turno.
+    let model_call = session_model_call(client.clone());
 
     // PostToolUse: dispara cada callback id registrado no initialize e junta
     // os additionalContext — o texto volta dentro do tool_result.
@@ -1915,8 +2775,159 @@ async fn build_executor(
         denied_env_prefixes: options.tool_env_denylist.clone(),
         task_store: Some(task_store),
         todo_store: Some(todo_store),
+        model_call: Some(model_call),
+        main_model: Some(model),
+        small_fast_model: small_fast_model(&options.env),
+        agent_id: None,
+        skill_directories: skill_directories(options, &config.cwd),
+        abort: Some(abort),
+        ..ToolContext::default()
     };
     ToolExecutor::new(registry, context).with_permission_rules(permission_rules)
+}
+
+/// A chamada de modelo que as tools fazem pelo cliente da sessão, no modo que
+/// o pedido escolhe: `stream: true` é o `queryModelWithStreaming` do JS (a
+/// busca do WebSearch), e a resposta sai montada do `message_stop`;
+/// `stream: false` é o `queryModelWithoutStreaming` (o resumo do WebFetch no
+/// `queryHaiku`).
+fn session_model_call(client: AnthropicClient) -> crate::tools::framework::ModelCallFn {
+    Arc::new(move |request| {
+        let client = client.clone();
+        Box::pin(async move {
+            if !request.stream {
+                return client
+                    .create_message(request)
+                    .await
+                    .map_err(|e| e.to_string());
+            }
+            use futures::StreamExt as _;
+            let mut stream = client
+                .create_message_stream(request)
+                .await
+                .map_err(|e| e.to_string())?;
+            let mut complete = None;
+            while let Some(update) = stream.next().await {
+                // Depois de um `NonStreamingFallback` vem o `MessageComplete`
+                // da chamada repetida; vale o último.
+                if let crate::api::streaming::StreamUpdate::MessageComplete { message } =
+                    update.map_err(|e| e.to_string())?
+                {
+                    complete = Some(message);
+                }
+            }
+            let message = complete.ok_or_else(|| "Stream ended without a message".to_string())?;
+            let stop_reason = serde_json::to_value(&message.stop_reason)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string));
+            Ok(crate::api::types::ApiResponse {
+                id: message.id,
+                r#type: "message".to_string(),
+                role: Role::Assistant,
+                content: message.content,
+                model: message.model,
+                stop_reason,
+                stop_sequence: None,
+                usage: message.usage,
+            })
+        })
+    })
+}
+
+/// O corpo do `can_use_tool` com os campos que o `createCanUseTool` do CLI
+/// manda. Os opcionais só entram quando existem: o JS serializa com
+/// `JSON.stringify`, que descarta `undefined`, e o `agent_id` falta na thread
+/// principal.
+fn can_use_tool_request(request: &crate::tools::framework::ToolPermissionRequest) -> Value {
+    let mut body = serde_json::Map::new();
+    body.insert("subtype".into(), json!("can_use_tool"));
+    body.insert("tool_name".into(), json!(request.tool_name));
+    body.insert("input".into(), request.input.clone());
+    if let Some(suggestions) = &request.permission_suggestions {
+        body.insert("permission_suggestions".into(), suggestions.clone());
+    }
+    if let Some(path) = &request.blocked_path {
+        body.insert("blocked_path".into(), json!(path));
+    }
+    if let Some(reason) = &request.decision_reason {
+        body.insert("decision_reason".into(), json!(reason));
+    }
+    if let Some(id) = &request.tool_use_id {
+        body.insert("tool_use_id".into(), json!(id));
+    }
+    if let Some(agent) = &request.agent_id {
+        body.insert("agent_id".into(), json!(agent));
+    }
+    Value::Object(body)
+}
+
+/// A resposta do cliente ao `can_use_tool` como decisão
+/// (`permissionPromptToolResultToPermissionDecision`). Um deny com
+/// `interrupt: true` também aborta o turno no JS
+/// (`toolUseContext.abortController.abort()`), o que aqui é o
+/// `DenyAndInterrupt`: o executor marca a execução e o loop encerra o turno.
+fn permission_outcome(payload: &Value) -> PermissionOutcome {
+    match payload.get("behavior").and_then(Value::as_str) {
+        Some("allow") => PermissionOutcome::Allow {
+            updated_input: payload.get("updatedInput").cloned(),
+        },
+        Some("deny") => {
+            let message = payload
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Permission denied")
+                .to_string();
+            if payload.get("interrupt").and_then(Value::as_bool) == Some(true) {
+                PermissionOutcome::DenyAndInterrupt { message }
+            } else {
+                PermissionOutcome::Deny { message }
+            }
+        }
+        _ => PermissionOutcome::Deny {
+            message: payload
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("permission decision unavailable")
+                .to_string(),
+        },
+    }
+}
+
+/// O modelo pequeno configurado no env da sessão (`ANTHROPIC_SMALL_FAST_MODEL`,
+/// depois `ANTHROPIC_DEFAULT_HAIKU_MODEL`, a precedência do
+/// `getSmallFastModel`). Lido do `options.env` inteiro, e não do env das
+/// tools: o corte do `tool_env_denylist` protege os processos que as tools
+/// spawnam, não a configuração do motor. Sem nada no env das options, o
+/// `ToolContext` cai no env do processo e no haiku default.
+fn small_fast_model(env: &HashMap<String, String>) -> Option<String> {
+    [
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    ]
+    .iter()
+    .find_map(|key| env.get(*key).filter(|v| !v.is_empty()).cloned())
+}
+
+/// Os diretórios de skills das fontes de settings habilitadas: sem
+/// `setting_sources`, todas (o CLI sem `--setting-sources`, a mesma regra das
+/// memórias); com a lista, só as pedidas (`isSettingSourceEnabled`).
+fn skill_directories(options: &ClaudeAgentOptions, cwd: &str) -> Vec<std::path::PathBuf> {
+    use crate::types::SettingSource;
+    let sources: Vec<String> = match &options.setting_sources {
+        None => vec!["user".to_string(), "project".to_string()],
+        Some(list) => list
+            .iter()
+            .map(|source| {
+                match source {
+                    SettingSource::User => "user",
+                    SettingSource::Project => "project",
+                    SettingSource::Local => "local",
+                }
+                .to_string()
+            })
+            .collect(),
+    };
+    crate::tools::skill::skill_directories_for_sources(std::path::Path::new(cwd), &sources)
 }
 
 /// O env que as tools que rodam processo enxergam.
@@ -1959,6 +2970,13 @@ struct NativeAgentTool {
     /// que parasse no primeiro nível seria contornável com um `Task`.
     permission_rules: crate::tools::permission::PermissionRules,
     tool_name: &'static str,
+    /// O contexto de usuário da sessão: o subagente o recebe na frente das
+    /// mensagens, mas a compactação dele não limpa o cache (no CLI, só a
+    /// conversa principal faz `runPostCompactCleanup`).
+    user_context: Arc<crate::memory::UserContextCache>,
+    /// Cabeçalho e prefixo do `system`, que a camada de API do CLI põe em
+    /// toda chamada, inclusive nas do subagente.
+    system_prefix: crate::agentic::SystemPrefix,
 }
 
 #[async_trait::async_trait]
@@ -2019,18 +3037,19 @@ impl Tool for NativeAgentTool {
 
         // Registry do subagente: as tools do agent def, ou as defaults —
         // nunca o próprio Agent/Task (sem recursão de subagentes na v1).
-        let registry = subagent_registry(
-            definition.and_then(|d| d.tools.as_ref()),
-            &self.native_tools,
-            &self.permission_rules,
-        );
-
         let model = input
             .get("model")
             .and_then(Value::as_str)
             .map(str::to_string)
             .or_else(|| definition.and_then(|d| d.model.clone()))
             .unwrap_or_else(|| self.model.clone());
+
+        let registry = subagent_registry(
+            definition.and_then(|d| d.tools.as_ref()),
+            &self.native_tools,
+            &self.permission_rules,
+            &model,
+        );
 
         let executor = subagent_executor(
             registry,
@@ -2039,6 +3058,8 @@ impl Tool for NativeAgentTool {
             &self.tool_results_dir,
             &self.task_store,
             &self.permission_rules,
+            &model,
+            create_agent_id(),
         );
 
         let system_prompt = definition
@@ -2055,6 +3076,10 @@ impl Tool for NativeAgentTool {
             system_prompt,
             max_turns,
             include_stream_events: false,
+            user_context: Some(Arc::clone(&self.user_context)),
+            system_prefix: Some(self.system_prefix.clone()),
+            // O subagente síncrono usa o `abortController` do pai (`runAgent`).
+            abort: context.abort.clone(),
             ..crate::agentic::AgenticLoopOptions::default()
         };
 
@@ -2323,7 +3348,7 @@ mod tests {
 
         let mut registry = ToolRegistry::new();
         // O caminho que `build_executor` toma com `ToolsConfig::List(vec![])`.
-        register_named_builtins(&mut registry, &[]);
+        register_named_builtins(&mut registry, &[], "claude-sonnet-4-6");
         assert_eq!(registry.len(), 0, "a lista vazia trouxe builtin");
 
         let nativas: Vec<Arc<dyn Tool>> = vec![Arc::new(Propria)];
@@ -2392,7 +3417,7 @@ mod tests {
 
         // `None` é o caminho do subagente sem agent definition, que é o default
         // e o que traz o conjunto inteiro de builtins.
-        let registry = super::subagent_registry(None, &[], &rules);
+        let registry = super::subagent_registry(None, &[], &rules, "claude-sonnet-4-6");
 
         assert!(
             !registry.names().contains(&"Bash"),
@@ -2413,7 +3438,7 @@ mod tests {
             crate::tools::permission::PermissionRules::from_lists(&[], &["Bash".to_string()]);
         let pedidas = vec!["Bash".to_string(), "Read".to_string()];
 
-        let registry = super::subagent_registry(Some(&pedidas), &[], &rules);
+        let registry = super::subagent_registry(Some(&pedidas), &[], &rules, "claude-sonnet-4-6");
 
         assert_eq!(registry.names(), vec!["Read"]);
     }
@@ -2424,7 +3449,7 @@ mod tests {
     fn sem_negacao_o_subagente_mantem_o_conjunto_default() {
         let rules = crate::tools::permission::PermissionRules::default();
 
-        let registry = super::subagent_registry(None, &[], &rules);
+        let registry = super::subagent_registry(None, &[], &rules, "claude-sonnet-4-6");
 
         assert!(registry.names().contains(&"Bash"));
         assert!(registry.names().contains(&"WebFetch"));
@@ -2456,7 +3481,7 @@ mod tests {
             crate::tools::permission::PermissionRules::from_lists(&[], &["Bash".to_string()]);
         let nativas: Vec<Arc<dyn Tool>> = vec![Arc::new(Confinada)];
 
-        let registry = super::subagent_registry(None, &nativas, &rules);
+        let registry = super::subagent_registry(None, &nativas, &rules, "claude-sonnet-4-6");
 
         assert!(!registry.names().contains(&"Bash"));
         assert_eq!(
@@ -2489,7 +3514,7 @@ mod tests {
         // alcança.
         let rules =
             PermissionRules::from_lists(&[], &["Bash".to_string(), "Read(/etc/*)".to_string()]);
-        let registry = super::subagent_registry(None, &[], &rules);
+        let registry = super::subagent_registry(None, &[], &rules, "claude-sonnet-4-6");
         let store = Arc::new(crate::tools::task_store::TaskStore::new());
 
         let executor = super::subagent_executor(
@@ -2499,6 +3524,8 @@ mod tests {
             std::path::Path::new("/workspace/.out"),
             &store,
             &rules,
+            "claude-sonnet-4-6",
+            super::create_agent_id(),
         );
 
         assert!(executor.permission_rules.is_tool_fully_denied("Bash"));
@@ -2612,5 +3639,249 @@ mod tests {
         assert_eq!(last_chars("abcdef", 3), "def");
         assert_eq!(last_chars("ação", 3), "ção");
         assert_eq!(last_chars("ação", 0), "");
+    }
+}
+
+/// O que o motor entrega às tools e ao cliente: registro das builtins pelo
+/// modelo, o corpo do `can_use_tool`, a decisão do cliente e os frames das
+/// mensagens de usuário.
+#[cfg(test)]
+mod engine_wiring_tests {
+    use std::collections::HashMap;
+
+    use serde_json::json;
+
+    use super::{
+        can_use_tool_request, derive_js_uuid, permission_outcome, register_default_builtins,
+        register_named_builtins, sdk_frames, skill_directories, small_fast_model,
+    };
+    use crate::agentic::AgenticEvent;
+    use crate::api::types::{ApiMessage, ContentBlock};
+    use crate::tools::framework::{PermissionOutcome, ToolPermissionRequest, ToolRegistry};
+    use crate::types::{ClaudeAgentOptions, SettingSource};
+
+    fn names(list: &[&str], model: &str) -> Vec<String> {
+        let mut registry = ToolRegistry::new();
+        let list: Vec<String> = list.iter().map(|s| s.to_string()).collect();
+        register_named_builtins(&mut registry, &list, model);
+        registry.names().into_iter().map(str::to_string).collect()
+    }
+
+    /// `web_search` e `Task` não são nomes de builtin do CLI (o `Task` é
+    /// alias do `Agent`, que o engine registra à parte), e alias repetido
+    /// registra uma vez só.
+    #[test]
+    fn named_builtins_follow_the_cli_names() {
+        assert_eq!(
+            names(&["web_search", "Task"], "claude-sonnet-4-6"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            names(&["WebSearch"], "claude-sonnet-4-6"),
+            vec!["WebSearch"]
+        );
+        assert_eq!(
+            names(&["TaskStop", "KillShell"], "claude-sonnet-4-6"),
+            vec!["TaskStop"]
+        );
+    }
+
+    /// O Read é o do modelo da sessão: sem a linha de PDF para o haiku 3
+    /// (`isPDFSupported`), com ela para os demais, nos dois caminhos de
+    /// registro.
+    #[test]
+    fn read_is_registered_for_the_session_model() {
+        let description = |model: &str| {
+            let mut registry = ToolRegistry::new();
+            register_default_builtins(&mut registry, model);
+            registry
+                .get("Read")
+                .map(|t| t.description().to_string())
+                .expect("Read no default")
+        };
+        let modern = description("claude-sonnet-4-6");
+        let old = description("claude-3-haiku-20240307");
+        assert!(modern.contains("PDF"), "{modern}");
+        assert!(!old.contains("PDF files"), "{old}");
+        assert_ne!(modern, old);
+
+        let mut registry = ToolRegistry::new();
+        register_named_builtins(
+            &mut registry,
+            &["Read".to_string()],
+            "claude-3-haiku-20240307",
+        );
+        assert_eq!(
+            registry.get("Read").map(|t| t.description().to_string()),
+            Some(old)
+        );
+    }
+
+    /// Os opcionais do `can_use_tool` só entram quando existem, como o
+    /// `JSON.stringify` do JS.
+    #[test]
+    fn can_use_tool_body_omits_what_does_not_exist() {
+        let bare = can_use_tool_request(&ToolPermissionRequest {
+            tool_name: "Bash".into(),
+            input: json!({"command": "ls"}),
+            tool_use_id: Some("toolu_1".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            bare,
+            json!({
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": {"command": "ls"},
+                "tool_use_id": "toolu_1",
+            })
+        );
+
+        let full = can_use_tool_request(&ToolPermissionRequest {
+            tool_name: "Edit".into(),
+            input: json!({}),
+            tool_use_id: Some("toolu_2".into()),
+            permission_suggestions: Some(json!([{"type": "setMode", "mode": "acceptEdits"}])),
+            blocked_path: Some("/etc/hosts".into()),
+            decision_reason: Some("Path is outside allowed working directories".into()),
+            agent_id: Some("a0123456789abcdef".into()),
+            ..Default::default()
+        });
+        assert_eq!(full["blocked_path"], "/etc/hosts");
+        assert_eq!(
+            full["decision_reason"],
+            "Path is outside allowed working directories"
+        );
+        assert_eq!(full["agent_id"], "a0123456789abcdef");
+        assert_eq!(full["permission_suggestions"][0]["mode"], "acceptEdits");
+    }
+
+    /// Deny com `interrupt: true` vira `DenyAndInterrupt`; sem ele, deny
+    /// simples.
+    #[test]
+    fn deny_with_interrupt_maps_to_deny_and_interrupt() {
+        assert!(matches!(
+            permission_outcome(&json!({"behavior": "deny", "message": "não", "interrupt": true})),
+            PermissionOutcome::DenyAndInterrupt { message } if message == "não"
+        ));
+        assert!(matches!(
+            permission_outcome(&json!({"behavior": "deny", "message": "não"})),
+            PermissionOutcome::Deny { message } if message == "não"
+        ));
+        assert!(matches!(
+            permission_outcome(&json!({"behavior": "deny", "message": "não", "interrupt": false})),
+            PermissionOutcome::Deny { .. }
+        ));
+        assert!(matches!(
+            permission_outcome(&json!({"behavior": "allow", "updatedInput": {"a": 1}})),
+            PermissionOutcome::Allow {
+                updated_input: Some(_)
+            }
+        ));
+    }
+
+    fn user_event(content: Vec<ContentBlock>, is_meta: bool) -> AgenticEvent {
+        AgenticEvent::User {
+            message: ApiMessage::user(content),
+            parent_tool_use_id: None,
+            uuid: "12345678-1234-4234-8234-123456789abc".into(),
+            session_id: "s".into(),
+            timestamp: String::new(),
+            tool_use_result: None,
+            source_tool_assistant_uuid: None,
+            is_meta,
+        }
+    }
+
+    /// Mensagem meta sai com `isSynthetic`; mensagem de vários blocos sai
+    /// partida em um frame por bloco, com o uuid do `deriveUUID`.
+    #[test]
+    fn user_frames_follow_normalize_message() {
+        let single = sdk_frames(&user_event(vec![ContentBlock::text("a")], false)).expect("frames");
+        assert_eq!(single.len(), 1);
+        assert!(single[0].get("isSynthetic").is_none());
+        assert_eq!(single[0]["uuid"], "12345678-1234-4234-8234-123456789abc");
+
+        let meta = sdk_frames(&user_event(
+            vec![ContentBlock::text("p1"), ContentBlock::text("p2")],
+            true,
+        ))
+        .expect("frames");
+        assert_eq!(meta.len(), 2);
+        for (index, frame) in meta.iter().enumerate() {
+            assert_eq!(frame["isSynthetic"], true);
+            assert_eq!(
+                frame["message"]["content"].as_array().map(Vec::len),
+                Some(1)
+            );
+            assert_eq!(
+                frame["uuid"],
+                format!("12345678-1234-4234-8234-{index:012x}")
+            );
+        }
+        assert_eq!(meta[1]["message"]["content"][0]["text"], "p2");
+    }
+
+    #[test]
+    fn derive_uuid_matches_the_js_formula() {
+        assert_eq!(
+            derive_js_uuid("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", 10),
+            "aaaaaaaa-bbbb-4ccc-8ddd-00000000000a"
+        );
+    }
+
+    /// O modelo pequeno vem do env das options, na precedência do
+    /// `getSmallFastModel`; sem nada ali, fica para o fallback do contexto.
+    #[test]
+    fn small_fast_model_reads_the_options_env() {
+        let env = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        assert_eq!(small_fast_model(&env(&[])), None);
+        assert_eq!(
+            small_fast_model(&env(&[("ANTHROPIC_DEFAULT_HAIKU_MODEL", "haiku-x")])),
+            Some("haiku-x".to_string())
+        );
+        assert_eq!(
+            small_fast_model(&env(&[
+                ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "haiku-x"),
+                ("ANTHROPIC_SMALL_FAST_MODEL", "rapido"),
+            ])),
+            Some("rapido".to_string())
+        );
+    }
+
+    /// As skills seguem as fontes de settings: sem lista, projeto e usuário;
+    /// com lista, só as pedidas (`local` não tem diretório de skills).
+    #[test]
+    fn skill_directories_follow_setting_sources() {
+        let cwd = tempfile::tempdir().expect("cwd");
+        let project_dir = cwd.path().join(".claude").join("skills");
+        let cwd_str = cwd.path().to_str().expect("utf8");
+
+        let all = skill_directories(&ClaudeAgentOptions::default(), cwd_str);
+        assert!(all.contains(&project_dir), "{all:?}");
+
+        let only_user = skill_directories(
+            &ClaudeAgentOptions {
+                setting_sources: Some(vec![SettingSource::User]),
+                ..Default::default()
+            },
+            cwd_str,
+        );
+        assert!(!only_user.contains(&project_dir));
+        assert_eq!(only_user.len(), 1);
+
+        let none = skill_directories(
+            &ClaudeAgentOptions {
+                setting_sources: Some(vec![SettingSource::Local]),
+                ..Default::default()
+            },
+            cwd_str,
+        );
+        assert!(none.is_empty(), "{none:?}");
     }
 }

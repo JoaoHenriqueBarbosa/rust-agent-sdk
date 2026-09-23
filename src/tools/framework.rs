@@ -1,3 +1,15 @@
+//! O framework das tools: o trait `Tool`, o registry, o contexto de execução
+//! e o executor com o fluxo de validação e permissão do CLI.
+//!
+//! Referências JS: `Tool.js` (os defaults de cada tool),
+//! `services/tools/toolExecution/checkPermissionsAndCallTool.js` e
+//! `services/tools/toolExecution/_shared.js` (a ordem: tool inexistente,
+//! cancelamento, schema, `validateInput`, hooks, permissão, execução),
+//! `services/tools/toolHooks.js` (`resolveHookPermissionDecision`),
+//! `utils/permissions/permissions.js` (`hasPermissionsToUseTool`),
+//! `utils/toolResultStorage.js` (resultado vazio e persistência de
+//! resultado grande), `utils/toolPool.js` (a ordem das tools no request).
+
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -5,37 +17,168 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream::Stream;
+use serde_json::Value;
 
-use crate::api::types::{ContentBlock, ToolDefinition, ToolResultContent as ApiToolResultContent};
-use crate::tools::permission::{PermissionDecision, PermissionRules};
+use crate::api::types::{
+    ApiMessage, ApiResponse, ContentBlock, CreateMessageRequest, ToolDefinition,
+    ToolResultContent as ApiToolResultContent,
+};
+use crate::tools::file_state::FileStateCache;
+use crate::tools::permission::{
+    create_permission_request_message, dont_ask_reject_message, DecisionReason, PermissionAsk,
+    PermissionResult, PermissionRules, RuleBehavior,
+};
 use crate::types::PermissionMode;
 
 // ---------------------------------------------------------------------------
-// Tool trait
+// Mensagens fixas do CLI
+// ---------------------------------------------------------------------------
+
+/// `CANCEL_MESSAGE`: o tool_result de uma tool que não chegou a rodar porque
+/// o turno foi interrompido.
+pub const CANCEL_MESSAGE: &str = "The user doesn't want to take this action right now. STOP what you are doing and wait for the user to tell you how to proceed.";
+
+/// `INTERRUPT_MESSAGE_FOR_TOOL_USE`: o tool_result de uma tool abortada no
+/// meio da execução.
+pub const INTERRUPT_MESSAGE_FOR_TOOL_USE: &str = "[Request interrupted by user for tool use]";
+
+// ---------------------------------------------------------------------------
+// Utilitários de texto com a semântica do JS
+// ---------------------------------------------------------------------------
+
+/// O `length` de uma string no JS (unidades UTF-16).
+pub fn js_len(s: &str) -> usize {
+    s.encode_utf16().count()
+}
+
+/// `s.slice(start, end)` do JS, em unidades UTF-16. Um corte no meio de um
+/// par substituto recua para a fronteira de char anterior.
+pub fn js_slice(s: &str, start: usize, end: usize) -> String {
+    let mut units = 0usize;
+    let mut out = String::new();
+    for ch in s.chars() {
+        let w = ch.len_utf16();
+        if units >= end {
+            break;
+        }
+        if units >= start && units + w <= end {
+            out.push(ch);
+        }
+        units += w;
+    }
+    out
+}
+
+/// `formatFileSize` de `utils/format.js`.
+pub fn format_file_size(size_in_bytes: u64) -> String {
+    fn trim(v: f64) -> String {
+        let s = format!("{v:.1}");
+        s.strip_suffix(".0").map(str::to_string).unwrap_or(s)
+    }
+    let kb = size_in_bytes as f64 / 1024.0;
+    if kb < 1.0 {
+        return format!("{size_in_bytes} bytes");
+    }
+    if kb < 1024.0 {
+        return format!("{}KB", trim(kb));
+    }
+    let mb = kb / 1024.0;
+    if mb < 1024.0 {
+        return format!("{}MB", trim(mb));
+    }
+    format!("{}GB", trim(mb / 1024.0))
+}
+
+/// Comparação de nomes como o `String.prototype.localeCompare` do Node (ICU,
+/// locale raiz), que o `assembleToolPool` usa para ordenar as tools:
+/// pontuação antes de dígitos, dígitos antes de letras, letras sem caixa no
+/// nível primário e minúscula antes de maiúscula no desempate.
+pub fn locale_compare(a: &str, b: &str) -> std::cmp::Ordering {
+    const PUNCTUATION: &str = "_-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$";
+    fn primary(c: char) -> (u8, u32) {
+        if c.is_whitespace() {
+            return (0, c as u32);
+        }
+        if let Some(pos) = PUNCTUATION.find(c) {
+            return (1, pos as u32);
+        }
+        if c.is_ascii_digit() {
+            return (3, c as u32);
+        }
+        if c.is_alphabetic() {
+            let lower = c.to_lowercase().next().unwrap_or(c);
+            return (4, lower as u32);
+        }
+        (2, c as u32)
+    }
+    let pa: Vec<(u8, u32)> = a.chars().map(primary).collect();
+    let pb: Vec<(u8, u32)> = b.chars().map(primary).collect();
+    match pa.cmp(&pb) {
+        std::cmp::Ordering::Equal => {}
+        other => return other,
+    }
+    for (ca, cb) in a.chars().zip(b.chars()) {
+        if ca != cb {
+            // Minúscula primeiro, como o nível terciário do ICU.
+            return match (ca.is_lowercase(), cb.is_lowercase()) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => ca.cmp(&cb),
+            };
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
+// ---------------------------------------------------------------------------
+// Permissão: pedido e decisão do callback
 // ---------------------------------------------------------------------------
 
 /// Permission request sent to the callback when a tool needs user approval.
-#[derive(Debug, Clone)]
+///
+/// Carrega o que o `can_use_tool` do CLI manda (`cli/structuredIO.js`,
+/// `createCanUseTool`): `tool_name`, `input`, `permission_suggestions`,
+/// `blocked_path`, `decision_reason`, `tool_use_id` e `agent_id`.
+#[derive(Debug, Clone, Default)]
 pub struct ToolPermissionRequest {
     pub tool_name: String,
+    /// Texto do pedido (a mensagem do `ask`). O JS NÃO manda `description` no
+    /// `can_use_tool` de uma tool; o campo existe para diagnóstico.
     pub description: String,
-    pub input: serde_json::Value,
+    pub input: Value,
     /// The tool_use id from the model, so the decider can correlate.
     pub tool_use_id: Option<String>,
+    /// `permission_suggestions`: atualizações de permissão sugeridas (a forma
+    /// do `PermissionUpdateSchema` do JS), quando a checagem as produziu.
+    pub permission_suggestions: Option<Value>,
+    /// `blocked_path`: o caminho que motivou o pedido, quando há.
+    pub blocked_path: Option<String>,
+    /// `decision_reason`: o motivo serializado (`serializeDecisionReason`).
+    pub decision_reason: Option<String>,
+    /// `agent_id`: o subagente que pede, `None` na thread principal.
+    pub agent_id: Option<String>,
 }
 
 /// Decision returned by the permission callback.
 ///
-/// A deny carries the MESSAGE the model will read as the tool_result — that
+/// A deny carries the MESSAGE the model will read as the tool_result; that
 /// message is how a gatekeeper steers the agent (e.g. "call the commit tool
 /// instead"), so collapsing this to a bool would lose the steering channel.
 #[derive(Debug, Clone)]
 pub enum PermissionOutcome {
     Allow {
-        /// Optionally rewrite the tool input before execution.
-        updated_input: Option<serde_json::Value>,
+        /// Optionally rewrite the tool input before execution. `None`, `null`
+        /// ou objeto vazio mantêm o input original (o JS usa o `updatedInput`
+        /// só quando ele tem chaves).
+        updated_input: Option<Value>,
     },
     Deny {
+        message: String,
+    },
+    /// Recusa com `interrupt: true`: além de recusar, o JS aborta o turno
+    /// (`abortController.abort()`). O executor marca
+    /// `ToolExecutionResult::interrupt` e o loop encerra o turno.
+    DenyAndInterrupt {
         message: String,
     },
 }
@@ -56,7 +199,7 @@ pub struct PreToolUseDecision {
     /// permission flow.
     pub permission: Option<PermissionOutcome>,
     /// Rewritten tool input (the hook's `updatedInput`).
-    pub updated_input: Option<serde_json::Value>,
+    pub updated_input: Option<Value>,
 }
 
 /// Async PreToolUse hook: runs BEFORE the permission check and can decide it.
@@ -71,18 +214,34 @@ pub type PreToolUseFn = Arc<
 pub struct PostToolUseEvent {
     pub tool_name: String,
     pub tool_use_id: String,
-    pub tool_input: serde_json::Value,
+    pub tool_input: Value,
     /// The tool result content as it will be sent to the model.
-    pub tool_response: serde_json::Value,
+    pub tool_response: Value,
     pub is_error: bool,
 }
 
 /// Async observer invoked after each tool execution. Returned text is
-/// appended to the tool_result content so it reaches the model — the same
+/// appended to the tool_result content so it reaches the model, the same
 /// channel the CLI uses for PostToolUse hook `additionalContext`.
 pub type PostToolUseFn = Arc<
     dyn Fn(PostToolUseEvent) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> + Send + Sync,
 >;
+
+/// Chamada de modelo que as tools fazem por conta própria: o resumo do
+/// WebFetch no modelo pequeno (`queryHaiku` do JS) e a busca do WebSearch
+/// no modelo principal com a server tool `web_search_20250305`
+/// (`queryModelWithStreaming` do JS). O engine preenche com o cliente da
+/// sessão (mesma chave, mesma base URL, mesmos headers).
+pub type ModelCallFn = Arc<
+    dyn Fn(
+            CreateMessageRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<ApiResponse, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// O modelo pequeno do JS quando nada é configurado (`getDefaultHaikuModel`).
+pub const DEFAULT_HAIKU_MODEL: &str = "claude-haiku-4-5-20251001";
 
 /// Context passed to tool execution.
 pub struct ToolContext {
@@ -104,7 +263,7 @@ pub struct ToolContext {
     pub tool_results_dir: Option<PathBuf>,
     /// Diretórios adicionais em que as file tools podem operar (add_dirs).
     pub additional_directories: Vec<PathBuf>,
-    /// Env extra herdado das options — aplicado por tools que spawnam
+    /// Env extra herdado das options, aplicado por tools que spawnam
     /// processos (Bash).
     pub extra_env: std::collections::HashMap<String, String>,
     /// Prefixos de variável que NÃO podem chegar aos processos que as tools
@@ -118,8 +277,36 @@ pub struct ToolContext {
     pub denied_env_prefixes: Vec<String>,
     /// Store de tarefas da sessão (TodoV2 + processos de background).
     pub task_store: Option<Arc<crate::tools::task_store::TaskStore>>,
-    /// Lista de todos vigente (TodoWrite v1) — o output devolve old/new.
-    pub todo_store: Option<Arc<std::sync::Mutex<serde_json::Value>>>,
+    /// Lista de todos vigente (TodoWrite v1): o output devolve old/new.
+    pub todo_store: Option<Arc<std::sync::Mutex<Value>>>,
+    /// Chamada de modelo para as tools que consultam o modelo (WebFetch e
+    /// WebSearch). `None`: essas tools respondem com erro explícito.
+    pub model_call: Option<ModelCallFn>,
+    /// O modelo do loop principal (o `mainLoopModel` do JS). Decide o
+    /// suporte a PDF do Read, o lembrete de malware e o modelo da busca do
+    /// WebSearch.
+    pub main_model: Option<String>,
+    /// O modelo pequeno (`getSmallFastModel`). `None` segue o JS:
+    /// `ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, ou o
+    /// haiku default. Ver [`ToolContext::small_fast_model_name`].
+    pub small_fast_model: Option<String>,
+    /// Id do subagente em execução (`agentId` do JS); `None` na thread
+    /// principal. Vai no `agent_id` do pedido de permissão.
+    pub agent_id: Option<String>,
+    /// O `readFileState` da sessão: o que o Read leu, que o Edit/Write
+    /// consultam e que produz o stub de arquivo inalterado.
+    pub file_state: Arc<FileStateCache>,
+    /// Diretórios de skills a carregar, na ordem de precedência (o JS lê
+    /// `.claude/skills` de cada fonte de settings habilitada). O engine
+    /// preenche conforme `setting_sources`.
+    pub skill_directories: Vec<PathBuf>,
+    /// Cancelamento do turno (o `abortController` do JS). Cancelado, as tools
+    /// que não começaram devolvem `CANCEL_MESSAGE` e as que estão rodando
+    /// são abortadas.
+    pub abort: Option<tokio_util::sync::CancellationToken>,
+    /// Sessão não interativa (SDK/`-p`), o `isNonInteractiveSession` do JS.
+    /// O default é `true`: o SDK nunca tem um terminal para perguntar.
+    pub non_interactive: bool,
 }
 
 impl ToolContext {
@@ -138,6 +325,31 @@ impl ToolContext {
                 *guard = mode;
             }
         }
+    }
+
+    /// O modelo pequeno efetivo, com a precedência do `getSmallFastModel`.
+    pub fn small_fast_model_name(&self) -> String {
+        if let Some(model) = &self.small_fast_model {
+            return model.clone();
+        }
+        let from_env = |key: &str| {
+            self.extra_env
+                .get(key)
+                .cloned()
+                .or_else(|| std::env::var(key).ok())
+                .filter(|v| !v.is_empty())
+        };
+        from_env("ANTHROPIC_SMALL_FAST_MODEL")
+            .or_else(|| from_env("ANTHROPIC_DEFAULT_HAIKU_MODEL"))
+            .unwrap_or_else(|| DEFAULT_HAIKU_MODEL.to_string())
+    }
+
+    /// Se o turno foi cancelado.
+    pub fn is_aborted(&self) -> bool {
+        self.abort
+            .as_ref()
+            .map(|t| t.is_cancelled())
+            .unwrap_or(false)
     }
 
     /// Prepara o ambiente de um processo filho: tira o que a sessão proíbe e
@@ -176,6 +388,9 @@ impl std::fmt::Debug for ToolContext {
             .field("has_pre_tool_use", &self.pre_tool_use.is_some())
             .field("has_post_tool_use", &self.post_tool_use.is_some())
             .field("tool_results_dir", &self.tool_results_dir)
+            .field("has_model_call", &self.model_call.is_some())
+            .field("main_model", &self.main_model)
+            .field("agent_id", &self.agent_id)
             .finish()
     }
 }
@@ -195,44 +410,115 @@ impl Default for ToolContext {
             denied_env_prefixes: Vec::new(),
             task_store: None,
             todo_store: None,
+            model_call: None,
+            main_model: None,
+            small_fast_model: None,
+            agent_id: None,
+            file_state: Arc::new(FileStateCache::default()),
+            skill_directories: Vec::new(),
+            abort: None,
+            non_interactive: true,
         }
     }
 }
 
+// ---------------------------------------------------------------------------
+// Resultado de uma tool
+// ---------------------------------------------------------------------------
+
 /// Result of executing a tool.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ToolResult {
     pub content: Vec<ToolResultContent>,
     pub is_error: bool,
+    /// O `content` do bloco tool_result vai como STRING (e não como array de
+    /// blocos). É o que o `mapToolResultToToolResultBlockParam` de quase
+    /// todas as tools do JS faz; array só quando há imagem ou quando a tool
+    /// devolve blocos (MCP). Só vale com um único bloco de texto.
+    pub content_as_string: bool,
+    /// Mensagens de usuário que o JS anexa DEPOIS do tool_result
+    /// (`result.newMessages`), como o documento PDF inteiro do Read ou a
+    /// nota de imagem redimensionada. São `isMeta` no transcript do JS.
+    pub new_messages: Vec<ApiMessage>,
+    /// O `tool_use_result` do frame `user` (o `data` estruturado da tool no
+    /// JS, ou a string `Error: ...` das recusas e falhas). O executor sempre
+    /// preenche; uma tool só precisa preencher quando o JS devolve um objeto.
+    pub tool_use_result: Option<Value>,
+}
+
+/// O `content` do bloco tool_result na forma do JS.
+#[derive(Debug, Clone)]
+pub enum ToolResultPayload {
+    Text(String),
+    Blocks(Vec<ApiToolResultContent>),
+}
+
+impl From<ToolResultPayload> for crate::api::types::ToolResultBlockContent {
+    fn from(payload: ToolResultPayload) -> Self {
+        match payload {
+            ToolResultPayload::Text(text) => Self::Text(text),
+            ToolResultPayload::Blocks(blocks) => Self::Blocks(blocks),
+        }
+    }
 }
 
 impl ToolResult {
+    /// Resultado de texto que vai como string, a forma da maioria das tools.
     pub fn text(text: impl Into<String>) -> Self {
         Self {
             content: vec![ToolResultContent::Text(text.into())],
-            is_error: false,
+            content_as_string: true,
+            ..Default::default()
         }
     }
 
+    /// Erro com o texto como string (a forma das falhas e recusas no JS).
     pub fn error(text: impl Into<String>) -> Self {
         Self {
             content: vec![ToolResultContent::Text(text.into())],
             is_error: true,
+            content_as_string: true,
+            ..Default::default()
         }
     }
 
     pub fn image(data: String, media_type: String) -> Self {
         Self {
             content: vec![ToolResultContent::Image { data, media_type }],
-            is_error: false,
+            ..Default::default()
         }
     }
 
+    /// Blocos (vão como array).
     pub fn mixed(content: Vec<ToolResultContent>) -> Self {
         Self {
             content,
-            is_error: false,
+            ..Default::default()
         }
+    }
+
+    /// Define o `tool_use_result` estruturado.
+    pub fn with_tool_use_result(mut self, value: Value) -> Self {
+        self.tool_use_result = Some(value);
+        self
+    }
+
+    /// Acrescenta mensagens a anexar depois do tool_result.
+    pub fn with_new_messages(mut self, messages: Vec<ApiMessage>) -> Self {
+        self.new_messages.extend(messages);
+        self
+    }
+
+    /// O texto concatenado dos blocos de texto.
+    pub fn text_content(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|c| match c {
+                ToolResultContent::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Convert to API content blocks for the tool_result message.
@@ -251,6 +537,17 @@ impl ToolResult {
             })
             .collect()
     }
+
+    /// O `content` do tool_result na forma do JS: string quando a tool
+    /// devolve string (e só há um texto), blocos no resto.
+    pub fn to_api_payload(&self) -> ToolResultPayload {
+        if self.content_as_string {
+            if let [ToolResultContent::Text(text)] = self.content.as_slice() {
+                return ToolResultPayload::Text(text.clone());
+            }
+        }
+        ToolResultPayload::Blocks(self.to_api_content())
+    }
 }
 
 /// Content types that a tool can return.
@@ -259,6 +556,10 @@ pub enum ToolResultContent {
     Text(String),
     Image { data: String, media_type: String },
 }
+
+// ---------------------------------------------------------------------------
+// O trait Tool
+// ---------------------------------------------------------------------------
 
 /// The core trait that all tools must implement.
 #[async_trait]
@@ -270,29 +571,51 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &str;
 
     /// JSON Schema for the tool's input parameters.
-    fn input_schema(&self) -> serde_json::Value;
+    fn input_schema(&self) -> Value;
 
     /// Whether this tool can safely run concurrently with other safe tools.
     fn is_concurrency_safe(&self) -> bool {
         false
     }
 
-    /// Whether this tool only READS state — read-only tools are auto-allowed
-    /// in plan mode; everything else is refused there.
+    /// Whether this tool only READS state. É informativo (o `isReadOnly`
+    /// do JS); NÃO dá permissão automática: quem decide é `check_permissions`.
     fn is_read_only(&self) -> bool {
         false
     }
 
-    /// Whether this tool is a file-edit tool — auto-allowed in acceptEdits.
+    /// Whether this tool is a file-edit tool. Extensão do SDK para tools
+    /// próprias sem checagem de caminho: em `acceptEdits`, uma tool de edição
+    /// cuja checagem responde `passthrough` é permitida.
     fn is_edit_tool(&self) -> bool {
         false
     }
 
-    /// Whether this tool ALWAYS goes through the permission callback — the
-    /// callback is its answer channel (AskUserQuestion), so no mode may
-    /// auto-allow or auto-deny it.
+    /// Nome antigo de `requires_user_interaction`, mantido por
+    /// compatibilidade.
     fn always_asks(&self) -> bool {
         false
+    }
+
+    /// `requiresUserInteraction` do JS: a tool só roda com a resposta do
+    /// usuário (AskUserQuestion, ExitPlanMode). Um `ask` da checagem dela
+    /// SEMPRE chega ao callback, mesmo em `bypassPermissions` ou com regra
+    /// allow.
+    fn requires_user_interaction(&self) -> bool {
+        self.always_asks()
+    }
+
+    /// Tool de servidor MCP (`isMcp`/nome `mcp__*`).
+    fn is_mcp(&self) -> bool {
+        self.name().starts_with("mcp__")
+    }
+
+    /// O `maxResultSizeChars` da tool: acima disso o resultado é persistido
+    /// em disco e o modelo recebe preview + caminho. `None` é o `Infinity`
+    /// do JS (o Read nunca persiste). O limiar efetivo é o mínimo entre este
+    /// valor e 50000 (`getPersistenceThreshold`).
+    fn max_result_size_chars(&self) -> Option<usize> {
+        Some(100_000)
     }
 
     /// Definição customizada enviada à API. `None` = a definição padrão
@@ -302,13 +625,73 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// O `preprocess` do zod que algumas tools aplicam antes do parse
+    /// (`semanticNumber`, `semanticBoolean`). O resultado é o input que segue
+    /// para a validação, a permissão e a execução.
+    fn preprocess_input(&self, input: Value) -> Value {
+        input
+    }
+
+    /// Refinamentos do schema (`.refine`/`.superRefine` do zod), rodados só
+    /// quando o schema base passou. Cada issue volta na forma do zod
+    /// (`schema_validation::custom_issue`).
+    fn refine_input(&self, _input: &Value) -> Vec<Value> {
+        Vec::new()
+    }
+
+    /// `validateInput` do JS: roda depois do schema e ANTES da permissão.
+    /// `Err(mensagem)` vira `<tool_use_error>mensagem</tool_use_error>`.
+    async fn validate_input(&self, _input: &Value, _context: &ToolContext) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// `checkPermissions` do JS. O default é `passthrough` (pergunta, salvo
+    /// regra allow ou modo que permita), que é o que o JS faz para tools MCP;
+    /// cada builtin sobrescreve com a checagem do JS (e o default do
+    /// `buildTool`, `allow`, para as que não têm checagem própria).
+    async fn check_permissions(
+        &self,
+        _input: &Value,
+        _context: &ToolContext,
+        _rules: &PermissionRules,
+    ) -> PermissionResult {
+        PermissionResult::passthrough(self.name())
+    }
+
     /// Execute the tool with the given input.
-    async fn execute(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult;
+    async fn execute(&self, input: Value, context: &ToolContext) -> ToolResult;
 }
 
 // ---------------------------------------------------------------------------
 // Tool registry
 // ---------------------------------------------------------------------------
+
+/// Os nomes do conjunto default do CLI 2.1.90 numa sessão SDK não
+/// interativa (`getAllBaseTools` de `tools.js` com os gates desse modo):
+/// sem TodoV2 (`isTodoV2Enabled` é falso fora do modo interativo), sem
+/// ToolSearch (desligado com base URL de proxy) e sem as tools de time,
+/// cron e LSP. O `Agent` entra pelo engine, que tem o cliente da API.
+pub const DEFAULT_TOOL_NAMES: &[&str] = &[
+    "Agent",
+    "AskUserQuestion",
+    "Bash",
+    "Edit",
+    "EnterPlanMode",
+    "EnterWorktree",
+    "ExitPlanMode",
+    "ExitWorktree",
+    "Glob",
+    "Grep",
+    "NotebookEdit",
+    "Read",
+    "Skill",
+    "TaskOutput",
+    "TaskStop",
+    "TodoWrite",
+    "WebFetch",
+    "WebSearch",
+    "Write",
+];
 
 /// Registry that holds all available tools.
 pub struct ToolRegistry {
@@ -335,31 +718,53 @@ impl ToolRegistry {
         self.shared_tools.push(tool);
     }
 
-    /// Register all default built-in tools.
-    pub fn register_defaults(&mut self) {
+    /// Cria a builtin pelo nome do CLI (aceita também os nomes antigos
+    /// `Task`, `KillShell`, `BashOutputTool`/`AgentOutputTool`). `None` para
+    /// nome sem builtin nativa, incluindo `Agent`, que o engine registra.
+    pub fn builtin(name: &str) -> Option<Box<dyn Tool>> {
         use crate::tools::*;
-
-        self.register(Box::new(bash::BashTool::default()));
-        self.register(Box::new(file_read::FileReadTool));
-        self.register(Box::new(file_write::FileWriteTool));
-        self.register(Box::new(file_edit::FileEditTool));
-        self.register(Box::new(glob_tool::GlobTool));
-        self.register(Box::new(grep::GrepTool));
-        self.register(Box::new(notebook::NotebookEditTool));
-        self.register(Box::new(web_fetch::WebFetchTool));
-        self.register(Box::new(ask_user::AskUserQuestionTool));
-        self.register(Box::new(todo::TodoWriteTool));
-        self.register(Box::new(tasks::TaskCreateTool));
-        self.register(Box::new(tasks::TaskGetTool));
-        self.register(Box::new(tasks::TaskListTool));
-        self.register(Box::new(tasks::TaskUpdateTool));
-        self.register(Box::new(tasks::TaskStopTool));
-        self.register(Box::new(tasks::TaskOutputTool));
-        self.register(Box::new(plan_mode::EnterPlanModeTool));
-        self.register(Box::new(plan_mode::ExitPlanModeTool));
+        let tool: Box<dyn Tool> = match name {
+            "Bash" => Box::new(bash::BashTool::default()),
+            "Read" => Box::new(file_read::FileReadTool),
+            "Write" => Box::new(file_write::FileWriteTool),
+            "Edit" => Box::new(file_edit::FileEditTool),
+            "Glob" => Box::new(glob_tool::GlobTool),
+            "Grep" => Box::new(grep::GrepTool),
+            "NotebookEdit" => Box::new(notebook::NotebookEditTool),
+            "WebFetch" => Box::new(web_fetch::WebFetchTool),
+            "WebSearch" => Box::new(web_search::WebSearchTool::default()),
+            "AskUserQuestion" => Box::new(ask_user::AskUserQuestionTool),
+            "TodoWrite" => Box::new(todo::TodoWriteTool),
+            "TaskCreate" => Box::new(tasks::TaskCreateTool),
+            "TaskGet" => Box::new(tasks::TaskGetTool),
+            "TaskList" => Box::new(tasks::TaskListTool),
+            "TaskUpdate" => Box::new(tasks::TaskUpdateTool),
+            "TaskStop" | "KillShell" => Box::new(tasks::TaskStopTool),
+            "TaskOutput" | "BashOutputTool" | "AgentOutputTool" => Box::new(tasks::TaskOutputTool),
+            "EnterPlanMode" => Box::new(plan_mode::EnterPlanModeTool),
+            "ExitPlanMode" => Box::new(plan_mode::ExitPlanModeTool),
+            "EnterWorktree" => Box::new(worktree::EnterWorktreeTool),
+            "ExitWorktree" => Box::new(worktree::ExitWorktreeTool),
+            "Skill" => Box::new(skill::SkillTool),
+            _ => return None,
+        };
+        Some(tool)
     }
 
-    /// Remove do registry as tools cujo nome não passa no predicado — usado
+    /// Register all default built-in tools: o conjunto default do CLI nesse
+    /// modo ([`DEFAULT_TOOL_NAMES`]), menos o `Agent`, que o engine registra
+    /// com o cliente da API. TaskCreate/TaskGet/TaskList/TaskUpdate (TodoV2)
+    /// ficam fora, como no JS não interativo, e continuam registráveis pelo
+    /// nome com [`ToolRegistry::builtin`].
+    pub fn register_defaults(&mut self) {
+        for name in DEFAULT_TOOL_NAMES {
+            if let Some(tool) = Self::builtin(name) {
+                self.register(tool);
+            }
+        }
+    }
+
+    /// Remove do registry as tools cujo nome não passa no predicado, usado
     /// para honrar deny rules incondicionais antes do request.
     pub fn retain(&mut self, keep: impl Fn(&str) -> bool) {
         self.tools.retain(|t| keep(t.name()));
@@ -393,19 +798,48 @@ impl ToolRegistry {
         self.tools.is_empty() && self.shared_tools.is_empty()
     }
 
-    /// Generate API tool definitions for all registered tools.
-    /// O breakpoint de cache da última tool é posto no envio, pelo
+    /// As tools na ordem do request do CLI (`assembleToolPool` /
+    /// `mergeAndFilterTools`): as builtins ordenadas por nome, depois as MCP
+    /// (`mcp__*`) ordenadas por nome, com nomes repetidos descartados (vale
+    /// a primeira registrada).
+    fn ordered_tools(&self) -> Vec<&dyn Tool> {
+        let mut seen: Vec<&str> = Vec::new();
+        let mut builtins: Vec<&dyn Tool> = Vec::new();
+        let mut mcp: Vec<&dyn Tool> = Vec::new();
+        for tool in self.all_tools() {
+            if seen.contains(&tool.name()) {
+                continue;
+            }
+            seen.push(tool.name());
+            if tool.is_mcp() {
+                mcp.push(tool);
+            } else {
+                builtins.push(tool);
+            }
+        }
+        builtins.sort_by(|a, b| locale_compare(a.name(), b.name()));
+        mcp.sort_by(|a, b| locale_compare(a.name(), b.name()));
+        builtins.extend(mcp);
+        builtins
+    }
+
+    /// Os nomes na ordem do request.
+    pub fn ordered_names(&self) -> Vec<&str> {
+        self.ordered_tools().into_iter().map(|t| t.name()).collect()
+    }
+
+    /// Generate API tool definitions for all registered tools, na ordem do
+    /// CLI. O breakpoint de cache da última tool é posto no envio, pelo
     /// `api::cache_breakpoints`, junto com os demais.
     pub fn api_definitions(&self) -> Vec<ToolDefinition> {
-        self.all_tools()
+        self.ordered_tools()
+            .into_iter()
             .map(|tool| {
                 tool.api_definition().unwrap_or_else(|| ToolDefinition {
-                    r#type: None,
-                    max_uses: None,
                     name: tool.name().to_string(),
                     description: Some(tool.description().to_string()),
                     input_schema: tool.input_schema(),
-                    cache_control: None,
+                    ..Default::default()
                 })
             })
             .collect()
@@ -422,8 +856,21 @@ impl Default for ToolRegistry {
 // Tool executor
 // ---------------------------------------------------------------------------
 
-/// Maximum result size before truncation (100KB).
+/// Maximum result size before truncation (100KB), quando não há diretório
+/// de persistência.
 const MAX_RESULT_SIZE: usize = 100 * 1024;
+
+/// `DEFAULT_MAX_RESULT_SIZE_CHARS` de `constants/toolLimits.js`.
+const DEFAULT_MAX_RESULT_SIZE_CHARS: usize = 50_000;
+
+/// `PREVIEW_SIZE_BYTES` de `utils/toolResultStorage.js`.
+const PREVIEW_SIZE_BYTES: usize = 2_000;
+
+/// A decisão final de permissão de uma chamada.
+enum FinalDecision {
+    Allow(Value),
+    Deny { message: String, interrupt: bool },
+}
 
 /// Manages tool execution with concurrency control and permissions.
 pub struct ToolExecutor {
@@ -446,12 +893,12 @@ impl ToolExecutor {
         self
     }
 
-    /// Máximo de tools concorrentes num grupo safe — o mesmo teto do CLI
+    /// Máximo de tools concorrentes num grupo safe, o mesmo teto do CLI
     /// (CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY default).
     const MAX_TOOL_CONCURRENCY: usize = 10;
 
     /// Agrupa os tool_uses em RUNS CONTÍGUAS de mesma classificação,
-    /// preservando a ordem que o modelo pediu — como o partitionToolCalls do
+    /// preservando a ordem que o modelo pediu, como o partitionToolCalls do
     /// CLI. Particionar globalmente (todas as safe primeiro) reordenava as
     /// chamadas, o que corrompe sequências de mutação transacionais
     /// (declarar → commitar).
@@ -509,7 +956,7 @@ impl ToolExecutor {
     ) -> Pin<Box<dyn Stream<Item = ToolExecutionResult> + Send + '_>> {
         Box::pin(async_stream::stream! {
             use futures::stream::StreamExt as _;
-            // Runs contíguas na ordem do modelo — mesma regra do execute_all.
+            // Runs contíguas na ordem do modelo, mesma regra do execute_all.
             for (safe, run) in self.contiguous_groups(tool_uses) {
                 if safe {
                     let mut stream = futures::stream::iter(run.into_iter().map(|tu| self.execute_one(tu)))
@@ -526,221 +973,465 @@ impl ToolExecutor {
         })
     }
 
-    /// Execute a single tool_use block.
+    fn permission_request(
+        &self,
+        tool_name: &str,
+        input: &Value,
+        tool_use_id: &str,
+        ask: Option<&PermissionAsk>,
+    ) -> ToolPermissionRequest {
+        ToolPermissionRequest {
+            tool_name: tool_name.to_string(),
+            description: ask
+                .map(|a| a.message.clone())
+                .unwrap_or_else(|| format!("Tool {tool_name} wants to execute")),
+            input: input.clone(),
+            tool_use_id: Some(tool_use_id.to_string()),
+            permission_suggestions: ask.and_then(|a| a.suggestions.clone()),
+            blocked_path: ask.and_then(|a| a.blocked_path.clone()),
+            decision_reason: ask
+                .and_then(|a| a.decision_reason.as_ref())
+                .and_then(DecisionReason::serialize_for_sdk),
+            agent_id: self.context.agent_id.clone(),
+        }
+    }
+
+    /// `hasPermissionsToUseToolInner` + o `dontAsk` do wrapper: a decisão
+    /// sem o callback (Allow, Ask ou Deny).
+    async fn has_permissions_to_use_tool(
+        &self,
+        tool: &dyn Tool,
+        input: &Value,
+    ) -> PermissionResult {
+        let name = tool.name();
+        let rules = &self.permission_rules;
+        let mode = self.context.mode();
+
+        let result = 'inner: {
+            if let Some(rule) = rules.deny_rule_for_tool(name) {
+                break 'inner PermissionResult::Deny {
+                    message: format!("Permission to use {name} has been denied."),
+                    decision_reason: Some(DecisionReason::Rule {
+                        rule: rule.clone(),
+                        behavior: RuleBehavior::Deny,
+                    }),
+                };
+            }
+            // Extensão do SDK: regra deny com padrão casada pela glob genérica
+            // sobre o argumento principal, para qualquer tool (as de arquivo
+            // aplicam, na checagem delas, a semântica de caminho do JS).
+            if let Some(rule) = rules.pattern_rule_matching(name, input, RuleBehavior::Deny) {
+                break 'inner PermissionResult::Deny {
+                    message: format!("Permission to use {name} has been denied."),
+                    decision_reason: Some(DecisionReason::Rule {
+                        rule: rule.clone(),
+                        behavior: RuleBehavior::Deny,
+                    }),
+                };
+            }
+            if let Some(rule) = rules.ask_rule_for_tool(name) {
+                break 'inner PermissionResult::Ask(PermissionAsk {
+                    message: create_permission_request_message(name, None),
+                    decision_reason: Some(DecisionReason::Rule {
+                        rule: rule.clone(),
+                        behavior: RuleBehavior::Ask,
+                    }),
+                    ..Default::default()
+                });
+            }
+            let checked = tool.check_permissions(input, &self.context, rules).await;
+            if let PermissionResult::Deny { .. } = checked {
+                break 'inner checked;
+            }
+            if let PermissionResult::Ask(ask) = &checked {
+                let forced = tool.requires_user_interaction()
+                    || matches!(
+                        ask.decision_reason,
+                        Some(DecisionReason::Rule {
+                            behavior: RuleBehavior::Ask,
+                            ..
+                        }) | Some(DecisionReason::SafetyCheck(_))
+                    );
+                if forced {
+                    break 'inner checked;
+                }
+            }
+            let fallback_input = |r: &PermissionResult| match r {
+                PermissionResult::Allow { updated_input, .. } => updated_input.clone(),
+                PermissionResult::Ask(a) | PermissionResult::Passthrough(a) => {
+                    a.updated_input.clone()
+                }
+                PermissionResult::Deny { .. } => None,
+            };
+            // `auto` não tem o classificador do JS no nativo; segue o
+            // comportamento histórico do SDK de permitir como o bypass.
+            if matches!(
+                mode,
+                PermissionMode::BypassPermissions | PermissionMode::Auto
+            ) {
+                break 'inner PermissionResult::Allow {
+                    updated_input: fallback_input(&checked),
+                    decision_reason: Some(DecisionReason::Mode(mode)),
+                };
+            }
+            if let Some(rule) = rules.allow_rule_for_tool(name) {
+                break 'inner PermissionResult::Allow {
+                    updated_input: fallback_input(&checked),
+                    decision_reason: Some(DecisionReason::Rule {
+                        rule: rule.clone(),
+                        behavior: RuleBehavior::Allow,
+                    }),
+                };
+            }
+            match checked {
+                PermissionResult::Passthrough(ask) => {
+                    // Extensões do SDK para tools sem checagem própria: regra
+                    // allow com padrão pela glob genérica, e `acceptEdits`
+                    // para tools de edição.
+                    if let Some(rule) =
+                        rules.pattern_rule_matching(name, input, RuleBehavior::Allow)
+                    {
+                        break 'inner PermissionResult::Allow {
+                            updated_input: ask.updated_input,
+                            decision_reason: Some(DecisionReason::Rule {
+                                rule: rule.clone(),
+                                behavior: RuleBehavior::Allow,
+                            }),
+                        };
+                    }
+                    if mode == PermissionMode::AcceptEdits && tool.is_edit_tool() {
+                        break 'inner PermissionResult::Allow {
+                            updated_input: ask.updated_input,
+                            decision_reason: Some(DecisionReason::Mode(mode)),
+                        };
+                    }
+                    let message =
+                        create_permission_request_message(name, ask.decision_reason.as_ref());
+                    PermissionResult::Ask(PermissionAsk { message, ..ask })
+                }
+                other => other,
+            }
+        };
+
+        if let PermissionResult::Ask(_) = &result {
+            if mode == PermissionMode::DontAsk {
+                return PermissionResult::Deny {
+                    message: dont_ask_reject_message(name),
+                    decision_reason: Some(DecisionReason::Mode(PermissionMode::DontAsk)),
+                };
+            }
+        }
+        result
+    }
+
+    /// O `canUseTool` do SDK (`createCanUseTool`): decide sem perguntar
+    /// quando dá; senão pergunta ao callback. Sem callback, o `ask` vira
+    /// recusa com a própria mensagem do pedido (o que o `-p` do JS faz).
+    async fn can_use_tool(
+        &self,
+        tool: &dyn Tool,
+        input: Value,
+        tool_use_id: &str,
+        forced: Option<PermissionResult>,
+    ) -> FinalDecision {
+        let decision = match forced {
+            Some(d) => d,
+            None => self.has_permissions_to_use_tool(tool, &input).await,
+        };
+        match decision {
+            PermissionResult::Allow { updated_input, .. } => {
+                FinalDecision::Allow(non_empty_input(updated_input).unwrap_or(input))
+            }
+            PermissionResult::Deny { message, .. } => FinalDecision::Deny {
+                message,
+                interrupt: false,
+            },
+            PermissionResult::Ask(ask) | PermissionResult::Passthrough(ask) => {
+                let Some(callback) = &self.context.permission_callback else {
+                    return FinalDecision::Deny {
+                        message: ask.message,
+                        interrupt: false,
+                    };
+                };
+                let request = self.permission_request(tool.name(), &input, tool_use_id, Some(&ask));
+                match callback(request).await {
+                    PermissionOutcome::Allow { updated_input } => {
+                        FinalDecision::Allow(non_empty_input(updated_input).unwrap_or(input))
+                    }
+                    PermissionOutcome::Deny { message } => FinalDecision::Deny {
+                        message,
+                        interrupt: false,
+                    },
+                    PermissionOutcome::DenyAndInterrupt { message } => FinalDecision::Deny {
+                        message,
+                        interrupt: true,
+                    },
+                }
+            }
+        }
+    }
+
+    /// `checkRuleBasedPermissions`: o que ainda vale depois de um hook que
+    /// permitiu. `None` = nada impede.
+    async fn check_rule_based_permissions(
+        &self,
+        tool: &dyn Tool,
+        input: &Value,
+    ) -> Option<PermissionResult> {
+        let name = tool.name();
+        let rules = &self.permission_rules;
+        if let Some(rule) = rules.deny_rule_for_tool(name) {
+            return Some(PermissionResult::Deny {
+                message: format!("Permission to use {name} has been denied."),
+                decision_reason: Some(DecisionReason::Rule {
+                    rule: rule.clone(),
+                    behavior: RuleBehavior::Deny,
+                }),
+            });
+        }
+        if let Some(rule) = rules.ask_rule_for_tool(name) {
+            return Some(PermissionResult::Ask(PermissionAsk {
+                message: create_permission_request_message(name, None),
+                decision_reason: Some(DecisionReason::Rule {
+                    rule: rule.clone(),
+                    behavior: RuleBehavior::Ask,
+                }),
+                ..Default::default()
+            }));
+        }
+        let checked = tool.check_permissions(input, &self.context, rules).await;
+        match &checked {
+            PermissionResult::Deny { .. } => Some(checked),
+            PermissionResult::Ask(ask)
+                if matches!(
+                    ask.decision_reason,
+                    Some(DecisionReason::Rule {
+                        behavior: RuleBehavior::Ask,
+                        ..
+                    }) | Some(DecisionReason::SafetyCheck(_))
+                ) =>
+            {
+                Some(checked)
+            }
+            _ => None,
+        }
+    }
+
+    /// Execute a single tool_use block, na ordem do
+    /// `checkPermissionsAndCallTool` do JS.
     async fn execute_one(
         &self,
         tool_use: crate::api::streaming::ToolUseBlock,
     ) -> ToolExecutionResult {
         let mut tool_use = tool_use;
 
-        // ── PreToolUse hook: roda ANTES da permissão e pode decidi-la
-        // (o resolveHookPermissionDecision do CLI). Deny bloqueia com a
-        // mensagem; Allow pula o can_use_tool; updatedInput reescreve o input.
-        let mut hook_allowed = false;
+        // ── Tool inexistente (`runToolUse`).
+        let Some(tool) = self.registry.get(&tool_use.name) else {
+            let message = format!("Error: No such tool available: {}", tool_use.name);
+            return ToolExecutionResult::new(
+                &tool_use.id,
+                tool_error(
+                    format!("<tool_use_error>{message}</tool_use_error>"),
+                    Value::String(message),
+                ),
+            );
+        };
+
+        // ── Turno já cancelado: a tool nem começa.
+        if self.context.is_aborted() {
+            return ToolExecutionResult::new(
+                &tool_use.id,
+                tool_error(CANCEL_MESSAGE, Value::String(CANCEL_MESSAGE.to_string())),
+            );
+        }
+
+        // ── Schema (o `safeParse` do zod), com o preprocess da tool.
+        tool_use.input = tool.preprocess_input(tool_use.input);
+        // Tool MCP: o `inputSchema` do MCPTool no JS é
+        // `z.object({}).passthrough()`, que só exige um objeto; o schema do
+        // servidor vai para a API mas não é validado no cliente.
+        let schema = if tool.is_mcp() {
+            serde_json::json!({"type": "object"})
+        } else {
+            tool.input_schema()
+        };
+        let mut issues = crate::tools::schema_validation::validate_input(&tool_use.input, &schema);
+        if issues.is_empty() {
+            issues = tool.refine_input(&tool_use.input);
+        }
+        if !issues.is_empty() {
+            let formatted =
+                crate::tools::schema_validation::format_zod_validation_error(tool.name(), &issues);
+            let raw = crate::tools::schema_validation::zod_error_message(&issues);
+            return self
+                .observe_post_tool_use(
+                    ToolExecutionResult::new(
+                        &tool_use.id,
+                        tool_error(
+                            format!("<tool_use_error>InputValidationError: {formatted}</tool_use_error>"),
+                            Value::String(format!("InputValidationError: {raw}")),
+                        ),
+                    ),
+                    &tool_use,
+                )
+                .await;
+        }
+
+        // ── validateInput da tool.
+        if let Err(message) = tool.validate_input(&tool_use.input, &self.context).await {
+            return self
+                .observe_post_tool_use(
+                    ToolExecutionResult::new(
+                        &tool_use.id,
+                        tool_error(
+                            format!("<tool_use_error>{message}</tool_use_error>"),
+                            Value::String(format!("Error: {message}")),
+                        ),
+                    ),
+                    &tool_use,
+                )
+                .await;
+        }
+
+        // ── PreToolUse hook: roda ANTES da permissão e pode decidi-la.
+        let mut hook_permission: Option<PermissionOutcome> = None;
+        let mut hook_updated_input: Option<Value> = None;
         if let Some(hook) = &self.context.pre_tool_use {
-            let request = ToolPermissionRequest {
-                tool_name: tool_use.name.clone(),
-                description: format!("Tool {} wants to execute", tool_use.name),
-                input: tool_use.input.clone(),
-                tool_use_id: Some(tool_use.id.clone()),
-            };
+            let request =
+                self.permission_request(&tool_use.name, &tool_use.input, &tool_use.id, None);
             let decision = hook(request).await;
             if let Some(new_input) = decision.updated_input {
                 tool_use.input = new_input;
             }
-            match decision.permission {
-                Some(PermissionOutcome::Deny { message }) => {
-                    return self
-                        .observe_post_tool_use(
-                            ToolExecutionResult {
-                                tool_use_id: tool_use.id.clone(),
-                                result: ToolResult::error(message),
-                                denied: true,
-                            },
-                            &tool_use,
-                        )
-                        .await;
-                }
-                Some(PermissionOutcome::Allow { updated_input }) => {
-                    if let Some(new_input) = updated_input {
-                        tool_use.input = new_input;
-                    }
-                    hook_allowed = true;
-                }
-                None => {}
+            if let Some(PermissionOutcome::Allow { updated_input }) = &decision.permission {
+                hook_updated_input = non_empty_input(updated_input.clone());
             }
+            hook_permission = decision.permission;
         }
 
-        let mode = self.context.mode();
-        let (read_only, edit_tool, always_asks) = self
-            .registry
-            .get(&tool_use.name)
-            .map(|t| (t.is_read_only(), t.is_edit_tool(), t.always_asks()))
-            .unwrap_or((false, false, false));
-
-        // ── Rules: deny precede TUDO (inclusive hook allow e bypass).
-        let rule_decision = self.permission_rules.check(&tool_use.name, &tool_use.input);
-        if let PermissionDecision::Deny(reason) = rule_decision {
-            return self
-                .observe_post_tool_use(
-                    ToolExecutionResult {
-                        tool_use_id: tool_use.id.clone(),
-                        result: ToolResult::error(format!("Permission denied: {reason}")),
-                        denied: true,
-                    },
-                    &tool_use,
-                )
-                .await;
-        }
-
-        // ── Plan mode: mutação é recusada mesmo com allow rule — o modo é a
-        // regra mais forte depois do deny. ExitPlanMode é a exceção: ele é a
-        // SAÍDA do plan mode e passa pelo fluxo de aprovação normal.
-        if mode == PermissionMode::Plan
-            && !read_only
-            && !hook_allowed
-            && !always_asks
-            && tool_use.name != "ExitPlanMode"
-        {
-            return self
-                .observe_post_tool_use(
-                    ToolExecutionResult {
-                        tool_use_id: tool_use.id.clone(),
-                        result: ToolResult::error(format!(
-                            "Permission denied: plan mode is active. '{}' modifies state; \
-                         only read-only tools may run. Present your plan with ExitPlanMode first.",
-                            tool_use.name
-                        )),
-                        denied: true,
-                    },
-                    &tool_use,
-                )
-                .await;
-        }
-
-        // ── Auto-allow por modo/regra; senão pergunta (ou nega em dontAsk).
-        // Read-only nunca pergunta (o CLI não prompta Read/Grep/Glob);
-        // `always_asks` (AskUserQuestion) força o callback SEMPRE: ele é o
-        // canal de resposta, não uma permissão.
-        let auto_allowed = !always_asks
-            && (hook_allowed
-                || read_only
-                || matches!(rule_decision, PermissionDecision::Allow)
-                || matches!(
-                    mode,
-                    PermissionMode::BypassPermissions | PermissionMode::Auto
-                )
-                || (mode == PermissionMode::AcceptEdits && edit_tool));
-
-        if !auto_allowed {
-            if mode == PermissionMode::DontAsk && !always_asks {
-                return self
-                    .observe_post_tool_use(
-                        ToolExecutionResult {
-                            tool_use_id: tool_use.id.clone(),
-                            result: ToolResult::error(format!(
-                                "Permission denied: '{}' would require asking the user, \
-                             and dontAsk mode is active.",
-                                tool_use.name
-                            )),
-                            denied: true,
+        // ── Permissão (`resolveHookPermissionDecision` + `canUseTool`).
+        let decision = match hook_permission {
+            Some(PermissionOutcome::Deny { message }) => FinalDecision::Deny {
+                message,
+                interrupt: false,
+            },
+            Some(PermissionOutcome::DenyAndInterrupt { message }) => FinalDecision::Deny {
+                message,
+                interrupt: true,
+            },
+            Some(PermissionOutcome::Allow { .. }) => {
+                let interaction_satisfied =
+                    tool.requires_user_interaction() && hook_updated_input.is_some();
+                let hook_input = hook_updated_input.unwrap_or_else(|| tool_use.input.clone());
+                if tool.requires_user_interaction() && !interaction_satisfied {
+                    self.can_use_tool(tool, hook_input, &tool_use.id, None)
+                        .await
+                } else {
+                    match self.check_rule_based_permissions(tool, &hook_input).await {
+                        None => FinalDecision::Allow(hook_input),
+                        Some(PermissionResult::Deny { message, .. }) => FinalDecision::Deny {
+                            message,
+                            interrupt: false,
                         },
-                        &tool_use,
-                    )
-                    .await;
-            }
-            if let Some(callback) = &self.context.permission_callback {
-                let request = ToolPermissionRequest {
-                    tool_name: tool_use.name.clone(),
-                    description: format!("Tool {} wants to execute", tool_use.name),
-                    input: tool_use.input.clone(),
-                    tool_use_id: Some(tool_use.id.clone()),
-                };
-                match callback(request).await {
-                    PermissionOutcome::Allow { updated_input } => {
-                        if let Some(new_input) = updated_input {
-                            tool_use.input = new_input;
+                        Some(_) => {
+                            self.can_use_tool(tool, hook_input, &tool_use.id, None)
+                                .await
                         }
                     }
-                    PermissionOutcome::Deny { message } => {
-                        return self
-                            .observe_post_tool_use(
-                                ToolExecutionResult {
-                                    tool_use_id: tool_use.id.clone(),
-                                    result: ToolResult::error(message),
-                                    denied: true,
-                                },
-                                &tool_use,
-                            )
-                            .await;
+                }
+            }
+            None => {
+                self.can_use_tool(tool, tool_use.input.clone(), &tool_use.id, None)
+                    .await
+            }
+        };
+
+        let input = match decision {
+            FinalDecision::Allow(input) => input,
+            FinalDecision::Deny { message, interrupt } => {
+                let mut execution = ToolExecutionResult::new(
+                    &tool_use.id,
+                    tool_error(message.clone(), Value::String(format!("Error: {message}"))),
+                );
+                execution.denied = true;
+                execution.interrupt = interrupt;
+                return self.observe_post_tool_use(execution, &tool_use).await;
+            }
+        };
+        tool_use.input = input;
+
+        // ── Execução, abortável pelo cancelamento do turno.
+        let run = tool.execute(tool_use.input.clone(), &self.context);
+        let (result, aborted) = match &self.context.abort {
+            Some(token) => {
+                tokio::select! {
+                    result = run => (result, false),
+                    _ = token.cancelled() => {
+                        let text = if tool.is_mcp() {
+                            format!("({} completed with no output)", tool.name())
+                        } else {
+                            INTERRUPT_MESSAGE_FOR_TOOL_USE.to_string()
+                        };
+                        (tool_error(text.clone(), Value::String(format!("Error: {text}"))), true)
                     }
                 }
+            }
+            None => (run.await, false),
+        };
+
+        let result = if aborted {
+            result
+        } else {
+            self.finish_result(tool, result, &tool_use).await
+        };
+
+        let mut execution = ToolExecutionResult::new(&tool_use.id, result);
+        execution.interrupt = aborted;
+        self.observe_post_tool_use(execution, &tool_use).await
+    }
+
+    /// O pós-processamento do resultado de uma execução que terminou:
+    /// `tool_use_result` default, conteúdo vazio e persistência de resultado
+    /// grande (`maybePersistLargeToolResult`).
+    async fn finish_result(
+        &self,
+        tool: &dyn Tool,
+        mut result: ToolResult,
+        tool_use: &crate::api::streaming::ToolUseBlock,
+    ) -> ToolResult {
+        if result.tool_use_result.is_none() {
+            let text = result.text_content();
+            result.tool_use_result = Some(if result.is_error {
+                Value::String(format!("Error: {text}"))
             } else {
-                // No callback and no auto-allow — deny
-                return ToolExecutionResult {
-                    tool_use_id: tool_use.id,
-                    result: ToolResult::error("Permission required but no callback available"),
-                    denied: true,
-                };
-            }
+                Value::String(text)
+            });
         }
-
-        // Find and execute the tool
-        let tool = match self.registry.get(&tool_use.name) {
-            Some(t) => t,
-            None => {
-                return self
-                    .observe_post_tool_use(
-                        ToolExecutionResult {
-                            tool_use_id: tool_use.id.clone(),
-                            result: ToolResult::error(format!("Unknown tool: {}", tool_use.name)),
-                            denied: false,
-                        },
-                        &tool_use,
-                    )
-                    .await;
-            }
-        };
-
-        // Validate input against schema before execution
-        let schema = tool.input_schema();
-        if let Err(validation_error) = validate_tool_input(&tool_use.input, &schema) {
-            return self
-                .observe_post_tool_use(
-                    ToolExecutionResult {
-                        tool_use_id: tool_use.id.clone(),
-                        result: ToolResult::error(format!(
-                            "Input validation error for {}: {}",
-                            tool_use.name, validation_error
-                        )),
-                        denied: false,
-                    },
-                    &tool_use,
-                )
-                .await;
+        if result.is_error {
+            return result;
         }
-
-        let result = tool.execute(tool_use.input.clone(), &self.context).await;
-
-        // Resultado grande: persiste por inteiro e entrega preview + caminho
-        // (o modelo relê com Read); sem diretório, trunca como antes. A
-        // decisão fica CONGELADA por construção — acontece uma vez, na
-        // execução, e o bloco persistido nunca muda entre turnos (é o que
-        // preserva o prompt cache).
-        let result = match &self.context.tool_results_dir {
-            Some(dir) => persist_large_result(result, &tool_use, dir).await,
-            None => truncate_result(result),
-        };
-
-        self.observe_post_tool_use(
-            ToolExecutionResult {
-                tool_use_id: tool_use.id.clone(),
-                result,
-                denied: false,
-            },
-            &tool_use,
-        )
-        .await
+        let empty = result.content.iter().all(|c| match c {
+            ToolResultContent::Text(t) => t.trim().is_empty(),
+            ToolResultContent::Image { .. } => false,
+        });
+        if empty {
+            result.content = vec![ToolResultContent::Text(format!(
+                "({} completed with no output)",
+                tool.name()
+            ))];
+            result.content_as_string = true;
+            return result;
+        }
+        let threshold = tool
+            .max_result_size_chars()
+            .map(|max| max.min(DEFAULT_MAX_RESULT_SIZE_CHARS));
+        match (&self.context.tool_results_dir, threshold) {
+            (_, None) => result,
+            (Some(dir), Some(threshold)) => {
+                persist_large_result(result, &tool_use.id, dir, threshold).await
+            }
+            (None, Some(_)) => truncate_result(result),
+        }
     }
 
     /// Run the post-tool-use observer (when present) and append whatever
@@ -751,8 +1442,8 @@ impl ToolExecutor {
         tool_use: &crate::api::streaming::ToolUseBlock,
     ) -> ToolExecutionResult {
         if let Some(observer) = &self.context.post_tool_use {
-            let response = serde_json::to_value(execution.result.to_api_content())
-                .unwrap_or(serde_json::Value::Null);
+            let response =
+                serde_json::to_value(execution.result.to_api_content()).unwrap_or(Value::Null);
             let event = PostToolUseEvent {
                 tool_name: tool_use.name.clone(),
                 tool_use_id: tool_use.id.clone(),
@@ -765,28 +1456,42 @@ impl ToolExecutor {
                     .result
                     .content
                     .push(ToolResultContent::Text(context_text));
+                execution.result.content_as_string = false;
             }
         }
         execution
     }
 
-    /// Build a user message containing all tool results.
-    pub fn build_tool_results_message(
-        &self,
-        results: Vec<ToolExecutionResult>,
-    ) -> crate::api::types::ApiMessage {
+    /// Build a user message containing all tool results. As `new_messages`
+    /// de cada resultado NÃO entram aqui: o loop as anexa depois, como o JS.
+    pub fn build_tool_results_message(&self, results: Vec<ToolExecutionResult>) -> ApiMessage {
         let content: Vec<ContentBlock> = results
             .into_iter()
             .map(|r| ContentBlock::ToolResult {
                 tool_use_id: r.tool_use_id,
-                content: Some(r.result.to_api_content()),
+                content: Some(r.result.to_api_payload().into()),
                 is_error: if r.result.is_error { Some(true) } else { None },
                 cache_control: None,
             })
             .collect();
 
-        crate::api::types::ApiMessage::user(content)
+        ApiMessage::user(content)
     }
+}
+
+/// `updatedInput` vazio/nulo não substitui o input (o JS usa o do callback
+/// só quando ele tem chaves).
+fn non_empty_input(updated: Option<Value>) -> Option<Value> {
+    match updated {
+        Some(Value::Object(map)) if map.is_empty() => None,
+        Some(Value::Null) | None => None,
+        Some(other) => Some(other),
+    }
+}
+
+/// Erro com `tool_use_result` explícito.
+fn tool_error(text: impl Into<String>, tool_use_result: Value) -> ToolResult {
+    ToolResult::error(text).with_tool_use_result(tool_use_result)
 }
 
 /// Result of executing a single tool.
@@ -795,151 +1500,119 @@ pub struct ToolExecutionResult {
     pub tool_use_id: String,
     pub result: ToolResult,
     /// True when the result is a permission DENIAL (as opposed to a tool
-    /// failure) — the loop records these in `permission_denials` structurally
+    /// failure): the loop records these in `permission_denials` structurally
     /// instead of sniffing error text.
     pub denied: bool,
+    /// O turno deve ser interrompido: recusa com `interrupt: true` do
+    /// callback, ou tool abortada pelo cancelamento. O loop encerra o turno
+    /// como o `abortController.abort()` do JS.
+    pub interrupt: bool,
 }
 
-/// Validate tool input against the tool's input_schema.
-///
-/// Performs basic JSON schema validation:
-/// - If schema expects `"type": "object"`, input must be an object.
-/// - If schema has `"required"` array, all listed fields must be present in input.
-///
-/// Returns `Ok(())` on success, or `Err(message)` describing the validation failure.
-/// A forma que a tool espera, escrita como o modelo a escreveria:
-/// `{"campo": <tipo>, ...}` com os obrigatórios primeiro.
-fn expected_shape(schema: &serde_json::Value) -> String {
-    let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) else {
-        return String::from("{}");
+impl ToolExecutionResult {
+    fn new(tool_use_id: &str, result: ToolResult) -> Self {
+        Self {
+            tool_use_id: tool_use_id.to_string(),
+            result,
+            denied: false,
+            interrupt: false,
+        }
+    }
+}
+
+/// `generatePreview`: corta no último `\n` antes do limite quando ele passa
+/// da metade, senão no limite (em unidades UTF-16, como o JS).
+fn generate_preview(content: &str, max: usize) -> (String, bool) {
+    if js_len(content) <= max {
+        return (content.to_string(), false);
+    }
+    let head = js_slice(content, 0, max);
+    let cut = match head.rfind('\n') {
+        Some(idx) if js_len(&head[..idx]) as f64 > max as f64 * 0.5 => js_len(&head[..idx]),
+        _ => max,
     };
-    let required: Vec<&str> = schema
-        .get("required")
-        .and_then(|r| r.as_array())
-        .map(|items| items.iter().filter_map(|r| r.as_str()).collect())
-        .unwrap_or_default();
-    let mut fields: Vec<String> = Vec::new();
-    for name in &required {
-        let kind = properties
-            .get(*name)
-            .and_then(|p| p.get("type"))
-            .and_then(|t| t.as_str())
-            .unwrap_or("any");
-        fields.push(format!("\"{name}\": <{kind}>"));
-    }
-    for (name, spec) in properties {
-        if required.contains(&name.as_str()) {
-            continue;
-        }
-        let kind = spec.get("type").and_then(|t| t.as_str()).unwrap_or("any");
-        fields.push(format!("\"{name}\"?: <{kind}>"));
-    }
-    format!("{{{}}}", fields.join(", "))
+    (js_slice(content, 0, cut), true)
 }
 
-fn validate_tool_input(
-    input: &serde_json::Value,
-    schema: &serde_json::Value,
-) -> std::result::Result<(), String> {
-    // Check type: object
-    if let Some(schema_type) = schema.get("type").and_then(|t| t.as_str()) {
-        if schema_type == "object" && !input.is_object() {
-            return Err(format!(
-                "Expected input to be an object, got {}",
-                match input {
-                    serde_json::Value::Null => "null",
-                    serde_json::Value::Bool(_) => "boolean",
-                    serde_json::Value::Number(_) => "number",
-                    serde_json::Value::String(_) => "string",
-                    serde_json::Value::Array(_) => "array",
-                    serde_json::Value::Object(_) => unreachable!(),
-                }
-            ));
-        }
-    }
-
-    // Check required fields
-    if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
-        if let Some(obj) = input.as_object() {
-            let missing: Vec<&str> = required
-                .iter()
-                .filter_map(|r| r.as_str())
-                .filter(|field| !obj.contains_key(*field))
-                .collect();
-            if !missing.is_empty() {
-                // A recusa mostra a FORMA esperada, não só o que faltou.
-                // Medido em 29/08/2026: um modelo chamou uma tool de campo
-                // único com o nome errado (`rereport` em vez de `report`),
-                // leu sete vezes "Missing required field: report" — que não
-                // diz o que ele mandou nem qual é a forma certa — e desistiu
-                // sem registrar. Erro que não ensina o conserto vira loop.
-                return Err(format!(
-                    "Missing required field{}: {}. Expected shape: {}. Received keys: {}",
-                    if missing.len() > 1 { "s" } else { "" },
-                    missing.join(", "),
-                    expected_shape(schema),
-                    if obj.is_empty() {
-                        String::from("(none)")
-                    } else {
-                        obj.keys().cloned().collect::<Vec<_>>().join(", ")
-                    }
-                ));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Limiar de persistência em disco (DEFAULT_MAX_RESULT_SIZE_CHARS do CLI).
-const PERSIST_THRESHOLD: usize = 50_000;
-
-/// Tamanho do preview inline de um resultado persistido.
-const PERSIST_PREVIEW_BYTES: usize = 2_000;
-
-/// Persiste em disco o texto de um resultado acima do limiar e o substitui
-/// por um `<persisted-output>` com preview e o caminho do arquivo completo.
-/// Falha de I/O cai no truncamento — perder o miolo é pior que truncar, mas
-/// falhar a tool inteira por disco cheio seria pior ainda.
+/// Persiste em disco um resultado acima do limiar e o substitui pelo
+/// `<persisted-output>` do JS (`buildLargeToolResultMessage`). Texto único
+/// vai para `<id>.txt`; vários blocos de texto, para `<id>.json`. Resultado
+/// com imagem nunca é persistido. Falha de I/O cai no truncamento.
 async fn persist_large_result(
-    mut result: ToolResult,
-    tool_use: &crate::api::streaming::ToolUseBlock,
+    result: ToolResult,
+    tool_use_id: &str,
     dir: &std::path::Path,
+    threshold: usize,
 ) -> ToolResult {
-    for content in &mut result.content {
-        let ToolResultContent::Text(text) = content else {
-            continue;
-        };
-        if text.len() <= PERSIST_THRESHOLD {
-            continue;
-        }
-        let file_name = format!("{}.txt", sanitize_tool_use_id(&tool_use.id));
-        let path = dir.join(file_name);
-        let written = async {
-            tokio::fs::create_dir_all(dir).await?;
-            tokio::fs::write(&path, text.as_bytes()).await
-        }
-        .await;
-        match written {
-            Ok(()) => {
-                let mut cut = PERSIST_PREVIEW_BYTES.min(text.len());
-                while cut > 0 && !text.is_char_boundary(cut) {
-                    cut -= 1;
-                }
-                let preview = &text[..cut];
-                *text = format!(
-                    "<persisted-output>\nOutput too large ({} bytes). Full output saved to: {}\nUse the Read tool to access the complete output.\n\nPreview (first {} bytes):\n{preview}\n</persisted-output>",
-                    text.len(),
-                    path.display(),
-                    cut,
-                );
+    if result
+        .content
+        .iter()
+        .any(|c| matches!(c, ToolResultContent::Image { .. }))
+    {
+        return result;
+    }
+    let is_string = result.content_as_string && result.content.len() == 1;
+    let size: usize = result
+        .content
+        .iter()
+        .map(|c| match c {
+            ToolResultContent::Text(t) => js_len(t),
+            ToolResultContent::Image { .. } => 0,
+        })
+        .sum();
+    if size <= threshold {
+        return result;
+    }
+    let (content_str, ext) = if is_string {
+        (result.text_content(), "txt")
+    } else {
+        let blocks: Vec<Value> = result
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                ToolResultContent::Text(t) => Some(serde_json::json!({"type": "text", "text": t})),
+                ToolResultContent::Image { .. } => None,
+            })
+            .collect();
+        (
+            serde_json::to_string_pretty(&Value::Array(blocks)).unwrap_or_default(),
+            "json",
+        )
+    };
+    let path = dir.join(format!("{}.{ext}", sanitize_tool_use_id(tool_use_id)));
+    let written = async {
+        tokio::fs::create_dir_all(dir).await?;
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+        {
+            Ok(mut file) => {
+                use tokio::io::AsyncWriteExt as _;
+                file.write_all(content_str.as_bytes()).await
             }
-            Err(_) => {
-                return truncate_result(result);
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(e) => Err(e),
         }
     }
-    result
+    .await;
+    if written.is_err() {
+        return truncate_result(result);
+    }
+    let (preview, has_more) = generate_preview(&content_str, PREVIEW_SIZE_BYTES);
+    let message = format!(
+        "<persisted-output>\nOutput too large ({}). Full output saved to: {}\n\nPreview (first {}):\n{preview}{}</persisted-output>",
+        format_file_size(js_len(&content_str) as u64),
+        path.display(),
+        format_file_size(PREVIEW_SIZE_BYTES as u64),
+        if has_more { "\n...\n" } else { "\n" },
+    );
+    ToolResult {
+        content: vec![ToolResultContent::Text(message)],
+        content_as_string: true,
+        ..result
+    }
 }
 
 /// O id vira nome de arquivo: qualquer coisa fora de [A-Za-z0-9_-] cai fora.
@@ -955,7 +1628,7 @@ fn truncate_result(mut result: ToolResult) -> ToolResult {
         if let ToolResultContent::Text(text) = content {
             if text.len() > MAX_RESULT_SIZE {
                 let half = MAX_RESULT_SIZE / 2;
-                // Cortes em fronteira de char — fatiar por byte panica em
+                // Cortes em fronteira de char: fatiar por byte panica em
                 // texto multibyte (acentos).
                 let mut head_end = half.min(text.len());
                 while head_end > 0 && !text.is_char_boundary(head_end) {
@@ -980,6 +1653,7 @@ fn truncate_result(mut result: ToolResult) -> ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::streaming::ToolUseBlock;
 
     struct MockTool {
         name: &'static str,
@@ -994,7 +1668,7 @@ mod tests {
         fn description(&self) -> &str {
             "A mock tool"
         }
-        fn input_schema(&self) -> serde_json::Value {
+        fn input_schema(&self) -> Value {
             serde_json::json!({
                 "type": "object",
                 "properties": {},
@@ -1003,7 +1677,7 @@ mod tests {
         fn is_concurrency_safe(&self) -> bool {
             self.concurrent
         }
-        async fn execute(&self, _input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+        async fn execute(&self, _input: Value, _ctx: &ToolContext) -> ToolResult {
             ToolResult::text(format!("executed {}", self.name))
         }
     }
@@ -1018,12 +1692,24 @@ mod tests {
         fn description(&self) -> &str {
             "Devolve um resultado enorme"
         }
-        fn input_schema(&self) -> serde_json::Value {
+        fn input_schema(&self) -> Value {
             serde_json::json!({"type": "object", "properties": {}})
         }
-        async fn execute(&self, _input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
-            ToolResult::text(format!("início-{}—fim", "é".repeat(80_000)))
+        async fn execute(&self, _input: Value, _ctx: &ToolContext) -> ToolResult {
+            ToolResult::text(format!("início-{}-fim", "é".repeat(80_000)))
         }
+    }
+
+    fn tool_use(id: &str, name: &str, input: Value) -> ToolUseBlock {
+        ToolUseBlock {
+            id: id.to_string(),
+            name: name.to_string(),
+            input,
+        }
+    }
+
+    fn text_of(result: &ToolExecutionResult) -> String {
+        result.result.text_content()
     }
 
     #[tokio::test]
@@ -1038,27 +1724,24 @@ mod tests {
         };
         let executor = ToolExecutor::new(registry, ctx);
         let results = executor
-            .execute_all(vec![crate::api::streaming::ToolUseBlock {
-                id: "toolu_big1".to_string(),
-                name: "Big".to_string(),
-                input: serde_json::json!({}),
-            }])
+            .execute_all(vec![tool_use("toolu_big1", "Big", serde_json::json!({}))])
             .await;
 
-        let ToolResultContent::Text(text) = &results[0].result.content[0] else {
-            panic!("texto esperado");
-        };
+        let text = text_of(&results[0]);
         // Contrato: o bloco vira um persisted-output com preview e o caminho
-        // do arquivo COMPLETO — o miolo não se perde, o modelo relê com Read.
-        assert!(text.contains("<persisted-output>"), "{text}");
-        assert!(text.contains("Preview"), "{text}");
+        // do arquivo COMPLETO: o miolo não se perde, o modelo relê com Read.
+        assert!(
+            text.starts_with("<persisted-output>\nOutput too large ("),
+            "{text}"
+        );
+        assert!(text.contains("Preview (first 2KB):\n"), "{text}");
         let file = dir.path().join("toolu_big1.txt");
         assert!(text.contains(&file.display().to_string()));
         let full = std::fs::read_to_string(&file).unwrap();
         assert!(full.starts_with("início-"));
-        assert!(full.ends_with("—fim"));
-        // Contrato: preview corta em fronteira de char mesmo com multibyte.
-        assert!(text.len() < 5_000);
+        assert!(full.ends_with("-fim"));
+        assert!(text.ends_with("\n...\n</persisted-output>"), "{text}");
+        assert!(text.len() < 10_000);
     }
 
     #[tokio::test]
@@ -1071,17 +1754,10 @@ mod tests {
         };
         let executor = ToolExecutor::new(registry, ctx);
         let results = executor
-            .execute_all(vec![crate::api::streaming::ToolUseBlock {
-                id: "toolu_big2".to_string(),
-                name: "Big".to_string(),
-                input: serde_json::json!({}),
-            }])
+            .execute_all(vec![tool_use("toolu_big2", "Big", serde_json::json!({}))])
             .await;
-        let ToolResultContent::Text(text) = &results[0].result.content[0] else {
-            panic!("texto esperado");
-        };
         // Contrato: 80k de 'é' (2 bytes) truncado sem pânico de UTF-8.
-        assert!(text.contains("truncated"));
+        assert!(text_of(&results[0]).contains("truncated"));
     }
 
     #[test]
@@ -1099,21 +1775,72 @@ mod tests {
     }
 
     #[test]
-    fn test_api_definitions() {
+    fn api_definitions_come_sorted_with_mcp_last() {
         let mut reg = ToolRegistry::new();
-        reg.register(Box::new(MockTool {
-            name: "bash",
-            concurrent: false,
-        }));
-        reg.register(Box::new(MockTool {
-            name: "read",
-            concurrent: true,
-        }));
+        for name in [
+            "mcp__omnia__zeta",
+            "Write",
+            "mcp__omnia__alpha",
+            "Agent",
+            "read_x",
+        ] {
+            reg.register(Box::new(MockTool {
+                name,
+                concurrent: false,
+            }));
+        }
+        let names: Vec<String> = reg.api_definitions().into_iter().map(|d| d.name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "Agent",
+                "read_x",
+                "Write",
+                "mcp__omnia__alpha",
+                "mcp__omnia__zeta"
+            ]
+        );
+    }
 
-        let defs = reg.api_definitions();
-        assert_eq!(defs.len(), 2);
-        assert_eq!(defs[0].name, "bash");
-        assert_eq!(defs[1].name, "read");
+    #[test]
+    fn locale_compare_matches_icu_for_tool_names() {
+        use std::cmp::Ordering;
+        assert_eq!(locale_compare("TaskOutput", "TaskStop"), Ordering::Less);
+        assert_eq!(locale_compare("TodoWrite", "WebFetch"), Ordering::Less);
+        assert_eq!(locale_compare("a_b", "ab"), Ordering::Less);
+        assert_eq!(locale_compare("abc", "ABC"), Ordering::Less);
+        assert_eq!(locale_compare("Skill", "read"), Ordering::Greater);
+    }
+
+    #[test]
+    fn register_defaults_is_the_cli_default_set_without_todo_v2() {
+        let mut reg = ToolRegistry::new();
+        reg.register_defaults();
+        let names = reg.ordered_names();
+        assert_eq!(
+            names,
+            vec![
+                "AskUserQuestion",
+                "Bash",
+                "Edit",
+                "EnterPlanMode",
+                "EnterWorktree",
+                "ExitPlanMode",
+                "ExitWorktree",
+                "Glob",
+                "Grep",
+                "NotebookEdit",
+                "Read",
+                "Skill",
+                "TaskOutput",
+                "TaskStop",
+                "TodoWrite",
+                "WebFetch",
+                "WebSearch",
+                "Write",
+            ]
+        );
+        assert!(ToolRegistry::builtin("TaskCreate").is_some());
     }
 
     #[test]
@@ -1121,36 +1848,38 @@ mod tests {
         let r = ToolResult::text("ok");
         assert!(!r.is_error);
         assert_eq!(r.content.len(), 1);
+        assert!(matches!(r.to_api_payload(), ToolResultPayload::Text(ref t) if t == "ok"));
 
         let r = ToolResult::error("fail");
         assert!(r.is_error);
+        let r = ToolResult::mixed(vec![ToolResultContent::Text("a".into())]);
+        assert!(matches!(r.to_api_payload(), ToolResultPayload::Blocks(_)));
+    }
+
+    #[test]
+    fn format_file_size_follows_the_js() {
+        assert_eq!(format_file_size(512), "512 bytes");
+        assert_eq!(format_file_size(2000), "2KB");
+        assert_eq!(format_file_size(262_144), "256KB");
+        assert_eq!(format_file_size(3 * 1024 * 1024 + 100_000), "3.1MB");
     }
 
     #[test]
     fn test_truncate_result() {
         let short = ToolResult::text("short text");
         let truncated = truncate_result(short.clone());
-        match &truncated.content[0] {
-            ToolResultContent::Text(t) => assert_eq!(t, "short text"),
-            _ => panic!(),
-        }
+        assert_eq!(truncated.text_content(), "short text");
 
         let long_text = "x".repeat(200 * 1024);
         let long = ToolResult::text(long_text);
         let truncated = truncate_result(long);
-        match &truncated.content[0] {
-            ToolResultContent::Text(t) => {
-                assert!(t.len() < 200 * 1024);
-                assert!(t.contains("[truncated"));
-            }
-            _ => panic!(),
-        }
+        let t = truncated.text_content();
+        assert!(t.len() < 200 * 1024);
+        assert!(t.contains("[truncated"));
     }
 
     #[tokio::test]
     async fn test_executor_concurrent_vs_sequential() {
-        use crate::api::streaming::ToolUseBlock;
-
         let mut reg = ToolRegistry::new();
         reg.register(Box::new(MockTool {
             name: "safe1",
@@ -1173,21 +1902,9 @@ mod tests {
         let executor = ToolExecutor::new(reg, ctx);
 
         let tool_uses = vec![
-            ToolUseBlock {
-                id: "t1".into(),
-                name: "safe1".into(),
-                input: serde_json::json!({}),
-            },
-            ToolUseBlock {
-                id: "t2".into(),
-                name: "safe2".into(),
-                input: serde_json::json!({}),
-            },
-            ToolUseBlock {
-                id: "t3".into(),
-                name: "unsafe1".into(),
-                input: serde_json::json!({}),
-            },
+            tool_use("t1", "safe1", serde_json::json!({})),
+            tool_use("t2", "safe2", serde_json::json!({})),
+            tool_use("t3", "unsafe1", serde_json::json!({})),
         ];
 
         let results = executor.execute_all(tool_uses).await;
@@ -1198,140 +1915,391 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_executor_unknown_tool() {
-        use crate::api::streaming::ToolUseBlock;
-
+    async fn unknown_tool_uses_the_cli_error_text() {
         let reg = ToolRegistry::new();
         let ctx = ToolContext {
             permission_mode: PermissionMode::BypassPermissions,
             ..Default::default()
         };
-
         let executor = ToolExecutor::new(reg, ctx);
-
         let results = executor
-            .execute_all(vec![ToolUseBlock {
-                id: "t1".into(),
-                name: "nonexistent".into(),
-                input: serde_json::json!({}),
-            }])
+            .execute_all(vec![tool_use("t1", "Nope", serde_json::json!({}))])
             .await;
-
-        assert_eq!(results.len(), 1);
         assert!(results[0].result.is_error);
+        assert_eq!(
+            text_of(&results[0]),
+            "<tool_use_error>Error: No such tool available: Nope</tool_use_error>"
+        );
+        assert_eq!(
+            results[0].result.tool_use_result,
+            Some(Value::String("Error: No such tool available: Nope".into()))
+        );
     }
 
-    #[test]
-    fn test_validate_tool_input_valid_object() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": { "command": { "type": "string" } },
-            "required": ["command"]
-        });
-        let input = serde_json::json!({ "command": "ls" });
-        assert!(validate_tool_input(&input, &schema).is_ok());
-    }
+    struct StrictTool;
 
-    #[test]
-    fn test_validate_tool_input_not_object() {
-        let schema = serde_json::json!({ "type": "object" });
-        let input = serde_json::json!("a string");
-        let err = validate_tool_input(&input, &schema).unwrap_err();
-        assert!(err.contains("Expected input to be an object"));
-        assert!(err.contains("string"));
-    }
-
-    #[test]
-    fn test_validate_tool_input_missing_required() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "command": { "type": "string" },
-                "timeout": { "type": "number" }
-            },
-            "required": ["command", "timeout"]
-        });
-        let input = serde_json::json!({ "command": "ls" });
-        let err = validate_tool_input(&input, &schema).unwrap_err();
-        assert!(err.contains("Missing required field"));
-        assert!(err.contains("timeout"));
-    }
-
-    #[test]
-    fn test_validate_tool_input_no_required() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": { "command": { "type": "string" } }
-        });
-        let input = serde_json::json!({});
-        assert!(validate_tool_input(&input, &schema).is_ok());
-    }
-
-    #[test]
-    fn test_validate_tool_input_null_input() {
-        let schema = serde_json::json!({ "type": "object" });
-        let input = serde_json::json!(null);
-        let err = validate_tool_input(&input, &schema).unwrap_err();
-        assert!(err.contains("null"));
-    }
-
-    #[test]
-    fn test_validate_tool_input_array_input() {
-        let schema = serde_json::json!({ "type": "object" });
-        let input = serde_json::json!([1, 2, 3]);
-        let err = validate_tool_input(&input, &schema).unwrap_err();
-        assert!(err.contains("array"));
+    #[async_trait]
+    impl Tool for StrictTool {
+        fn name(&self) -> &str {
+            "strict"
+        }
+        fn description(&self) -> &str {
+            "A tool with required params"
+        }
+        fn input_schema(&self) -> Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"],
+                "additionalProperties": false
+            })
+        }
+        async fn validate_input(&self, input: &Value, _ctx: &ToolContext) -> Result<(), String> {
+            if input["path"] == "proibido" {
+                return Err("Caminho proibido.".to_string());
+            }
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &Value,
+            _ctx: &ToolContext,
+            _rules: &PermissionRules,
+        ) -> PermissionResult {
+            PermissionResult::allow()
+        }
+        async fn execute(&self, _input: Value, _ctx: &ToolContext) -> ToolResult {
+            ToolResult::text("executou")
+        }
     }
 
     #[tokio::test]
-    async fn test_executor_input_validation_failure() {
-        use crate::api::streaming::ToolUseBlock;
-
-        struct StrictTool;
-
-        #[async_trait]
-        impl Tool for StrictTool {
-            fn name(&self) -> &str {
-                "strict"
-            }
-            fn description(&self) -> &str {
-                "A tool with required params"
-            }
-            fn input_schema(&self) -> serde_json::Value {
-                serde_json::json!({
-                    "type": "object",
-                    "properties": { "path": { "type": "string" } },
-                    "required": ["path"]
-                })
-            }
-            async fn execute(&self, _input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
-                ToolResult::text("should not reach here")
-            }
-        }
-
+    async fn schema_error_comes_before_permission_and_uses_the_zod_format() {
         let mut reg = ToolRegistry::new();
         reg.register(Box::new(StrictTool));
+        // Sem callback e em default: a permissão nem é consultada.
+        let executor = ToolExecutor::new(reg, ToolContext::default());
+        let results = executor
+            .execute_all(vec![tool_use("t1", "strict", serde_json::json!({}))])
+            .await;
+        assert!(!results[0].denied);
+        assert_eq!(
+            text_of(&results[0]),
+            "<tool_use_error>InputValidationError: strict failed due to the following issue:\nThe required parameter `path` is missing</tool_use_error>"
+        );
+        let raw = results[0].result.tool_use_result.clone().unwrap();
+        assert!(raw
+            .as_str()
+            .unwrap()
+            .starts_with("InputValidationError: [\n"));
+    }
 
+    #[tokio::test]
+    async fn validate_input_error_is_wrapped_in_tool_use_error() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(StrictTool));
+        let executor = ToolExecutor::new(reg, ToolContext::default());
+        let results = executor
+            .execute_all(vec![tool_use(
+                "t1",
+                "strict",
+                serde_json::json!({"path": "proibido"}),
+            )])
+            .await;
+        assert_eq!(
+            text_of(&results[0]),
+            "<tool_use_error>Caminho proibido.</tool_use_error>"
+        );
+        assert_eq!(
+            results[0].result.tool_use_result,
+            Some(Value::String("Error: Caminho proibido.".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_allow_needs_no_callback() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(StrictTool));
+        let executor = ToolExecutor::new(reg, ToolContext::default());
+        let results = executor
+            .execute_all(vec![tool_use(
+                "t1",
+                "strict",
+                serde_json::json!({"path": "a"}),
+            )])
+            .await;
+        assert_eq!(text_of(&results[0]), "executou");
+        assert_eq!(
+            results[0].result.tool_use_result,
+            Some(Value::String("executou".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn deny_rule_uses_the_cli_message() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(StrictTool));
+        let executor = ToolExecutor::new(reg, ToolContext::default())
+            .with_permission_rules(PermissionRules::from_lists(&[], &["strict".to_string()]));
+        let results = executor
+            .execute_all(vec![tool_use(
+                "t1",
+                "strict",
+                serde_json::json!({"path": "a"}),
+            )])
+            .await;
+        assert!(results[0].denied);
+        assert_eq!(
+            text_of(&results[0]),
+            "Permission to use strict has been denied."
+        );
+        assert_eq!(
+            results[0].result.tool_use_result,
+            Some(Value::String(
+                "Error: Permission to use strict has been denied.".into()
+            ))
+        );
+    }
+
+    fn recording_callback(
+        outcome: PermissionOutcome,
+    ) -> (
+        PermissionCallbackFn,
+        Arc<std::sync::Mutex<Vec<ToolPermissionRequest>>>,
+    ) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_cb = Arc::clone(&seen);
+        let callback: PermissionCallbackFn = Arc::new(move |req| {
+            seen_cb.lock().unwrap().push(req);
+            let outcome = outcome.clone();
+            Box::pin(async move { outcome })
+        });
+        (callback, seen)
+    }
+
+    #[tokio::test]
+    async fn passthrough_asks_the_callback_and_empty_updated_input_keeps_the_original() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(MockTool {
+            name: "mcp__srv__echo",
+            concurrent: false,
+        }));
+        let (callback, seen) = recording_callback(PermissionOutcome::Allow {
+            updated_input: Some(serde_json::json!({})),
+        });
+        let ctx = ToolContext {
+            permission_callback: Some(callback),
+            agent_id: Some("agente-1".into()),
+            ..Default::default()
+        };
+        let executor = ToolExecutor::new(reg, ctx);
+        let results = executor
+            .execute_all(vec![tool_use(
+                "t9",
+                "mcp__srv__echo",
+                serde_json::json!({}),
+            )])
+            .await;
+        assert_eq!(text_of(&results[0]), "executed mcp__srv__echo");
+        let requests = seen.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].tool_use_id.as_deref(), Some("t9"));
+        assert_eq!(requests[0].agent_id.as_deref(), Some("agente-1"));
+        assert_eq!(
+            requests[0].description,
+            "Claude requested permissions to use mcp__srv__echo, but you haven't granted it yet."
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_server_wildcard_allow_rule_skips_the_callback() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(MockTool {
+            name: "mcp__omnia__buscar",
+            concurrent: false,
+        }));
+        let executor = ToolExecutor::new(reg, ToolContext::default()).with_permission_rules(
+            PermissionRules::from_lists(&["mcp__omnia__*".to_string()], &[]),
+        );
+        let results = executor
+            .execute_all(vec![tool_use(
+                "t1",
+                "mcp__omnia__buscar",
+                serde_json::json!({}),
+            )])
+            .await;
+        assert_eq!(text_of(&results[0]), "executed mcp__omnia__buscar");
+    }
+
+    struct StrictMcpTool;
+
+    #[async_trait]
+    impl Tool for StrictMcpTool {
+        fn name(&self) -> &str {
+            "mcp__srv__strict"
+        }
+        fn description(&self) -> &str {
+            "schema estrito do servidor"
+        }
+        fn input_schema(&self) -> Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {"a": {"type": "string"}},
+                "required": ["a"],
+                "additionalProperties": false
+            })
+        }
+        async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolResult {
+            ToolResult::text(input.to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_are_not_validated_against_the_server_schema() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(StrictMcpTool));
         let ctx = ToolContext {
             permission_mode: PermissionMode::BypassPermissions,
             ..Default::default()
         };
-
         let executor = ToolExecutor::new(reg, ctx);
-
         let results = executor
-            .execute_all(vec![ToolUseBlock {
-                id: "t1".into(),
-                name: "strict".into(),
-                input: serde_json::json!({}),
-            }])
+            .execute_all(vec![tool_use(
+                "t1",
+                "mcp__srv__strict",
+                serde_json::json!({"extra": 1}),
+            )])
             .await;
+        // O JS valida MCP com `z.object({}).passthrough()`: quem recusa, se
+        // for o caso, é o servidor.
+        assert!(!results[0].result.is_error);
+        assert_eq!(text_of(&results[0]), "{\"extra\":1}");
+    }
 
-        assert_eq!(results.len(), 1);
-        assert!(results[0].result.is_error);
-        if let ToolResultContent::Text(ref text) = results[0].result.content[0] {
-            assert!(text.contains("Input validation error"));
-            assert!(text.contains("path"));
+    #[tokio::test]
+    async fn no_callback_denies_with_the_ask_message() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(MockTool {
+            name: "mcp__srv__echo",
+            concurrent: false,
+        }));
+        let executor = ToolExecutor::new(reg, ToolContext::default());
+        let results = executor
+            .execute_all(vec![tool_use(
+                "t1",
+                "mcp__srv__echo",
+                serde_json::json!({}),
+            )])
+            .await;
+        assert!(results[0].denied);
+        assert_eq!(
+            text_of(&results[0]),
+            "Claude requested permissions to use mcp__srv__echo, but you haven't granted it yet."
+        );
+    }
+
+    #[tokio::test]
+    async fn dont_ask_mode_denies_with_the_cli_message() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(MockTool {
+            name: "mcp__srv__echo",
+            concurrent: false,
+        }));
+        let ctx = ToolContext {
+            permission_mode: PermissionMode::DontAsk,
+            ..Default::default()
+        };
+        let executor = ToolExecutor::new(reg, ctx);
+        let results = executor
+            .execute_all(vec![tool_use(
+                "t1",
+                "mcp__srv__echo",
+                serde_json::json!({}),
+            )])
+            .await;
+        assert!(text_of(&results[0]).starts_with(
+            "Permission to use mcp__srv__echo has been denied because Claude Code is running in don't ask mode. IMPORTANT:"
+        ));
+    }
+
+    #[tokio::test]
+    async fn deny_with_interrupt_marks_the_execution() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(MockTool {
+            name: "mcp__srv__echo",
+            concurrent: false,
+        }));
+        let (callback, _) = recording_callback(PermissionOutcome::DenyAndInterrupt {
+            message: "pare".into(),
+        });
+        let ctx = ToolContext {
+            permission_callback: Some(callback),
+            ..Default::default()
+        };
+        let executor = ToolExecutor::new(reg, ctx);
+        let results = executor
+            .execute_all(vec![tool_use(
+                "t1",
+                "mcp__srv__echo",
+                serde_json::json!({}),
+            )])
+            .await;
+        assert!(results[0].denied);
+        assert!(results[0].interrupt);
+        assert_eq!(text_of(&results[0]), "pare");
+    }
+
+    #[tokio::test]
+    async fn cancelled_turn_returns_the_cancel_message() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(StrictTool));
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        let ctx = ToolContext {
+            abort: Some(token),
+            ..Default::default()
+        };
+        let executor = ToolExecutor::new(reg, ctx);
+        let results = executor
+            .execute_all(vec![tool_use(
+                "t1",
+                "strict",
+                serde_json::json!({"path": "a"}),
+            )])
+            .await;
+        assert_eq!(text_of(&results[0]), CANCEL_MESSAGE);
+    }
+
+    struct EmptyTool;
+
+    #[async_trait]
+    impl Tool for EmptyTool {
+        fn name(&self) -> &str {
+            "Empty"
         }
+        fn description(&self) -> &str {
+            "nada"
+        }
+        fn input_schema(&self) -> Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        async fn execute(&self, _input: Value, _ctx: &ToolContext) -> ToolResult {
+            ToolResult::text("  ")
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_result_becomes_completed_with_no_output() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(EmptyTool));
+        let ctx = ToolContext {
+            permission_mode: PermissionMode::BypassPermissions,
+            ..Default::default()
+        };
+        let executor = ToolExecutor::new(reg, ctx);
+        let results = executor
+            .execute_all(vec![tool_use("t1", "Empty", serde_json::json!({}))])
+            .await;
+        assert_eq!(text_of(&results[0]), "(Empty completed with no output)");
     }
 }

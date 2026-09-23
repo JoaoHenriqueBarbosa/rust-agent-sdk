@@ -38,8 +38,9 @@ fn convert_hook_output_for_cli(hook_output: serde_json::Value) -> serde_json::Va
 }
 
 /// Canal de resposta de um control_request em voo, indexado por request_id.
-type ControlResponseSender = oneshot::Sender<std::result::Result<serde_json::Value, String>>;
-type PendingControlResponses = Arc<Mutex<HashMap<String, ControlResponseSender>>>;
+pub(crate) type ControlResponseSender =
+    oneshot::Sender<std::result::Result<serde_json::Value, String>>;
+pub(crate) type PendingControlResponses = Arc<Mutex<HashMap<String, ControlResponseSender>>>;
 
 /// Query — bidirectional control protocol handler.
 ///
@@ -70,6 +71,9 @@ pub struct Query {
     // Task tracking
     _read_task: Option<TaskHandle>,
     child_tasks: Vec<TaskHandle>,
+    /// Atendimentos de `control_request` em voo (ver `handle_control_request`),
+    /// cancelados no `close`.
+    control_tasks: Vec<tokio::task::AbortHandle>,
 
     closed: bool,
     _initialized: bool,
@@ -116,6 +120,7 @@ impl Query {
             message_rx: Some(rx),
             _read_task: None,
             child_tasks: Vec::new(),
+            control_tasks: Vec::new(),
             closed: false,
             _initialized: false,
             _initialization_result: None,
@@ -129,6 +134,18 @@ impl Query {
             skills: None,
             _needs_end_input: false,
         }
+    }
+
+    /// Handle de controle concorrente (ver [`crate::ClientHandle`]): escreve
+    /// pelo escritor concorrente do transporte e recebe as respostas pela
+    /// mesma tabela de pendências que o `next_message` alimenta. `None`
+    /// quando o transporte não oferece escritor concorrente.
+    pub fn control_handle(&self) -> Option<crate::client::ClientHandle> {
+        let writer = self.transport.concurrent_writer()?;
+        Some(crate::client::ClientHandle::new(
+            writer,
+            Arc::clone(&self.pending_control_responses),
+        ))
     }
 
     pub fn set_can_use_tool(&mut self, callback: CanUseToolFn) {
@@ -327,6 +344,9 @@ impl Query {
             task.cancel();
         }
         self.child_tasks.clear();
+        for task in self.control_tasks.drain(..) {
+            task.abort();
+        }
 
         // Cancel read task
         if let Some(ref mut task) = self._read_task {
@@ -530,7 +550,86 @@ impl Query {
     }
 
     /// Handle an incoming control request from the CLI (#9, #10).
+    /// Atende um `control_request` do outro lado (permissão, hook, MCP).
+    ///
+    /// Como o SDK Python (`start_soon(self._handle_control_request, ...)`), o
+    /// atendimento roda em paralelo com a leitura quando o transporte oferece
+    /// escritor concorrente: um `can_use_tool` que espera o usuário responder
+    /// um formulário não pode travar a leitura, senão a resposta de um
+    /// `interrupt` mandado nesse meio tempo nunca é lida e o `interrupt`
+    /// estoura o prazo. Sem escritor concorrente, atende em linha.
     async fn handle_control_request(&mut self, request: &serde_json::Value) {
+        let handlers = self.control_handlers();
+        match self.transport.concurrent_writer() {
+            Some(writer) => {
+                let request = request.clone();
+                // Tarefa filha do `Query`: o `close` a cancela, como o task
+                // group do SDK Python cancela os atendimentos pendentes no
+                // `disconnect` (um callback parado esperando o usuário não
+                // sobrevive à sessão). As já terminadas saem da lista.
+                // (`spawn_detached` não serve aqui: o observador dele gira em
+                // `yield_now` enquanto a tarefa vive, e um callback esperando
+                // o usuário por minutos queimaria CPU o tempo todo.)
+                self.control_tasks.retain(|task| !task.is_finished());
+                let task = tokio::spawn(async move {
+                    if let Some(frame) = handlers.respond(&request).await {
+                        let _ = writer.write(&frame).await;
+                    }
+                });
+                self.control_tasks.push(task.abort_handle());
+            }
+            None => {
+                if let Some(frame) = handlers.respond(request).await {
+                    let _ = self.transport.write(&frame).await;
+                }
+            }
+        }
+    }
+
+    fn control_handlers(&self) -> ControlHandlers {
+        ControlHandlers {
+            can_use_tool: self.can_use_tool.clone(),
+            hook_callbacks: Arc::clone(&self.hook_callbacks),
+            sdk_mcp_servers: self.sdk_mcp_servers.clone(),
+        }
+    }
+}
+
+impl Drop for Query {
+    /// Um `Query` largado sem `close` também não deixa atendimento em voo
+    /// para trás.
+    fn drop(&mut self) {
+        for task in self.control_tasks.drain(..) {
+            task.abort();
+        }
+    }
+}
+
+/// O que é preciso para responder um `control_request`, destacado do
+/// `Query` para o atendimento poder rodar numa tarefa própria.
+struct ControlHandlers {
+    can_use_tool: Option<CanUseToolFn>,
+    hook_callbacks: Arc<Mutex<HashMap<String, HookCallbackFn>>>,
+    sdk_mcp_servers: SdkMcpRegistry,
+}
+
+/// Frame `control_response` de erro, já com a quebra de linha.
+fn control_error_frame(request_id: &str, error: &str) -> String {
+    let error_response = json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "error",
+            "request_id": request_id,
+            "error": error,
+        },
+    });
+    serde_json::to_string(&error_response).unwrap_or_default() + "\n"
+}
+
+impl ControlHandlers {
+    /// Calcula a resposta de um `control_request` (o frame a escrever), ou
+    /// `None` quando o pedido não tem corpo.
+    async fn respond(&self, request: &serde_json::Value) -> Option<String> {
         let request_id = request
             .get("request_id")
             .and_then(|v| v.as_str())
@@ -538,7 +637,7 @@ impl Query {
             .to_string();
         let request_data = match request.get("request") {
             Some(r) => r.clone(),
-            None => return,
+            None => return None,
         };
         let subtype = request_data
             .get("subtype")
@@ -633,13 +732,10 @@ impl Query {
                             match serde_json::from_value(input_val) {
                                 Ok(hi) => hi,
                                 Err(e) => {
-                                    let _ = self
-                                        .send_control_response_error(
-                                            &request_id,
-                                            &format!("Failed to parse hook input: {e}"),
-                                        )
-                                        .await;
-                                    return;
+                                    return Some(control_error_frame(
+                                        &request_id,
+                                        &format!("Failed to parse hook input: {e}"),
+                                    ));
                                 }
                             };
 
@@ -664,12 +760,9 @@ impl Query {
                         "response": response_data,
                     },
                 });
-                let data = serde_json::to_string(&success_response).unwrap() + "\n";
-                let _ = self.transport.write(&data).await;
+                Some(serde_json::to_string(&success_response).unwrap_or_default() + "\n")
             }
-            Err(error) => {
-                let _ = self.send_control_response_error(&request_id, &error).await;
-            }
+            Err(error) => Some(control_error_frame(&request_id, &error)),
         }
     }
 
@@ -717,20 +810,9 @@ impl Query {
 
         Ok(json!({ "mcp_response": mcp_response }))
     }
+}
 
-    async fn send_control_response_error(&mut self, request_id: &str, error: &str) -> Result<()> {
-        let error_response = json!({
-            "type": "control_response",
-            "response": {
-                "subtype": "error",
-                "request_id": request_id,
-                "error": error,
-            },
-        });
-        let data = serde_json::to_string(&error_response).unwrap() + "\n";
-        self.transport.write(&data).await
-    }
-
+impl Query {
     pub async fn get_mcp_status(&mut self) -> Result<serde_json::Value> {
         let request = json!({ "subtype": "mcp_status" });
         self.send_control_request(request, 60.0).await

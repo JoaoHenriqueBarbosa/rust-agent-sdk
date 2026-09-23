@@ -458,13 +458,22 @@ fn strip_images_from_messages(messages: &[ApiMessage]) -> Vec<ApiMessage> {
                         ..
                     } => {
                         // Strip image blocks from tool results
-                        let stripped: Option<Vec<ToolResultContent>> =
-                            content.as_ref().map(|blocks| {
-                                blocks
-                                    .iter()
-                                    .filter(|c| !matches!(c, ToolResultContent::Image { .. }))
-                                    .cloned()
-                                    .collect()
+                        let stripped: Option<ToolResultBlockContent> =
+                            content.as_ref().map(|content| match content {
+                                ToolResultBlockContent::Text(text) => {
+                                    ToolResultBlockContent::Text(text.clone())
+                                }
+                                ToolResultBlockContent::Blocks(blocks) => {
+                                    ToolResultBlockContent::Blocks(
+                                        blocks
+                                            .iter()
+                                            .filter(|c| {
+                                                !matches!(c, ToolResultContent::Image { .. })
+                                            })
+                                            .cloned()
+                                            .collect(),
+                                    )
+                                }
                             });
                         Some(ContentBlock::ToolResult {
                             tool_use_id: tool_use_id.clone(),
@@ -522,8 +531,8 @@ fn extract_conversation_text(messages: &[ApiMessage]) -> String {
                     } else {
                         ""
                     };
-                    if let Some(blocks) = content {
-                        for c in blocks {
+                    if let Some(content) = content {
+                        for c in content.blocks() {
                             if let ToolResultContent::Text { text } = c {
                                 let truncated = if text.len() > 500 {
                                     format!("{}...", &text[..500])
@@ -583,9 +592,11 @@ mod tests {
             ]),
             ApiMessage::user(vec![ContentBlock::ToolResult {
                 tool_use_id: "t1".to_string(),
-                content: Some(vec![ToolResultContent::Text {
-                    text: "file contents here".to_string(),
-                }]),
+                content: Some(crate::api::types::ToolResultBlockContent::Blocks(vec![
+                    ToolResultContent::Text {
+                        text: "file contents here".to_string(),
+                    },
+                ])),
                 is_error: None,
                 cache_control: None,
             }]),

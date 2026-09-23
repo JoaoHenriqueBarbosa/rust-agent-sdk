@@ -63,6 +63,142 @@ pub fn simple_hash(s: &str) -> String {
     String::from_utf8(out).unwrap()
 }
 
+/// `Bun.hash(str).toString(36)`: o hash que o CLI empacotado (binário Bun)
+/// usa no sufixo de diretórios de projeto longos. `Bun.hash` é o
+/// `std.hash.Wyhash` do Zig com semente 0 sobre os bytes UTF-8 da string.
+pub fn bun_hash_base36(s: &str) -> String {
+    const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut n = wyhash_zig(s.as_bytes(), 0);
+    if n == 0 {
+        return "0".to_string();
+    }
+    let mut out = Vec::new();
+    while n > 0 {
+        out.push(DIGITS[(n % 36) as usize]);
+        n /= 36;
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// Port do `std.hash.Wyhash.hash(seed, input)` do Zig (o `Bun.hash`).
+fn wyhash_zig(input: &[u8], seed: u64) -> u64 {
+    const SECRET: [u64; 4] = [
+        0xa076_1d64_78bd_642f,
+        0xe703_7ed1_a0b4_28db,
+        0x8ebc_6af0_9c88_c6e3,
+        0x5899_65cc_7537_4cc3,
+    ];
+    fn mum(a: u64, b: u64) -> (u64, u64) {
+        let r = u128::from(a) * u128::from(b);
+        (r as u64, (r >> 64) as u64)
+    }
+    fn mix(a: u64, b: u64) -> u64 {
+        let (lo, hi) = mum(a, b);
+        lo ^ hi
+    }
+    fn read(bytes: &[u8]) -> u64 {
+        let mut buf = [0u8; 8];
+        buf[..bytes.len()].copy_from_slice(bytes);
+        u64::from_le_bytes(buf)
+    }
+
+    let len = input.len();
+    let mut state = [seed ^ mix(seed ^ SECRET[0], SECRET[1]); 3];
+    let (mut a, mut b);
+    if len <= 16 {
+        if len >= 4 {
+            let end = len - 4;
+            let quarter = (len >> 3) << 2;
+            a = (read(&input[..4]) << 32) | read(&input[quarter..quarter + 4]);
+            b = (read(&input[end..end + 4]) << 32) | read(&input[end - quarter..end - quarter + 4]);
+        } else if len > 0 {
+            a = (u64::from(input[0]) << 16)
+                | (u64::from(input[len >> 1]) << 8)
+                | u64::from(input[len - 1]);
+            b = 0;
+        } else {
+            a = 0;
+            b = 0;
+        }
+    } else {
+        let mut i = 0;
+        if len >= 48 {
+            while i + 48 < len {
+                for (k, lane) in state.iter_mut().enumerate() {
+                    let x = read(&input[i + 16 * k..i + 16 * k + 8]);
+                    let y = read(&input[i + 16 * k + 8..i + 16 * k + 16]);
+                    *lane = mix(x ^ SECRET[k + 1], y ^ *lane);
+                }
+                i += 48;
+            }
+            state[0] ^= state[1] ^ state[2];
+        }
+        let rest = &input[i..];
+        let mut j = 0;
+        while j + 16 < rest.len() {
+            state[0] = mix(
+                read(&rest[j..j + 8]) ^ SECRET[1],
+                read(&rest[j + 8..j + 16]) ^ state[0],
+            );
+            j += 16;
+        }
+        a = read(&input[len - 16..len - 8]);
+        b = read(&input[len - 8..]);
+    }
+    a ^= SECRET[1];
+    b ^= state[0];
+    let (lo, hi) = mum(a, b);
+    mix(lo ^ SECRET[0] ^ len as u64, hi ^ SECRET[1])
+}
+
+/// O `sanitizePath` do CLI empacotado (`sessionStoragePortable.js`): troca
+/// cada unidade UTF-16 fora de `[a-zA-Z0-9]` por `-` (um caractere fora do
+/// plano básico vira dois hífens, como no JS) e, acima de 200 unidades,
+/// corta e acrescenta o `Bun.hash` do caminho original.
+pub fn cli_sanitize_path(name: &str) -> String {
+    let mut sanitized = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            sanitized.push(c);
+        } else {
+            for _ in 0..c.len_utf16() {
+                sanitized.push('-');
+            }
+        }
+    }
+    if sanitized.len() <= MAX_SANITIZED_LENGTH {
+        return sanitized;
+    }
+    format!(
+        "{}-{}",
+        &sanitized[..MAX_SANITIZED_LENGTH],
+        bun_hash_base36(name)
+    )
+}
+
+/// O diretório de projeto onde o CLI grava os transcripts de `cwd` (já
+/// canonicalizado): `getProjectDir(getOriginalCwd())`. Para caminhos longos,
+/// um diretório que já existe com o mesmo prefixo de 200 caracteres ganha
+/// (o CLI rodando em Node usa outro hash no sufixo, e o SDK Python grava com
+/// ele ao materializar um resume), senão vale o sufixo do `Bun.hash`.
+pub fn cli_project_dir(projects_dir: &Path, canonical_cwd: &str) -> PathBuf {
+    let name = cli_sanitize_path(canonical_cwd);
+    let exact = projects_dir.join(&name);
+    if name.len() <= MAX_SANITIZED_LENGTH || exact.is_dir() {
+        return exact;
+    }
+    let prefix = format!("{}-", &name[..MAX_SANITIZED_LENGTH]);
+    if let Ok(entries) = fs::read_dir(projects_dir) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() && entry.file_name().to_string_lossy().starts_with(&prefix) {
+                return entry.path();
+            }
+        }
+    }
+    exact
+}
+
 pub fn validate_uuid(maybe_uuid: &str) -> Option<String> {
     // Pattern: 8-4-4-4-12 hex chars, case insensitive
     let bytes = maybe_uuid.as_bytes();
@@ -183,12 +319,39 @@ pub fn get_projects_dir(
     get_claude_config_home_dir().join("projects")
 }
 
+/// O `getClaudeConfigHomeDir()` que o CLI subprocesso enxergaria com este
+/// `env` de opções mesclado sobre o do processo (é o que os transportes
+/// fazem): `CLAUDE_CONFIG_DIR` do `env`, senão o do processo, senão
+/// `$HOME/.claude` com o `HOME` do `env` valendo mais que o do processo.
+/// Normalizado em NFC, como o JS.
+pub fn cli_config_home_dir(env: Option<&std::collections::HashMap<String, String>>) -> PathBuf {
+    use unicode_normalization::UnicodeNormalization;
+    let lookup = |key: &str| -> Option<String> {
+        env.and_then(|e| e.get(key).cloned())
+            .or_else(|| std::env::var(key).ok())
+            .filter(|v| !v.is_empty())
+    };
+    let raw = match lookup("CLAUDE_CONFIG_DIR") {
+        Some(dir) => dir,
+        None => {
+            let home = lookup("HOME").unwrap_or_else(|| ".".to_string());
+            PathBuf::from(home).join(".claude").display().to_string()
+        }
+    };
+    PathBuf::from(raw.nfc().collect::<String>())
+}
+
 fn get_default_projects_dir() -> PathBuf {
     get_projects_dir(None)
 }
 
-fn get_project_dir(project_path: &str) -> PathBuf {
-    get_default_projects_dir().join(sanitize_path(project_path))
+/// Raiz de projetos de uma chamada: a do `CLAUDE_CONFIG_DIR` do env explícito
+/// quando ele existe, senão a do ambiente do processo. É o que deixa um
+/// servidor com o `~/.claude` resolvido na inicialização (e testes paralelos,
+/// cada um com o seu) apontar as funções de sessão em disco para a mesma raiz
+/// que o transporte nativo usa, sem depender de variável global do processo.
+pub(crate) fn projects_dir_for(env: Option<&std::collections::HashMap<String, String>>) -> PathBuf {
+    get_projects_dir(env)
 }
 
 pub(crate) fn canonicalize_path(d: &str) -> String {
@@ -202,7 +365,12 @@ pub(crate) fn canonicalize_path(d: &str) -> String {
 }
 
 pub(crate) fn find_project_dir(project_path: &str) -> Option<PathBuf> {
-    let exact = get_project_dir(project_path);
+    find_project_dir_in(&get_default_projects_dir(), project_path)
+}
+
+/// [`find_project_dir`] sob uma raiz de projetos explícita.
+pub(crate) fn find_project_dir_in(projects_dir: &Path, project_path: &str) -> Option<PathBuf> {
+    let exact = projects_dir.join(sanitize_path(project_path));
     if exact.is_dir() {
         return Some(exact);
     }
@@ -213,8 +381,7 @@ pub(crate) fn find_project_dir(project_path: &str) -> Option<PathBuf> {
     }
 
     let prefix = &sanitized[..MAX_SANITIZED_LENGTH];
-    let projects_dir = get_default_projects_dir();
-    if let Ok(entries) = fs::read_dir(&projects_dir) {
+    if let Ok(entries) = fs::read_dir(projects_dir) {
         for entry in entries.flatten() {
             if entry.path().is_dir()
                 && entry
@@ -577,6 +744,7 @@ fn apply_sort_limit_offset(
 // ---------------------------------------------------------------------------
 
 fn list_sessions_for_project(
+    projects_dir: &Path,
     directory: &str,
     limit: Option<usize>,
     offset: usize,
@@ -592,7 +760,7 @@ fn list_sessions_for_project(
 
     // No worktrees (or scanning disabled) — just scan single dir
     if worktree_paths.len() <= 1 {
-        let project_dir = match find_project_dir(&canonical_dir) {
+        let project_dir = match find_project_dir_in(projects_dir, &canonical_dir) {
             Some(d) => d,
             None => return Vec::new(),
         };
@@ -601,7 +769,6 @@ fn list_sessions_for_project(
     }
 
     // Worktree-aware scanning
-    let projects_dir = get_default_projects_dir();
     let mut indexed: Vec<(String, String)> = worktree_paths
         .iter()
         .map(|wt| {
@@ -611,14 +778,14 @@ fn list_sessions_for_project(
         .collect();
     indexed.sort_by_key(|(_, sanitized)| std::cmp::Reverse(sanitized.len()));
 
-    let all_dirents: Vec<PathBuf> = match fs::read_dir(&projects_dir) {
+    let all_dirents: Vec<PathBuf> = match fs::read_dir(projects_dir) {
         Ok(entries) => entries
             .flatten()
             .filter(|e| e.path().is_dir())
             .map(|e| e.path())
             .collect(),
         Err(_) => {
-            let project_dir = match find_project_dir(&canonical_dir) {
+            let project_dir = match find_project_dir_in(projects_dir, &canonical_dir) {
                 Some(d) => d,
                 None => return apply_sort_limit_offset(Vec::new(), limit, offset),
             };
@@ -631,7 +798,7 @@ fn list_sessions_for_project(
     let mut seen_dirs: HashSet<String> = HashSet::new();
 
     // Always include the user's actual directory
-    if let Some(canonical_project_dir) = find_project_dir(&canonical_dir) {
+    if let Some(canonical_project_dir) = find_project_dir_in(projects_dir, &canonical_dir) {
         if let Some(dir_base) = canonical_project_dir.file_name() {
             seen_dirs.insert(dir_base.to_string_lossy().to_string());
         }
@@ -665,10 +832,12 @@ fn list_sessions_for_project(
     apply_sort_limit_offset(deduped, limit, offset)
 }
 
-fn list_all_sessions(limit: Option<usize>, offset: usize) -> Vec<SDKSessionInfo> {
-    let projects_dir = get_default_projects_dir();
-
-    let project_dirs: Vec<PathBuf> = match fs::read_dir(&projects_dir) {
+fn list_all_sessions(
+    projects_dir: &Path,
+    limit: Option<usize>,
+    offset: usize,
+) -> Vec<SDKSessionInfo> {
+    let project_dirs: Vec<PathBuf> = match fs::read_dir(projects_dir) {
         Ok(entries) => entries
             .flatten()
             .filter(|e| e.path().is_dir())
@@ -692,15 +861,30 @@ pub fn list_sessions(
     offset: usize,
     include_worktrees: bool,
 ) -> Result<Vec<SDKSessionInfo>> {
+    list_sessions_with_env(directory, limit, offset, include_worktrees, None)
+}
+
+/// [`list_sessions`] honrando o `CLAUDE_CONFIG_DIR` de um env explícito (o
+/// mesmo env que se passa ao transporte nativo em `options.env`). Sem a chave,
+/// vale o ambiente do processo, como em [`list_sessions`].
+pub fn list_sessions_with_env(
+    directory: Option<&str>,
+    limit: Option<usize>,
+    offset: usize,
+    include_worktrees: bool,
+    env: Option<&std::collections::HashMap<String, String>>,
+) -> Result<Vec<SDKSessionInfo>> {
+    let projects_dir = projects_dir_for(env);
     if let Some(dir) = directory {
         Ok(list_sessions_for_project(
+            &projects_dir,
             dir,
             limit,
             offset,
             include_worktrees,
         ))
     } else {
-        Ok(list_all_sessions(limit, offset))
+        Ok(list_all_sessions(&projects_dir, limit, offset))
     }
 }
 

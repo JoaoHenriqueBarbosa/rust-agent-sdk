@@ -20,6 +20,10 @@ pub struct ClaudeSDKClient {
     _materialized: Option<crate::internal::session_resume::MaterializedResume>,
     /// Handle compartilhado do `session_store` do usuário (ver `SharedSessionStore`).
     _session_store: Option<SharedSessionStore>,
+    /// Sem transporte customizado, `connect` monta o
+    /// [`crate::NativeApiTransport`] no lugar do subprocess (ver
+    /// [`ClaudeSDKClient::with_native_transport`]).
+    _native: bool,
 }
 
 impl ClaudeSDKClient {
@@ -31,11 +35,30 @@ impl ClaudeSDKClient {
             _custom_transport: None,
             _materialized: None,
             _session_store: None,
+            _native: false,
         }
     }
 
     pub fn with_transport(mut self, transport: Box<dyn Transport>) -> Self {
         self._custom_transport = Some(transport);
+        self
+    }
+
+    /// Roda a sessão no [`crate::NativeApiTransport`] (o loop agêntico no
+    /// processo) em vez do subprocess do CLI, montado DENTRO do `connect` a
+    /// partir das mesmas opções que o subprocess receberia.
+    ///
+    /// A diferença para `with_transport(Box::new(NativeApiTransport::new(..)))`
+    /// é o caminho do `session_store`: um transporte pronto de fora não passa
+    /// pela materialização do resume, e aqui passa. Com `resume` e
+    /// `session_store`, a sessão é carregada do store para um
+    /// `CLAUDE_CONFIG_DIR` temporário e o transporte lê de lá, exatamente como
+    /// o SDK Python faz antes de abrir o CLI (`materialize_resume_session`);
+    /// o diretório temporário some no `disconnect`. O transporte também
+    /// recebe o store (para emitir os frames `transcript_mirror`), os
+    /// servidores MCP in-process e o resto das opções sem cópia manual.
+    pub fn with_native_transport(mut self) -> Self {
+        self._native = true;
         self
     }
 
@@ -121,6 +144,8 @@ impl ClaudeSDKClient {
         // Use provided transport or create subprocess transport
         let mut transport: Box<dyn Transport> = if let Some(t) = self._custom_transport.take() {
             t
+        } else if self._native {
+            Box::new(crate::native::NativeApiTransport::new(materialized_options))
         } else {
             Box::new(crate::internal::transport::SubprocessCLITransport::new(
                 "",
@@ -305,6 +330,22 @@ impl ClaudeSDKClient {
     /// Whether `connect()` succeeded and the session is still open.
     pub fn is_connected(&self) -> bool {
         self._query.is_some()
+    }
+
+    /// Handle de controle para usar ENQUANTO outra tarefa consome as
+    /// mensagens (`next_message`).
+    ///
+    /// O SDK Python lê o CLI numa tarefa de fundo, então `interrupt()`,
+    /// `set_model()` e o envio da próxima mensagem funcionam no meio de um
+    /// turno. Aqui o cliente lê com `&mut self`; o handle é a saída para esse
+    /// uso: ele escreve pelo escritor concorrente do transporte e recebe as
+    /// respostas de controle pela tabela que o `next_message` alimenta. Por
+    /// isso só funciona com alguém consumindo as mensagens.
+    ///
+    /// `None` quando não há conexão ou o transporte não oferece escritor
+    /// concorrente (hoje: o [`crate::NativeApiTransport`] oferece).
+    pub fn handle(&self) -> Option<ClientHandle> {
+        self._query.as_ref().and_then(|q| q.control_handle())
     }
 
     /// Receive all messages from Claude as a Vec (#5, #6).
@@ -492,6 +533,134 @@ impl ClaudeSDKClient {
             Err(ClaudeSDKError::cli_connection(
                 "Not connected. Call connect() first.",
             ))
+        }
+    }
+}
+
+/// Controle concorrente de uma sessão (ver [`ClaudeSDKClient::handle`]).
+///
+/// Clonável e barato: todas as cópias escrevem no mesmo transporte.
+#[derive(Clone)]
+pub struct ClientHandle {
+    writer: std::sync::Arc<dyn crate::internal::transport::TransportWriter>,
+    pending: crate::internal::query::PendingControlResponses,
+    counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Prefixo dos request_id deste handle: não colide com os `req_N` do
+    /// próprio `Query` nem com os de outro handle.
+    prefix: String,
+}
+
+impl ClientHandle {
+    pub(crate) fn new(
+        writer: std::sync::Arc<dyn crate::internal::transport::TransportWriter>,
+        pending: crate::internal::query::PendingControlResponses,
+    ) -> Self {
+        Self {
+            writer,
+            pending,
+            counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            prefix: uuid::Uuid::new_v4().simple().to_string()[..8].to_string(),
+        }
+    }
+
+    /// Manda um prompt de texto, no mesmo frame que `ClaudeSDKClient::query`.
+    pub async fn query(&self, prompt: &str) -> Result<()> {
+        self.send_message(serde_json::json!({
+            "type": "user",
+            "session_id": "",
+            "message": {"role": "user", "content": prompt},
+            "parent_tool_use_id": null,
+        }))
+        .await
+    }
+
+    /// Manda um frame de usuário cru, como os itens do stream de entrada do
+    /// SDK Python (`{"type": "user", "message": {...}}`).
+    pub async fn send_message(&self, message: serde_json::Value) -> Result<()> {
+        let data = serde_json::to_string(&message)
+            .map_err(|e| ClaudeSDKError::sdk(format!("Failed to serialize message: {e}")))?;
+        self.writer.write(&(data + "\n")).await
+    }
+
+    /// Interrompe o turno em curso.
+    pub async fn interrupt(&self) -> Result<()> {
+        self.control(serde_json::json!({"subtype": "interrupt"}), 60.0)
+            .await
+            .map(|_| ())
+    }
+
+    /// Troca o modelo dos próximos turnos.
+    pub async fn set_model(&self, model: Option<&str>) -> Result<()> {
+        self.control(
+            serde_json::json!({"subtype": "set_model", "model": model}),
+            60.0,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Troca o modo de permissão.
+    pub async fn set_permission_mode(&self, mode: PermissionMode) -> Result<()> {
+        self.control(
+            serde_json::json!({"subtype": "set_permission_mode", "mode": mode}),
+            60.0,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Fecha a entrada da sessão: o outro lado termina o turno em curso e
+    /// encerra o stream, e o `next_message` de quem lê devolve `None`.
+    pub async fn end_input(&self) -> Result<()> {
+        self.writer.end_input().await
+    }
+
+    async fn control(
+        &self,
+        request: serde_json::Value,
+        timeout_secs: f64,
+    ) -> Result<serde_json::Value> {
+        let n = self
+            .counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        let request_id = format!("req_h{}_{n}", self.prefix);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.insert(request_id.clone(), tx);
+        }
+        let subtype = request
+            .get("subtype")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let frame = serde_json::json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": request,
+        });
+        let data = serde_json::to_string(&frame)
+            .map_err(|e| ClaudeSDKError::sdk(format!("Failed to serialize request: {e}")))?;
+        if let Err(e) = self.writer.write(&(data + "\n")).await {
+            if let Ok(mut pending) = self.pending.lock() {
+                pending.remove(&request_id);
+            }
+            return Err(e);
+        }
+        match tokio::time::timeout(std::time::Duration::from_secs_f64(timeout_secs), rx).await {
+            Ok(Ok(Ok(value))) => Ok(value),
+            Ok(Ok(Err(error))) => Err(ClaudeSDKError::sdk(error)),
+            Ok(Err(_)) => Err(ClaudeSDKError::sdk(
+                "Transport closed before control response",
+            )),
+            Err(_) => {
+                if let Ok(mut pending) = self.pending.lock() {
+                    pending.remove(&request_id);
+                }
+                Err(ClaudeSDKError::sdk(format!(
+                    "Control request timeout: {subtype}"
+                )))
+            }
         }
     }
 }
