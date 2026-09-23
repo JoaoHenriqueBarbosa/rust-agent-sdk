@@ -47,7 +47,7 @@ pin-project-lite = "0.2"
 glob = "0.3"
 regex = "1"
 sha2 = "0.10"
-base64 = "0.22"
+base64 = "0.23"
 # Read: imagens redimensionadas e comprimidas como o `utils/imageResizer.js`
 # do CLI (o sharp de lá). `png` e `color_quant` fazem o PNG com paleta
 # (`png({ palette: true })` do sharp), que a crate `image` não grava.
