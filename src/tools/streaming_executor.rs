@@ -110,7 +110,7 @@ impl StreamingToolExecutor {
 
         let is_safe = tool_def
             .as_ref()
-            .map(|t| t.is_concurrency_safe())
+            .map(|t| t.is_concurrency_safe(&block.input))
             .unwrap_or(false);
 
         {
@@ -344,7 +344,7 @@ mod tests {
         fn input_schema(&self) -> serde_json::Value {
             serde_json::json!({"type": "object"})
         }
-        fn is_concurrency_safe(&self) -> bool {
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
             self.concurrent
         }
         async fn execute(&self, _input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {

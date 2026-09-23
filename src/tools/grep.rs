@@ -100,6 +100,9 @@ struct GrepOptions {
     head_limit: Option<i64>,
     offset: usize,
     multiline: bool,
+    /// Os `--glob !padrão` das regras deny de `Read(...)`, depois dos globs
+    /// do input, como o JS monta.
+    ignore_globs: Vec<String>,
 }
 
 impl GrepOptions {
@@ -139,6 +142,7 @@ impl GrepOptions {
                 .get("multiline")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            ignore_globs: Vec::new(),
         }
     }
 
@@ -227,6 +231,10 @@ impl GrepOptions {
             args.push("--glob".into());
             args.push(g);
         }
+        for g in &self.ignore_globs {
+            args.push("--glob".into());
+            args.push(g.clone());
+        }
         args
     }
 }
@@ -291,8 +299,8 @@ fn search_without_ripgrep(opts: &GrepOptions, target: &Path) -> Result<Vec<Strin
         .iter()
         .filter_map(|d| RgGlob::new(&format!("!{d}")))
         .collect();
-    for g in opts.glob_patterns() {
-        if let Some(glob) = RgGlob::new(&g) {
+    for g in opts.glob_patterns().iter().chain(opts.ignore_globs.iter()) {
+        if let Some(glob) = RgGlob::new(g) {
             globs.push(glob);
         }
     }
@@ -463,7 +471,7 @@ impl Tool for GrepTool {
         schema_value().clone()
     }
 
-    fn is_concurrency_safe(&self) -> bool {
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         true
     }
 
@@ -501,7 +509,7 @@ impl Tool for GrepTool {
         else {
             return Ok(());
         };
-        let absolute = fs::absolute(path, &ctx.working_directory);
+        let absolute = fs::absolute(path, &ctx.cwd());
         let text = absolute.to_string_lossy();
         if text.starts_with("\\\\") || text.starts_with("//") {
             return Ok(());
@@ -512,11 +520,9 @@ impl Tool for GrepTool {
                 let mut message = format!(
                     "Path does not exist: {path}. {} {}.",
                     fs::FILE_NOT_FOUND_CWD_NOTE,
-                    ctx.working_directory.display()
+                    ctx.cwd().display()
                 );
-                if let Some(suggestion) =
-                    fs::suggest_path_under_cwd(&absolute, &ctx.working_directory)
-                {
+                if let Some(suggestion) = fs::suggest_path_under_cwd(&absolute, &ctx.cwd()) {
                     message.push_str(&format!(" Did you mean {suggestion}?"));
                 }
                 Err(message)
@@ -538,14 +544,27 @@ impl Tool for GrepTool {
             .filter(|p| !p.is_empty())
         {
             Some(p) => p.to_string(),
-            None => ctx.working_directory.to_string_lossy().to_string(),
+            None => ctx.cwd().to_string_lossy().to_string(),
         };
         crate::tools::permission::check_read_permission(&path, ctx, rules)
     }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        let opts = GrepOptions::from_input(&input);
-        let cwd = &ctx.working_directory;
+        let mut opts = GrepOptions::from_input(&input);
+        let cwd = &ctx.cwd();
+        // As regras deny de `Read(...)` viram `--glob !padrão` relativos ao
+        // cwd corrente (`getFileReadIgnorePatterns`); padrão sem barra no
+        // começo casa em qualquer nível (`!**/padrão`).
+        opts.ignore_globs = crate::tools::permission::file_read_ignore_patterns(ctx, cwd)
+            .into_iter()
+            .map(|p| {
+                if p.starts_with('/') {
+                    format!("!{p}")
+                } else {
+                    format!("!**/{p}")
+                }
+            })
+            .collect();
         let target: PathBuf = match input
             .get("path")
             .and_then(Value::as_str)
@@ -555,10 +574,12 @@ impl Tool for GrepTool {
             None => cwd.clone(),
         };
         let results = match fs::ripgrep_path() {
-            Some(rg) => match fs::run_ripgrep(&rg, &opts.rg_args(), &target).await {
-                RipgrepOutcome::Lines(lines) => lines,
-                RipgrepOutcome::Error(e) => return ToolResult::error(e),
-            },
+            Some(rg) => {
+                match fs::run_ripgrep(&rg, &opts.rg_args(), &target, &ctx.working_directory).await {
+                    RipgrepOutcome::Lines(lines) => lines,
+                    RipgrepOutcome::Error(e) => return ToolResult::error(e),
+                }
+            }
             None => match search_without_ripgrep(&opts, &target) {
                 Ok(lines) => lines,
                 Err(e) => return ToolResult::error(e),

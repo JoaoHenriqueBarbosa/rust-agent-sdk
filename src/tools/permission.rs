@@ -412,6 +412,9 @@ pub enum DecisionReason {
     AsyncAgent(String),
     /// O callback de permissão (a "permission prompt tool") decidiu.
     PermissionPromptTool,
+    /// `subcommandResults`: o comando composto do Bash foi decidido pela
+    /// decisão de cada subcomando (o `Map` do JS, na ordem dos subcomandos).
+    SubcommandResults(Vec<(String, PermissionResult)>),
 }
 
 impl DecisionReason {
@@ -422,6 +425,7 @@ impl DecisionReason {
         match self {
             DecisionReason::Rule { .. }
             | DecisionReason::Mode(_)
+            | DecisionReason::SubcommandResults(_)
             | DecisionReason::PermissionPromptTool => None,
             DecisionReason::Hook { reason, .. } => reason.clone(),
             DecisionReason::WorkingDir(reason)
@@ -523,6 +527,39 @@ pub fn create_permission_request_message(
             "Current permission mode ({}) requires approval for this {tool_name} command",
             permission_mode_title(*mode)
         ),
+        Some(DecisionReason::SubcommandResults(reasons)) => {
+            // As partes que pedem aprovação; no Bash, sem os redirecionamentos
+            // de saída.
+            let needs: Vec<String> = reasons
+                .iter()
+                .filter(|(_, result)| {
+                    matches!(
+                        result,
+                        PermissionResult::Ask(_) | PermissionResult::Passthrough(_)
+                    )
+                })
+                .map(|(command, _)| {
+                    if tool_name == "Bash" {
+                        crate::tools::shell_parse::command_without_output_redirections(command)
+                    } else {
+                        command.clone()
+                    }
+                })
+                .collect();
+            let n = needs.len();
+            if n > 0 {
+                format!(
+                    "This {tool_name} command contains multiple operations. The following {} {} approval: {}",
+                    if n == 1 { "part" } else { "parts" },
+                    if n == 1 { "requires" } else { "require" },
+                    needs.join(", ")
+                )
+            } else {
+                format!(
+                    "This {tool_name} command contains multiple operations that require approval"
+                )
+            }
+        }
         None => format!(
             "Claude requested permissions to use {tool_name}, but you haven't granted it yet."
         ),
@@ -815,6 +852,22 @@ pub fn matching_path_rule<'a>(
     behavior: RuleBehavior,
     cwd: &Path,
 ) -> Option<&'a ToolPermissionRule> {
+    matching_path_rule_in(rules, path, kind, behavior, cwd, cwd)
+}
+
+/// [`matching_path_rule`] com as duas raízes do JS separadas: `/x` é
+/// relativo ao diretório original do projeto (`rootPathForSource` de uma
+/// regra `cliArg`, o `getOriginalCwd`), e o padrão sem âncora é relativo ao
+/// cwd corrente (`getCwd()`), que o `cd` do Bash pode ter mudado.
+pub fn matching_path_rule_in<'a>(
+    rules: &'a PermissionRules,
+    path: &Path,
+    kind: PathRuleKind,
+    behavior: RuleBehavior,
+    original_cwd: &Path,
+    current_cwd: &Path,
+) -> Option<&'a ToolPermissionRule> {
+    let cwd = original_cwd;
     let tool_name = match kind {
         PathRuleKind::Read => "Read",
         PathRuleKind::Edit => "Edit",
@@ -835,7 +888,7 @@ pub fn matching_path_rule<'a>(
                 (cwd.to_path_buf(), pattern.to_string())
             } else {
                 (
-                    cwd.to_path_buf(),
+                    current_cwd.to_path_buf(),
                     pattern.strip_prefix("./").unwrap_or(pattern).to_string(),
                 )
             };
@@ -852,6 +905,172 @@ pub fn matching_path_rule<'a>(
         }
     }
     None
+}
+
+/// A recusa do `validateInput` do Read, do Edit e do Write quando uma regra
+/// deny cobre o caminho.
+pub const DENIED_BY_PERMISSION_SETTINGS: &str =
+    "File is in a directory that is denied by your permission settings.";
+
+/// `matchingRuleForInput(fullFilePath, toolPermissionContext, kind, "deny")
+/// !== null`: o teste que o `validateInput` do Read (`read`), do Edit e do
+/// Write (`edit`) fazem antes da permissão, com as regras do contexto.
+pub fn path_denied_by_rules(
+    path: &Path,
+    ctx: &crate::tools::framework::ToolContext,
+    kind: PathRuleKind,
+) -> bool {
+    matching_path_rule_in(
+        &ctx.permission_rules,
+        path,
+        kind,
+        RuleBehavior::Deny,
+        &ctx.working_directory,
+        &ctx.cwd(),
+    )
+    .is_some()
+}
+
+/// `path.posix.normalize` do Node: resolve `.` e `..`, junta barras
+/// repetidas e mantém a barra final.
+fn posix_normalize(path: &str) -> String {
+    if path.is_empty() {
+        return ".".to_string();
+    }
+    let absolute = path.starts_with('/');
+    let trailing = path.ends_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.last().is_some_and(|p| *p != "..") {
+                    parts.pop();
+                } else if !absolute {
+                    parts.push("..");
+                }
+            }
+            other => parts.push(other),
+        }
+    }
+    let mut out = parts.join("/");
+    if absolute {
+        out.insert(0, '/');
+    }
+    if out.is_empty() {
+        out.push('.');
+    }
+    if trailing && !out.ends_with('/') {
+        out.push('/');
+    }
+    out
+}
+
+/// `path.posix.join`.
+fn posix_join(a: &str, b: &str) -> String {
+    let joined = match (a.is_empty(), b.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => b.to_string(),
+        (false, true) => a.to_string(),
+        (false, false) => format!("{a}/{b}"),
+    };
+    posix_normalize(&joined)
+}
+
+/// `patternWithRoot` de uma regra de sessão (`cliArg`): `//x` é absoluto,
+/// `~/x` é relativo à home, `/x` é relativo ao diretório original do
+/// projeto, e o resto não tem raiz (`null`), sem o `./` do começo.
+fn pattern_with_root(pattern: &str, original_cwd: &Path) -> Option<(Option<String>, String)> {
+    if let Some(rest) = pattern.strip_prefix("//") {
+        return Some((Some("/".to_string()), format!("/{rest}")));
+    }
+    if let Some(rest) = pattern.strip_prefix("~/") {
+        let home = home_dir()?;
+        return Some((Some(home.to_string_lossy().to_string()), format!("/{rest}")));
+    }
+    if pattern.starts_with('/') {
+        return Some((
+            Some(original_cwd.to_string_lossy().to_string()),
+            pattern.to_string(),
+        ));
+    }
+    Some((
+        None,
+        pattern.strip_prefix("./").unwrap_or(pattern).to_string(),
+    ))
+}
+
+/// `normalizePatternsToPath(getFileReadIgnorePatterns(toolPermissionContext),
+/// root)`: os padrões das regras deny de `Read(...)`, reescritos relativos a
+/// `root`, que o Glob (`root` = diretório da busca) e o Grep (`root` = cwd
+/// corrente) passam ao ripgrep como `--glob !padrão`. Padrão sem raiz fica
+/// como está; padrão cuja raiz não alcança `root` some.
+pub fn file_read_ignore_patterns(
+    ctx: &crate::tools::framework::ToolContext,
+    root: &Path,
+) -> Vec<String> {
+    // `getPatternsByRoot`: as raízes na ordem em que aparecem, cada uma com
+    // os seus padrões sem repetição.
+    let mut by_root: Vec<(Option<String>, Vec<String>)> = Vec::new();
+    for rule in ctx
+        .permission_rules
+        .content_rules("Read", RuleBehavior::Deny)
+    {
+        let Some(pattern) = rule.pattern.as_deref() else {
+            continue;
+        };
+        let Some((pattern_root, relative)) = pattern_with_root(pattern, &ctx.working_directory)
+        else {
+            continue;
+        };
+        match by_root.iter_mut().find(|(r, _)| *r == pattern_root) {
+            Some((_, patterns)) => {
+                if !patterns.contains(&relative) {
+                    patterns.push(relative);
+                }
+            }
+            None => by_root.push((pattern_root, vec![relative])),
+        }
+    }
+    let root_text = root.to_string_lossy().to_string();
+    let mut result: Vec<String> = Vec::new();
+    let mut push = |p: String| {
+        if !result.contains(&p) {
+            result.push(p);
+        }
+    };
+    for (pattern_root, patterns) in &by_root {
+        if pattern_root.is_none() {
+            for p in patterns {
+                push(p.clone());
+            }
+        }
+    }
+    for (pattern_root, patterns) in &by_root {
+        let Some(pattern_root) = pattern_root else {
+            continue;
+        };
+        for pattern in patterns {
+            // `normalizePatternToPath`.
+            let full = posix_join(pattern_root, pattern);
+            let normalized = if *pattern_root == root_text {
+                Some(posix_join("/", pattern))
+            } else if full.starts_with(&format!("{root_text}/")) {
+                Some(posix_join("/", &full[root_text.len()..]))
+            } else {
+                let relative = relative_path(root, Path::new(pattern_root));
+                if relative.is_empty() || relative.starts_with("../") || relative == ".." {
+                    None
+                } else {
+                    Some(posix_join("/", &posix_join(&relative, pattern)))
+                }
+            };
+            if let Some(p) = normalized {
+                push(p);
+            }
+        }
+    }
+    result
 }
 
 /// Os diretórios de trabalho da sessão: o cwd e os adicionais.
@@ -1003,8 +1222,11 @@ pub fn check_read_permission(
     ctx: &crate::tools::framework::ToolContext,
     rules: &PermissionRules,
 ) -> PermissionResult {
+    // `cwd` é o original (as raízes das regras e os diretórios de trabalho);
+    // o caminho relativo resolve pelo cwd corrente, como o `getPath` do JS.
     let cwd = ctx.working_directory.as_path();
-    let absolute = expand_path(raw_path, cwd);
+    let current = ctx.cwd();
+    let absolute = expand_path(raw_path, &current);
     let paths = paths_for_permission_check(&absolute);
     for p in &paths {
         let text = p.to_string_lossy();
@@ -1026,9 +1248,14 @@ pub fn check_read_permission(
         }
     }
     for p in &paths {
-        if let Some(rule) =
-            matching_path_rule(rules, p, PathRuleKind::Read, RuleBehavior::Deny, cwd)
-        {
+        if let Some(rule) = matching_path_rule_in(
+            rules,
+            p,
+            PathRuleKind::Read,
+            RuleBehavior::Deny,
+            cwd,
+            &current,
+        ) {
             return PermissionResult::Deny {
                 message: format!("Permission to read {raw_path} has been denied."),
                 decision_reason: Some(DecisionReason::Rule {
@@ -1039,8 +1266,14 @@ pub fn check_read_permission(
         }
     }
     for p in &paths {
-        if let Some(rule) = matching_path_rule(rules, p, PathRuleKind::Read, RuleBehavior::Ask, cwd)
-        {
+        if let Some(rule) = matching_path_rule_in(
+            rules,
+            p,
+            PathRuleKind::Read,
+            RuleBehavior::Ask,
+            cwd,
+            &current,
+        ) {
             return PermissionResult::Ask(PermissionAsk {
                 message: format!(
                     "Claude requested permissions to read from {raw_path}, but you haven't granted it yet."
@@ -1077,12 +1310,13 @@ pub fn check_read_permission(
             };
         }
     }
-    if let Some(rule) = matching_path_rule(
+    if let Some(rule) = matching_path_rule_in(
         rules,
         &absolute,
         PathRuleKind::Read,
         RuleBehavior::Allow,
         cwd,
+        &current,
     ) {
         return PermissionResult::Allow {
             updated_input: None,
@@ -1121,12 +1355,18 @@ pub fn check_write_permission(
     rules: &PermissionRules,
 ) -> PermissionResult {
     let cwd = ctx.working_directory.as_path();
-    let absolute = expand_path(raw_path, cwd);
+    let current = ctx.cwd();
+    let absolute = expand_path(raw_path, &current);
     let paths = paths_for_permission_check(&absolute);
     for p in &paths {
-        if let Some(rule) =
-            matching_path_rule(rules, p, PathRuleKind::Edit, RuleBehavior::Deny, cwd)
-        {
+        if let Some(rule) = matching_path_rule_in(
+            rules,
+            p,
+            PathRuleKind::Edit,
+            RuleBehavior::Deny,
+            cwd,
+            &current,
+        ) {
             return PermissionResult::Deny {
                 message: format!("Permission to edit {raw_path} has been denied."),
                 decision_reason: Some(DecisionReason::Rule {
@@ -1183,8 +1423,14 @@ pub fn check_write_permission(
         });
     }
     for p in &paths {
-        if let Some(rule) = matching_path_rule(rules, p, PathRuleKind::Edit, RuleBehavior::Ask, cwd)
-        {
+        if let Some(rule) = matching_path_rule_in(
+            rules,
+            p,
+            PathRuleKind::Edit,
+            RuleBehavior::Ask,
+            cwd,
+            &current,
+        ) {
             return PermissionResult::Ask(PermissionAsk {
                 message: format!(
                     "Claude requested permissions to write to {raw_path}, but you haven't granted it yet."
@@ -1204,12 +1450,13 @@ pub fn check_write_permission(
             decision_reason: Some(DecisionReason::Mode(PermissionMode::AcceptEdits)),
         };
     }
-    if let Some(rule) = matching_path_rule(
+    if let Some(rule) = matching_path_rule_in(
         rules,
         &absolute,
         PathRuleKind::Edit,
         RuleBehavior::Allow,
         cwd,
+        &current,
     ) {
         return PermissionResult::Allow {
             updated_input: None,
@@ -1251,6 +1498,48 @@ impl RuleBehavior {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `normalizePatternsToPath(getFileReadIgnorePatterns(...), root)`: o
+    /// padrão com raiz no projeto vira relativo à raiz da busca, o sem raiz
+    /// fica como está, e o que a raiz da busca não alcança some.
+    #[test]
+    fn file_read_ignore_patterns_follow_normalize_patterns_to_path() {
+        let project = PathBuf::from("/proj");
+        let ctx = crate::tools::framework::ToolContext {
+            working_directory: project.clone(),
+            permission_rules: std::sync::Arc::new(PermissionRules::from_lists(
+                &[],
+                &[
+                    "Read(/hidden/**)".to_string(),
+                    "Read(*.env)".to_string(),
+                    "Read(//etc/secret)".to_string(),
+                    "Read(/sub/deep/**)".to_string(),
+                    "Edit(/nao/conta/**)".to_string(),
+                ],
+            )),
+            ..Default::default()
+        };
+        assert_eq!(
+            file_read_ignore_patterns(&ctx, &project),
+            vec!["*.env", "/hidden/**", "/sub/deep/**"]
+        );
+        // Busca num subdiretório: o que está sob ele fica relativo a ele.
+        assert_eq!(
+            file_read_ignore_patterns(&ctx, Path::new("/proj/sub")),
+            vec!["*.env", "/deep/**"]
+        );
+        // Busca na raiz do disco: tudo relativo a `/`, com as raízes na
+        // ordem em que as regras as trouxeram (o `Map` do JS).
+        assert_eq!(
+            file_read_ignore_patterns(&ctx, Path::new("/")),
+            vec![
+                "*.env",
+                "/proj/hidden/**",
+                "/proj/sub/deep/**",
+                "/etc/secret"
+            ]
+        );
+    }
 
     #[test]
     fn test_allow_all() {

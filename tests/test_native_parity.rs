@@ -134,6 +134,12 @@ struct Fixture {
     _cwd: tempfile::TempDir,
 }
 
+/// Ajuste livre das opções do transporte.
+type Configure = Box<dyn FnOnce(&mut ClaudeAgentOptions) + Send>;
+
+/// `(tool, chaves do input na ordem, input)` de cada `can_use_tool`.
+type SeenInputs = Arc<Mutex<Vec<(String, Vec<String>, Value)>>>;
+
 #[derive(Default)]
 struct Spec {
     tools: Option<Vec<String>>,
@@ -143,6 +149,10 @@ struct Spec {
     allowed_tools: Vec<String>,
     disallowed_tools: Vec<String>,
     system_prompt: Option<String>,
+    model: Option<String>,
+    setting_sources: Option<Vec<prana::SettingSource>>,
+    /// Ajuste livre das opções do transporte (servidores MCP, por exemplo).
+    configure: Option<Configure>,
 }
 
 async fn fixture(spec: Spec, api: &MockApi) -> Fixture {
@@ -157,7 +167,7 @@ async fn fixture(spec: Spec, api: &MockApi) -> Fixture {
             config_dir.path().display().to_string(),
         ),
     ]);
-    let transport_options = ClaudeAgentOptions {
+    let mut transport_options = ClaudeAgentOptions {
         env: env.clone(),
         cwd: Some(cwd.path().to_path_buf()),
         max_turns: Some(10),
@@ -169,9 +179,14 @@ async fn fixture(spec: Spec, api: &MockApi) -> Fixture {
             .system_prompt
             .clone()
             .map(prana::SystemPromptConfig::String),
+        model: spec.model.clone(),
+        setting_sources: spec.setting_sources.clone(),
         strict_mcp_config: true,
         ..Default::default()
     };
+    if let Some(configure) = spec.configure {
+        configure(&mut transport_options);
+    }
     let client_options = ClaudeAgentOptions {
         env,
         cwd: Some(cwd.path().to_path_buf()),
@@ -953,4 +968,594 @@ async fn adaptive_thinking_becomes_a_real_budget_in_the_request() {
     let first = &api.requests().await[0];
     assert_eq!(first["thinking"]["type"], "enabled");
     assert_eq!(first["thinking"]["budget_tokens"], 4096);
+}
+
+// ---------------------------------------------------------------------------
+// Lacunas de paridade: regras no contexto, concorrência por input, modelo do
+// Bash, normalização do tool_use, cwd compartilhado, ordem das chaves do
+// can_use_tool e o init.
+// ---------------------------------------------------------------------------
+
+/// O `tool_result` de um `tool_use` no corpo de um request, como texto.
+fn tool_result_text(request: &Value, tool_use_id: &str) -> String {
+    let Some(messages) = request["messages"].as_array() else {
+        return String::new();
+    };
+    for message in messages {
+        for block in message["content"].as_array().into_iter().flatten() {
+            if block["type"] == "tool_result" && block["tool_use_id"] == tool_use_id {
+                return match &block["content"] {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+            }
+        }
+    }
+    String::new()
+}
+
+/// O input de um `tool_use` do histórico de um request, serializado (a ordem
+/// das chaves conta).
+fn history_tool_input(request: &Value, tool_use_id: &str) -> Option<String> {
+    request["messages"]
+        .as_array()?
+        .iter()
+        .flat_map(|m| m["content"].as_array().cloned().unwrap_or_default())
+        .find(|b| b["type"] == "tool_use" && b["id"] == tool_use_id)
+        .map(|b| b["input"].to_string())
+}
+
+/// Um callback que registra `(tool, chaves do input na ordem)` e responde
+/// com a decisão dada.
+fn recording_callback(seen: SeenInputs, allow: bool) -> prana::CanUseToolFn {
+    Arc::new(move |name, input, _ctx| {
+        let seen = Arc::clone(&seen);
+        Box::pin(async move {
+            let keys: Vec<String> = input.keys().cloned().collect();
+            seen.lock()
+                .await
+                .push((name, keys, Value::Object(input.clone())));
+            if allow {
+                PermissionResult::Allow(prana::PermissionResultAllow {
+                    updated_input: Some(input),
+                    ..Default::default()
+                })
+            } else {
+                PermissionResult::Deny(prana::PermissionResultDeny {
+                    behavior: "deny".to_string(),
+                    message: "negado no teste".to_string(),
+                    interrupt: false,
+                })
+            }
+        })
+    })
+}
+
+/// Lacuna 1: com as regras no `ToolContext`, o `validateInput` do Edit, do
+/// Write e do Read recusa o caminho coberto por regra deny com a mensagem do
+/// CLI (antes da permissão, mesmo em bypass), e o Glob e o Grep escondem da
+/// listagem o que as regras deny de `Read(...)` cobrem
+/// (`getFileReadIgnorePatterns`).
+#[tokio::test]
+async fn deny_rules_reach_validate_input_and_hide_files_from_glob_and_grep() {
+    let cwd_marker = uuid::Uuid::new_v4().to_string();
+    let api_script = |cwd: &std::path::Path| {
+        vec![
+            sse_tool_call_id(
+                "t_write",
+                "Write",
+                &json!({"file_path": cwd.join("secret/a.txt"), "content": "x"}),
+            ),
+            sse_tool_call_id(
+                "t_edit",
+                "Edit",
+                &json!({"file_path": cwd.join("secret/b.txt"), "old_string": "a", "new_string": "b"}),
+            ),
+            sse_tool_call_id(
+                "t_read",
+                "Read",
+                &json!({"file_path": cwd.join("hidden/segredo.txt")}),
+            ),
+            sse_tool_call_id("t_glob", "Glob", &json!({"pattern": "**/*.txt"})),
+            sse_tool_call_id(
+                "t_grep",
+                "Grep",
+                &json!({"pattern": cwd_marker, "output_mode": "files_with_matches"}),
+            ),
+            sse_text("pronto"),
+        ]
+    };
+    // O cwd só existe depois do fixture: o roteiro é montado com um
+    // diretório provisório e trocado pelo real antes do primeiro request.
+    let cwd = tempfile::tempdir().expect("cwd");
+    std::fs::create_dir_all(cwd.path().join("hidden")).unwrap();
+    std::fs::create_dir_all(cwd.path().join("visible")).unwrap();
+    std::fs::write(cwd.path().join("hidden/segredo.txt"), &cwd_marker).unwrap();
+    std::fs::write(cwd.path().join("visible/aberto.txt"), &cwd_marker).unwrap();
+    let api = MockApi::start(api_script(cwd.path())).await;
+    let cwd_path = cwd.path().to_path_buf();
+    let mut fx = fixture(
+        Spec {
+            tools: Some(
+                ["Write", "Edit", "Read", "Glob", "Grep"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+            permission_mode: Some(PermissionMode::BypassPermissions),
+            disallowed_tools: vec![
+                "Edit(/secret/**)".to_string(),
+                "Read(/hidden/**)".to_string(),
+            ],
+            configure: Some(Box::new(move |options: &mut ClaudeAgentOptions| {
+                options.cwd = Some(cwd_path);
+            })),
+            ..Default::default()
+        },
+        &api,
+    )
+    .await;
+    let messages = run_one(&mut fx, "mexa nos arquivos").await;
+    assert_eq!(result_of(&messages).expect("result").subtype, "success");
+    let requests = api.requests().await;
+    let denied = "<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>";
+    assert_eq!(tool_result_text(&requests[1], "t_write"), denied);
+    assert_eq!(tool_result_text(&requests[2], "t_edit"), denied);
+    assert_eq!(tool_result_text(&requests[3], "t_read"), denied);
+    assert!(!cwd.path().join("secret/a.txt").exists());
+
+    let glob = tool_result_text(&requests[4], "t_glob");
+    assert!(glob.contains("visible/aberto.txt"), "{glob}");
+    assert!(
+        !glob.contains("segredo"),
+        "o Glob mostrou o que Read(...) nega: {glob}"
+    );
+    let grep = tool_result_text(&requests[5], "t_grep");
+    assert!(grep.contains("visible/aberto.txt"), "{grep}");
+    assert!(
+        !grep.contains("segredo"),
+        "o Grep mostrou o que Read(...) nega: {grep}"
+    );
+}
+
+/// Uma tool que dorme e conta quantas execuções simultâneas houve; é segura
+/// para concorrência só quando o input pede (`{"safe": true}`).
+struct Sleeper {
+    active: Arc<std::sync::atomic::AtomicUsize>,
+    peak: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl prana::tools::framework::Tool for Sleeper {
+    fn name(&self) -> &str {
+        "Sleeper"
+    }
+    fn description(&self) -> &str {
+        "dorme"
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {"safe": {"type": "boolean"}, "n": {"type": "integer"}},
+            "required": ["safe"]
+        })
+    }
+    fn is_concurrency_safe(&self, input: &Value) -> bool {
+        input["safe"] == true
+    }
+    async fn check_permissions(
+        &self,
+        _input: &Value,
+        _context: &prana::tools::framework::ToolContext,
+        _rules: &prana::tools::permission::PermissionRules,
+    ) -> prana::tools::permission::PermissionResult {
+        prana::tools::permission::PermissionResult::allow()
+    }
+    async fn execute(
+        &self,
+        _input: Value,
+        _context: &prana::tools::framework::ToolContext,
+    ) -> prana::tools::framework::ToolResult {
+        let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(now, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        prana::tools::framework::ToolResult::text("ok")
+    }
+}
+
+async fn peak_concurrency(inputs: &[Value]) -> usize {
+    use prana::tools::framework::{ToolContext, ToolExecutor, ToolRegistry};
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(Sleeper {
+        active: Arc::clone(&active),
+        peak: Arc::clone(&peak),
+    }));
+    let executor = ToolExecutor::new(registry, ToolContext::default());
+    let uses = inputs
+        .iter()
+        .enumerate()
+        .map(|(i, input)| prana::api::streaming::ToolUseBlock {
+            id: format!("t{i}"),
+            name: "Sleeper".to_string(),
+            input: input.clone(),
+        })
+        .collect();
+    let results = executor.execute_all(uses).await;
+    assert_eq!(results.len(), inputs.len());
+    peak.load(Ordering::SeqCst)
+}
+
+/// Lacuna 2: o `isConcurrencySafe(input)` do `partitionToolCalls` decide por
+/// chamada: duas seguras rodam juntas e uma insegura roda sozinha. O Bash de
+/// leitura é seguro, o que
+/// escreve (ou junta `cd` com `git`) não.
+#[tokio::test]
+async fn concurrency_safety_is_decided_per_input() {
+    assert_eq!(
+        peak_concurrency(&[json!({"safe": true}), json!({"safe": true})]).await,
+        2
+    );
+    assert_eq!(
+        peak_concurrency(&[json!({"safe": true}), json!({"safe": false})]).await,
+        1
+    );
+    // Input que não passa no schema não é seguro (o `parsedInput.success`
+    // do `partitionToolCalls`), mesmo que a tool diga que sim: ele corta o
+    // lote, e as duas válidas em volta rodam cada uma sozinha.
+    assert_eq!(
+        peak_concurrency(&[
+            json!({"safe": true}),
+            json!({"safe": true, "n": "não é número"}),
+            json!({"safe": true}),
+        ])
+        .await,
+        1
+    );
+    use prana::tools::framework::Tool as _;
+    let bash = prana::tools::bash::BashTool::default();
+    for read_only in ["ls -la", "git status", "cat a.txt | grep x", "cd sub && ls"] {
+        assert!(
+            bash.is_concurrency_safe(&json!({"command": read_only})),
+            "{read_only} deveria ser de leitura"
+        );
+    }
+    for mutating in [
+        "rm -f a.txt",
+        "ls > out.txt",
+        "cd sub && git status",
+        "echo $(whoami)",
+        "npm install",
+    ] {
+        assert!(
+            !bash.is_concurrency_safe(&json!({"command": mutating})),
+            "{mutating} não é de leitura"
+        );
+    }
+}
+
+/// Lacuna 3: o Bash do transporte nativo é registrado com o modelo da
+/// sessão, e a linha de atribuição do prompt sai com ele.
+#[tokio::test]
+async fn bash_attribution_follows_the_session_model() {
+    let api = MockApi::start(vec![sse_text("ok")]).await;
+    let mut fx = fixture(
+        Spec {
+            tools: Some(vec!["Bash".to_string()]),
+            model: Some("claude-sonnet-4-5-20250929".to_string()),
+            ..Default::default()
+        },
+        &api,
+    )
+    .await;
+    run_one(&mut fx, "oi").await;
+    let first = &api.requests().await[0];
+    let bash = first["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .find(|t| t["name"] == "Bash")
+        .expect("Bash no request");
+    let description = bash["description"].as_str().expect("description");
+    assert!(
+        description.contains("Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"),
+        "{description}"
+    );
+}
+
+/// Lacuna 4: o `tool_use` sai normalizado como o `normalizeToolInput` do CLI
+/// (medido no 2.1.90): o Bash perde o `cd <cwd> && ` e fica com `command`
+/// antes de `description`; o Write perde o espaço de fim de linha e fica
+/// `{file_path, content}`. É essa forma que o cliente vê, que o
+/// `can_use_tool` recebe, que é gravada e que volta à API.
+#[tokio::test]
+async fn tool_use_input_is_normalized_like_the_cli() {
+    let cwd = tempfile::tempdir().expect("cwd");
+    let cwd_text = cwd.path().display().to_string();
+    let target = cwd.path().join("w.txt");
+    let api = MockApi::start(vec![
+        sse_tool_call_id(
+            "t_bash",
+            "Bash",
+            &json!({"description": "lista", "command": format!("cd {cwd_text} && ls")}),
+        ),
+        sse_tool_call_id(
+            "t_write",
+            "Write",
+            &json!({"content": "a  \nb\t\n", "file_path": target}),
+        ),
+        sse_text("feito"),
+    ])
+    .await;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let cwd_path = cwd.path().to_path_buf();
+    let mut fx = fixture(
+        Spec {
+            tools: Some(vec!["Bash".to_string(), "Write".to_string()]),
+            can_use_tool: Some(recording_callback(Arc::clone(&seen), true)),
+            configure: Some(Box::new(move |options: &mut ClaudeAgentOptions| {
+                options.cwd = Some(cwd_path);
+            })),
+            ..Default::default()
+        },
+        &api,
+    )
+    .await;
+    let messages = run_one(&mut fx, "grave").await;
+    assert_eq!(result_of(&messages).expect("result").subtype, "success");
+
+    let bash_expected = json!({"command": "ls", "description": "lista"}).to_string();
+    let write_expected =
+        json!({"file_path": target.display().to_string(), "content": "a\nb\n"}).to_string();
+
+    // O cliente recebe o bloco normalizado.
+    let client_inputs: Vec<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::Assistant(a) => Some(a.content.clone()),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|b| match b {
+            prana::ContentBlock::ToolUse(t) => Some(t.input.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        client_inputs,
+        vec![bash_expected.clone(), write_expected.clone()]
+    );
+
+    // O histórico que volta à API também.
+    let requests = api.requests().await;
+    assert_eq!(
+        history_tool_input(&requests[2], "t_bash").as_deref(),
+        Some(bash_expected.as_str())
+    );
+    assert_eq!(
+        history_tool_input(&requests[2], "t_write").as_deref(),
+        Some(write_expected.as_str())
+    );
+
+    // O `can_use_tool` do Write e a execução usam a forma normalizada.
+    let seen = seen.lock().await;
+    assert_eq!(seen.len(), 1, "só o Write pergunta: {seen:?}");
+    assert_eq!(seen[0].2.to_string(), write_expected);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "a\nb\n");
+}
+
+/// Lacuna 5: o `cd` do Bash muda o cwd de todas as tools do turno (o
+/// `getCwd()` global do CLI): o Read de caminho relativo e o Glob sem `path`
+/// passam a partir do diretório novo.
+#[tokio::test]
+async fn bash_cd_moves_the_cwd_of_every_tool() {
+    let cwd = tempfile::tempdir().expect("cwd");
+    std::fs::create_dir_all(cwd.path().join("sub")).unwrap();
+    std::fs::write(cwd.path().join("f.txt"), "NA_RAIZ\n").unwrap();
+    std::fs::write(cwd.path().join("so_na_raiz.txt"), "x\n").unwrap();
+    std::fs::write(cwd.path().join("sub/f.txt"), "NO_SUB\n").unwrap();
+    let api = MockApi::start(vec![
+        sse_tool_call_id("t_cd", "Bash", &json!({"command": "cd sub"})),
+        sse_tool_call_id("t_read", "Read", &json!({"file_path": "f.txt"})),
+        sse_tool_call_id("t_glob", "Glob", &json!({"pattern": "*.txt"})),
+        sse_tool_call_id("t_pwd", "Bash", &json!({"command": "pwd"})),
+        sse_text("fim"),
+    ])
+    .await;
+    let cwd_path = cwd.path().to_path_buf();
+    let mut fx = fixture(
+        Spec {
+            tools: Some(
+                ["Bash", "Read", "Glob"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+            permission_mode: Some(PermissionMode::BypassPermissions),
+            configure: Some(Box::new(move |options: &mut ClaudeAgentOptions| {
+                options.cwd = Some(cwd_path);
+            })),
+            ..Default::default()
+        },
+        &api,
+    )
+    .await;
+    run_one(&mut fx, "navegue").await;
+    let requests = api.requests().await;
+    let read = tool_result_text(&requests[2], "t_read");
+    assert!(read.contains("NO_SUB"), "o Read não seguiu o cd: {read}");
+    let glob = tool_result_text(&requests[3], "t_glob");
+    assert_eq!(glob, "f.txt", "o Glob não seguiu o cd: {glob}");
+    let pwd = tool_result_text(&requests[4], "t_pwd");
+    let sub = std::fs::canonicalize(cwd.path().join("sub")).unwrap();
+    assert_eq!(pwd.trim(), sub.display().to_string());
+}
+
+/// Lacuna 8: o input chega ao `can_use_tool` do cliente num `Map` ordenado.
+/// Numa builtin, as chaves de primeiro nível saem na ordem do schema, como
+/// o `parse` do zod (medido no CLI 2.1.90: WebFetch pedido com
+/// `{prompt, url}` chega como `{url, prompt}`); numa tool MCP (passthrough),
+/// na ordem que o modelo mandou.
+#[tokio::test]
+async fn can_use_tool_input_keeps_a_deterministic_key_order() {
+    let server = prana::sdk_mcp::SdkMcpServer::builder("ordem")
+        .tool(
+            "par",
+            "Recebe dois campos.",
+            prana::sdk_mcp::ToolInputSchema::object()
+                .required("alfa", prana::sdk_mcp::PropertySchema::string())
+                .required("beta", prana::sdk_mcp::PropertySchema::string()),
+            |_input: Value| async move { Ok(prana::sdk_mcp::ToolOutput::text("ok")) },
+        )
+        .build_shared();
+    let api = MockApi::start(vec![
+        sse_tool_call_id(
+            "t_fetch",
+            "WebFetch",
+            &json!({"prompt": "resuma", "url": "https://example.com/x"}),
+        ),
+        sse_tool_call_id(
+            "t_mcp",
+            "mcp__ordem__par",
+            &json!({"zeta": "3", "beta": "2", "alfa": "1"}),
+        ),
+        sse_text("fim"),
+    ])
+    .await;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut fx = fixture(
+        Spec {
+            tools: Some(vec!["WebFetch".to_string()]),
+            can_use_tool: Some(recording_callback(Arc::clone(&seen), false)),
+            configure: Some(Box::new(move |options: &mut ClaudeAgentOptions| {
+                options.add_sdk_mcp_server(server);
+            })),
+            ..Default::default()
+        },
+        &api,
+    )
+    .await;
+    run_one(&mut fx, "busque").await;
+    let seen = seen.lock().await;
+    let orders: Vec<(String, Vec<String>)> = seen
+        .iter()
+        .map(|(name, keys, _)| (name.clone(), keys.clone()))
+        .collect();
+    assert_eq!(
+        orders,
+        vec![
+            (
+                "WebFetch".to_string(),
+                vec!["url".to_string(), "prompt".to_string()]
+            ),
+            (
+                "mcp__ordem__par".to_string(),
+                vec!["zeta".to_string(), "beta".to_string(), "alfa".to_string()]
+            ),
+        ]
+    );
+}
+
+/// Lacuna 9: o `init` anuncia em `skills` e `slash_commands` só o que o
+/// transporte nativo executa: os skills do disco que o usuário pode invocar
+/// (`userInvocable !== false`, `utils/messages/systemInit.js`). O CLI 2.1.90
+/// real anuncia também os skills e comandos que traz embutidos, mas o nativo
+/// não tem o conteúdo deles (a tool Skill responderia `Unknown skill`) nem
+/// processa comando de barra; a divergência é deliberada. A
+/// `claude_code_version` confere com o CLI.
+#[tokio::test]
+async fn init_lists_only_the_skills_the_native_transport_runs() {
+    let init_of = |messages: &[Message]| {
+        messages
+            .iter()
+            .find_map(|m| match m {
+                Message::System(s) if s.subtype == "init" => Some(s.data.clone()),
+                _ => None,
+            })
+            .expect("init")
+    };
+    let strings = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .expect("lista")
+            .iter()
+            .map(|s| s.as_str().expect("texto").to_string())
+            .collect()
+    };
+
+    // Sem skills no disco: nada anunciado (nenhum embutido do CLI).
+    let api = MockApi::start(vec![sse_text("ok")]).await;
+    let mut fx = fixture(
+        Spec {
+            setting_sources: Some(vec![prana::SettingSource::Project]),
+            ..Default::default()
+        },
+        &api,
+    )
+    .await;
+    let init = init_of(&run_one(&mut fx, "oi").await);
+    assert!(strings(&init["skills"]).is_empty());
+    assert!(strings(&init["slash_commands"]).is_empty());
+    assert_eq!(init["claude_code_version"], "2.1.90");
+
+    // Com skills de projeto: entra o invocável; o `user-invocable: false`
+    // fica de fora, como no filtro do `buildSystemInitMessage`.
+    let cwd = tempfile::tempdir().expect("cwd");
+    for (name, frontmatter) in [
+        ("demo-skill", "description: demo"),
+        ("hidden-skill", "description: oculto\nuser-invocable: false"),
+    ] {
+        let skill_dir = cwd.path().join(".claude/skills").join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\n{frontmatter}\n---\nFaça a demonstração.\n"),
+        )
+        .unwrap();
+    }
+    let api = MockApi::start(vec![sse_text("ok")]).await;
+    let cwd_path = cwd.path().to_path_buf();
+    let mut fx = fixture(
+        Spec {
+            setting_sources: Some(vec![prana::SettingSource::Project]),
+            configure: Some(Box::new(move |options: &mut ClaudeAgentOptions| {
+                options.cwd = Some(cwd_path);
+            })),
+            ..Default::default()
+        },
+        &api,
+    )
+    .await;
+    let init = init_of(&run_one(&mut fx, "oi").await);
+    assert_eq!(strings(&init["skills"]), vec!["demo-skill".to_string()]);
+    assert_eq!(
+        strings(&init["slash_commands"]),
+        vec!["demo-skill".to_string()]
+    );
+}
+
+/// Por que o `init` não anuncia os skills embutidos do CLI: a tool Skill do
+/// nativo não os tem, e invocar um deles falha com `Unknown skill`.
+#[tokio::test]
+async fn bundled_cli_skills_are_not_runnable_natively() {
+    let api = MockApi::start(vec![
+        sse_tool_call_id("toolu_s1", "Skill", &json!({"skill": "simplify"})),
+        sse_text("ok"),
+    ])
+    .await;
+    let mut fx = fixture(
+        Spec {
+            tools: Some(vec!["Skill".into()]),
+            permission_mode: Some(PermissionMode::BypassPermissions),
+            setting_sources: Some(vec![prana::SettingSource::Project]),
+            ..Default::default()
+        },
+        &api,
+    )
+    .await;
+    run_one(&mut fx, "rode /simplify").await;
+    let requests = api.requests().await;
+    let result = tool_result_text(&requests[1], "toolu_s1");
+    assert!(result.contains("Unknown skill: simplify"), "{result}");
 }

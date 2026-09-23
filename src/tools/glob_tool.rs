@@ -73,6 +73,7 @@ async fn find_files(
     pattern: &str,
     search_dir: &std::path::Path,
     ignores: &[String],
+    process_cwd: &std::path::Path,
 ) -> Result<Vec<String>, String> {
     let no_ignore = env_truthy("CLAUDE_CODE_GLOB_NO_IGNORE", "true");
     let hidden = env_truthy("CLAUDE_CODE_GLOB_HIDDEN", "true");
@@ -93,7 +94,7 @@ async fn find_files(
             args.push("--glob".into());
             args.push(format!("!{ignore}"));
         }
-        return match fs::run_ripgrep(&rg, &args, search_dir).await {
+        return match fs::run_ripgrep(&rg, &args, search_dir, process_cwd).await {
             RipgrepOutcome::Lines(lines) => Ok(lines
                 .into_iter()
                 .map(|p| {
@@ -156,7 +157,7 @@ impl Tool for GlobTool {
         schema_value().clone()
     }
 
-    fn is_concurrency_safe(&self) -> bool {
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         true
     }
 
@@ -176,7 +177,7 @@ impl Tool for GlobTool {
         else {
             return Ok(());
         };
-        let absolute = fs::absolute(path, &ctx.working_directory);
+        let absolute = fs::absolute(path, &ctx.cwd());
         let text = absolute.to_string_lossy();
         if text.starts_with("\\\\") || text.starts_with("//") {
             return Ok(());
@@ -188,11 +189,9 @@ impl Tool for GlobTool {
                 let mut message = format!(
                     "Directory does not exist: {path}. {} {}.",
                     fs::FILE_NOT_FOUND_CWD_NOTE,
-                    ctx.working_directory.display()
+                    ctx.cwd().display()
                 );
-                if let Some(suggestion) =
-                    fs::suggest_path_under_cwd(&absolute, &ctx.working_directory)
-                {
+                if let Some(suggestion) = fs::suggest_path_under_cwd(&absolute, &ctx.cwd()) {
                     message.push_str(&format!(" Did you mean {suggestion}?"));
                 }
                 Err(message)
@@ -212,8 +211,8 @@ impl Tool for GlobTool {
             .and_then(Value::as_str)
             .filter(|p| !p.is_empty())
         {
-            Some(p) => fs::absolute(p, &ctx.working_directory),
-            None => ctx.working_directory.clone(),
+            Some(p) => fs::absolute(p, &ctx.cwd()),
+            None => ctx.cwd(),
         };
         crate::tools::permission::check_read_permission(&path.to_string_lossy(), ctx, rules)
     }
@@ -226,8 +225,8 @@ impl Tool for GlobTool {
             .and_then(Value::as_str)
             .filter(|p| !p.is_empty())
         {
-            Some(p) => fs::absolute(p, &ctx.working_directory),
-            None => ctx.working_directory.clone(),
+            Some(p) => fs::absolute(p, &ctx.cwd()),
+            None => ctx.cwd(),
         };
         let mut search_pattern = pattern.clone();
         if std::path::Path::new(&pattern).is_absolute() {
@@ -238,11 +237,17 @@ impl Tool for GlobTool {
             }
         }
         // O JS esconde da listagem o que as regras deny de `Read(...)` cobrem
-        // (`getFileReadIgnorePatterns`). O `execute` do nativo não recebe as
-        // regras; a raiz da busca já passou pela checagem de leitura, e o
-        // corte por arquivo fica pendente de o contexto carregar as regras.
-        let ignores: Vec<String> = Vec::new();
-        let files = match find_files(&search_pattern, &search_dir, &ignores).await {
+        // (`getFileReadIgnorePatterns`), com os padrões relativos ao
+        // diretório da busca.
+        let ignores = crate::tools::permission::file_read_ignore_patterns(ctx, &search_dir);
+        let files = match find_files(
+            &search_pattern,
+            &search_dir,
+            &ignores,
+            &ctx.working_directory,
+        )
+        .await
+        {
             Ok(files) => files,
             Err(e) => return ToolResult::error(e),
         };
@@ -250,7 +255,7 @@ impl Tool for GlobTool {
         let filenames: Vec<String> = files
             .into_iter()
             .take(MAX_RESULTS)
-            .map(|f| fs::to_relative_path(&f, &ctx.working_directory))
+            .map(|f| fs::to_relative_path(&f, &ctx.cwd()))
             .collect();
         let duration_ms = start.elapsed().as_millis() as u64;
         let text = if filenames.is_empty() {

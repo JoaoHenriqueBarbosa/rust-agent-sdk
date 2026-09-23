@@ -66,7 +66,7 @@ fn normalize_input(input: &Value, ctx: &ToolContext) -> EditInput {
     } else {
         fs::strip_trailing_whitespace(&new_string)
     };
-    let absolute = fs::absolute(&file_path, &ctx.working_directory);
+    let absolute = fs::absolute(&file_path, &ctx.cwd());
     let normalized = |old: String, new: String| EditInput {
         file_path: file_path.clone(),
         old_string: old,
@@ -135,7 +135,7 @@ fn schema_value() -> &'static Value {
 
 /// A mensagem de arquivo inexistente com as sugestões do JS.
 pub(crate) fn file_not_found_message(absolute: &std::path::Path, ctx: &ToolContext) -> String {
-    let cwd = &ctx.working_directory;
+    let cwd = &ctx.cwd();
     let mut message = format!(
         "File does not exist. {} {}.",
         fs::FILE_NOT_FOUND_CWD_NOTE,
@@ -171,13 +171,52 @@ impl Tool for FileEditTool {
         Some(100_000)
     }
 
+    /// O `semanticBoolean` do `replace_all`.
+    fn preprocess_input(&self, input: Value) -> Value {
+        let Value::Object(mut map) = input else {
+            return input;
+        };
+        if let Some(v) = map.get("replace_all").cloned() {
+            map.insert(
+                "replace_all".into(),
+                crate::tools::schema_validation::semantic_boolean(&v),
+            );
+        }
+        Value::Object(map)
+    }
+
+    /// `normalizeToolInput` do Edit: o `normalizeFileEditInput` (espaço de
+    /// fim de linha fora do `new_string` e as abreviações desfeitas) nas
+    /// chaves `replace_all` (o default `false` do zod), `file_path`,
+    /// `old_string` e `new_string`, nessa ordem.
+    fn normalize_input(&self, input: Value, ctx: &ToolContext) -> Value {
+        let parsed = self.preprocess_input(input.clone());
+        if !crate::tools::schema_validation::validate_input(&parsed, schema_value()).is_empty() {
+            return input;
+        }
+        let edit = normalize_input(&parsed, ctx);
+        json!({
+            "replace_all": edit.replace_all,
+            "file_path": edit.file_path,
+            "old_string": edit.old_string,
+            "new_string": edit.new_string,
+        })
+    }
+
     async fn validate_input(&self, input: &Value, ctx: &ToolContext) -> Result<(), String> {
         let input = normalize_input(input, ctx);
-        let full_path = fs::absolute(&input.file_path, &ctx.working_directory);
+        let full_path = fs::absolute(&input.file_path, &ctx.cwd());
         if input.old_string == input.new_string {
             return Err(
                 "No changes to make: old_string and new_string are exactly the same.".to_string(),
             );
+        }
+        if crate::tools::permission::path_denied_by_rules(
+            &full_path,
+            ctx,
+            crate::tools::permission::PathRuleKind::Edit,
+        ) {
+            return Err(crate::tools::permission::DENIED_BY_PERMISSION_SETTINGS.to_string());
         }
         let text = full_path.to_string_lossy();
         if text.starts_with("\\\\") || text.starts_with("//") {
@@ -254,7 +293,7 @@ impl Tool for FileEditTool {
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         let input = normalize_input(&input, ctx);
-        let absolute = fs::absolute(&input.file_path, &ctx.working_directory);
+        let absolute = fs::absolute(&input.file_path, &ctx.cwd());
         if let Some(parent) = absolute.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 return ToolResult::error(e.to_string());

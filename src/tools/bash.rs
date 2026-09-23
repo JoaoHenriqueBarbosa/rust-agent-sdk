@@ -27,7 +27,7 @@
 //! análise não cobre PERGUNTA em vez de permitir.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -49,8 +49,6 @@ pub struct BashTool {
     /// O modelo do loop principal: entra na linha de atribuição do prompt
     /// (`Co-Authored-By: Claude ...`). `None` usa o default do CLI.
     main_model: Option<String>,
-    /// O cwd do shell, que persiste entre comandos (`setCwd` do JS).
-    shell_cwd: Arc<Mutex<Option<PathBuf>>>,
     description: OnceLock<String>,
 }
 
@@ -64,7 +62,6 @@ impl Default for BashTool {
         Self {
             default_timeout: Duration::from_millis(default_ms),
             main_model: None,
-            shell_cwd: Arc::new(Mutex::new(None)),
             description: OnceLock::new(),
         }
     }
@@ -568,9 +565,17 @@ fn has_unsafe_flag(base: &str, args: &[String]) -> bool {
                     | "-fls"
             )
         }),
+        // `-o` também vale agrupado com outras flags curtas (`-uo out`).
         "sort" => args.iter().any(|a| {
-            a == "-o" || a.starts_with("--output") || (a.starts_with("-o") && a.len() > 2)
+            a.starts_with("--output")
+                || (a.starts_with('-') && !a.starts_with("--") && a.contains('o'))
         }),
+        // `tree -o arquivo` grava a listagem.
+        "tree" => args
+            .iter()
+            .any(|a| a == "-o" || a.starts_with("-o=") || a.starts_with("--output")),
+        // `rg --pre programa` executa o programa em cada arquivo.
+        "rg" => args.iter().any(|a| a == "--pre" || a.starts_with("--pre=")),
         "uniq" => args.iter().filter(|a| !a.starts_with('-')).count() > 1,
         "less" | "more" => false,
         _ => false,
@@ -591,6 +596,54 @@ fn args_within_working_dirs(args: &[String], ctx: &ToolContext, cwd: &Path) -> b
                 &dirs,
             )
         })
+}
+
+/// `isCommandReadOnly` de um subcomando, no alcance do nativo: o comando
+/// (sem os wrappers seguros) é de leitura e não tem flag de escrita. Não olha
+/// caminhos: isso é o `checkPathConstraints`, que a permissão faz à parte.
+fn subcommand_is_read_only(sub: &str) -> bool {
+    let stripped = strip_safe_wrappers(sub.trim());
+    let words = shell_parse::words(&stripped);
+    let base = words.first().cloned().unwrap_or_default();
+    let args: Vec<String> = words.iter().skip(1).cloned().collect();
+    (READ_ONLY_COMMANDS.contains(&base.as_str())
+        || (base == "git"
+            && matches!(
+                args.first().map(String::as_str),
+                Some(
+                    "status"
+                        | "log"
+                        | "diff"
+                        | "show"
+                        | "rev-parse"
+                        | "ls-files"
+                        | "blame"
+                        | "describe"
+                )
+            )
+            && !args.iter().any(|a| a.starts_with("--output") || a == "-o"))
+        || (base == "cd" && args.len() <= 1))
+        && !has_unsafe_flag(&base, &args)
+}
+
+/// `checkReadOnlyConstraints(input, commandHasAnyCd(command)).behavior ===
+/// "allow"`, o `isReadOnly` do Bash que decide o `isConcurrencySafe`: o
+/// comando se analisa, não escreve nem substitui (`bashCommandIsSafe`), não
+/// junta `cd` com `git`, e todo subcomando é de leitura.
+pub(crate) fn is_read_only_command(command: &str) -> bool {
+    if shell_parse::tokenize(command).is_err() || shell_parse::has_write_or_substitution(command) {
+        return false;
+    }
+    let subcommands = shell_parse::split_command(command);
+    if subcommands.is_empty() {
+        return false;
+    }
+    let has_cd = subcommands.iter().any(|s| shell_parse::is_cd_command(s));
+    let has_git = subcommands.iter().any(|s| shell_parse::is_git_command(s));
+    if has_cd && has_git {
+        return false;
+    }
+    subcommands.iter().all(|s| subcommand_is_read_only(s))
 }
 
 /// `bashToolCheckPermission` de um subcomando.
@@ -667,26 +720,8 @@ fn check_subcommand(
             decision_reason: Some(DecisionReason::Mode(PermissionMode::AcceptEdits)),
         };
     }
-    let read_only = plain
-        && (READ_ONLY_COMMANDS.contains(&base.as_str())
-            || (base == "git"
-                && matches!(
-                    args.first().map(String::as_str),
-                    Some(
-                        "status"
-                            | "log"
-                            | "diff"
-                            | "show"
-                            | "rev-parse"
-                            | "ls-files"
-                            | "blame"
-                            | "describe"
-                    )
-                )
-                && !args.iter().any(|a| a.starts_with("--output") || a == "-o"))
-            || (base == "cd" && args.len() <= 1))
-        && !has_unsafe_flag(&base, &args)
-        && args_within_working_dirs(&args, ctx, cwd);
+    let read_only =
+        plain && subcommand_is_read_only(command) && args_within_working_dirs(&args, ctx, cwd);
     if read_only {
         return PermissionResult::Allow {
             updated_input: None,
@@ -774,13 +809,27 @@ fn bash_permission(
         .iter()
         .map(|s| check_subcommand(s, command, ctx, rules, cwd))
         .collect();
+    // `subcommandResults`: o motivo que o JS guarda nas decisões de comando
+    // composto (o `Map` de subcomando para decisão). Como no `Map`, o
+    // subcomando repetido fica uma vez, na posição da primeira ocorrência,
+    // com a última decisão.
+    let subcommand_results = || {
+        let mut reasons: Vec<(String, PermissionResult)> = Vec::new();
+        for (sub, decision) in subcommands.iter().zip(decisions.iter()) {
+            match reasons.iter_mut().find(|(seen, _)| seen == sub) {
+                Some(entry) => entry.1 = decision.clone(),
+                None => reasons.push((sub.clone(), decision.clone())),
+            }
+        }
+        DecisionReason::SubcommandResults(reasons)
+    };
     if decisions
         .iter()
         .any(|d| matches!(d, PermissionResult::Deny { .. }))
     {
         return PermissionResult::Deny {
             message: format!("Permission to use Bash with command {command} has been denied."),
-            decision_reason: None,
+            decision_reason: Some(subcommand_results()),
         };
     }
     let asks: Vec<&PermissionResult> = decisions
@@ -799,33 +848,18 @@ fn bash_permission(
         };
     }
     if !decisions.is_empty() && asks.is_empty() {
-        return PermissionResult::allow();
+        return PermissionResult::Allow {
+            updated_input: None,
+            decision_reason: Some(subcommand_results()),
+        };
     }
     if subcommands.is_empty() {
         return ask_other("This command requires approval".to_string());
     }
-    // Vários subcomandos pedindo aprovação.
-    let needs: Vec<String> = subcommands
-        .iter()
-        .zip(decisions.iter())
-        .filter(|(_, d)| !matches!(d, PermissionResult::Allow { .. }))
-        .map(|(s, _)| shell_parse::command_without_output_redirections(s))
-        .collect();
-    let n = needs.len();
-    let message = if n > 0 {
-        format!(
-            "This Bash command contains multiple operations. The following {} {}: {}",
-            if n == 1 { "part" } else { "parts" },
-            if n == 1 {
-                "requires approval"
-            } else {
-                "require approval"
-            },
-            needs.join(", ")
-        )
-    } else {
-        "This Bash command contains multiple operations that require approval".to_string()
-    };
+    // Vários subcomandos pedindo aprovação: a mensagem é a do
+    // `createPermissionRequestMessage` para `subcommandResults`.
+    let reason = subcommand_results();
+    let message = create_permission_request_message("Bash", Some(&reason));
     let mut collected: Vec<Value> = Vec::new();
     for (s, d) in subcommands.iter().zip(decisions.iter()) {
         if let PermissionResult::Ask(ask) = d {
@@ -855,9 +889,9 @@ fn bash_permission(
                 "destination": "localSettings",
             }]))
         },
-        // `subcommandResults`: o JS não serializa esse motivo no
-        // `can_use_tool`.
-        decision_reason: None,
+        // `subcommandResults` não viaja no `can_use_tool`
+        // (`serializeDecisionReason`), mas fica no resultado, como no JS.
+        decision_reason: Some(reason),
         ..Default::default()
     })
 }
@@ -867,16 +901,16 @@ fn bash_permission(
 // ---------------------------------------------------------------------------
 
 impl BashTool {
-    /// O cwd efetivo do shell: o persistido, se ainda existe, senão o da
-    /// sessão (`pwd()` com a recuperação do `exec`).
+    /// O cwd efetivo do shell: o cwd corrente da sessão, se ainda existe,
+    /// senão o original (`pwd()` com a recuperação do `exec`). O subagente lê
+    /// o mesmo cwd da thread principal, como o `getCwd()` global do JS, mas
+    /// não o muda (`preventCwdChanges`).
     fn current_cwd(&self, ctx: &ToolContext) -> PathBuf {
-        if ctx.agent_id.is_some() {
-            return ctx.working_directory.clone();
-        }
-        let guard = self.shell_cwd.lock().unwrap_or_else(|e| e.into_inner());
-        match guard.as_ref() {
-            Some(dir) if dir.is_dir() => dir.clone(),
-            _ => ctx.working_directory.clone(),
+        let cwd = ctx.cwd();
+        if cwd.is_dir() {
+            cwd
+        } else {
+            ctx.working_directory.clone()
         }
     }
 
@@ -1153,6 +1187,41 @@ impl Tool for BashTool {
         Some(30_000)
     }
 
+    /// `isConcurrencySafe(input)`: o `isReadOnly` do comando.
+    fn is_concurrency_safe(&self, input: &Value) -> bool {
+        input
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(is_read_only_command)
+    }
+
+    /// `normalizeToolInput` do Bash: o input do `inputSchema.parse` (os
+    /// números e booleanos semânticos já convertidos), sem o `cd <cwd> && `
+    /// redundante e com o `\\;` desfeito, nas chaves `command`,
+    /// `description`, `timeout`, `run_in_background` e
+    /// `dangerouslyDisableSandbox`, nessa ordem. Input que não passa no
+    /// schema fica como veio (o `parse` lança e o JS mantém o original).
+    fn normalize_input(&self, input: Value, ctx: &ToolContext) -> Value {
+        let parsed = self.preprocess_input(input.clone());
+        if !crate::tools::schema_validation::validate_input(&parsed, schema_value()).is_empty() {
+            return input;
+        }
+        let command = normalize_command(parsed["command"].as_str().unwrap_or_default(), &ctx.cwd());
+        let mut out = Map::new();
+        out.insert("command".into(), Value::String(command));
+        for key in [
+            "description",
+            "timeout",
+            "run_in_background",
+            "dangerouslyDisableSandbox",
+        ] {
+            if let Some(value) = parsed.get(key) {
+                out.insert(key.into(), value.clone());
+            }
+        }
+        Value::Object(out)
+    }
+
     /// `semanticNumber`/`semanticBoolean` e o `\\;` do `normalizeToolInput`.
     fn preprocess_input(&self, input: Value) -> Value {
         let Value::Object(mut map) = input else {
@@ -1283,7 +1352,7 @@ impl Tool for BashTool {
             if let Ok(new_cwd) = std::fs::read_to_string(&cwd_file) {
                 let new_cwd = PathBuf::from(new_cwd.trim());
                 if !new_cwd.as_os_str().is_empty() && new_cwd != cwd {
-                    *self.shell_cwd.lock().unwrap_or_else(|e| e.into_inner()) = Some(new_cwd);
+                    ctx.set_cwd(new_cwd);
                 }
             }
             let current = self.current_cwd(ctx);
@@ -1294,7 +1363,7 @@ impl Tool for BashTool {
                     &working_directories(ctx),
                 )
             {
-                *self.shell_cwd.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                ctx.set_cwd(original.clone());
                 stderr = shell_reset_message("", original);
             }
         }
@@ -1353,6 +1422,7 @@ impl Tool for BashTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn text_of(result: &ToolResult) -> String {
         result.text_content()
@@ -1362,6 +1432,41 @@ mod tests {
         ToolContext {
             working_directory: dir.to_path_buf(),
             ..Default::default()
+        }
+    }
+
+    /// Comandos da lista de leitura que escrevem arquivo ou executam outro
+    /// programa por flag: não são de leitura (nem seguros para concorrência,
+    /// nem aprovados sem perguntar). O JS só aceita as flags da allowlist
+    /// (`isCommandSafeViaFlagParsing`), e nenhuma destas está nela.
+    #[test]
+    fn writing_or_executing_flags_are_not_read_only() {
+        for command in [
+            "sort -uo out.txt a.txt",
+            "sort -ro out.txt a.txt",
+            "tree -o out.txt",
+            "tree -o=out.txt .",
+            "rg --pre ./x.sh padrao",
+            "rg --pre=./x.sh padrao",
+            "rg --pre-glob '*.gz' --pre ./x.sh padrao",
+        ] {
+            assert!(!is_read_only_command(command), "{command} não é de leitura");
+        }
+        for command in ["sort -u a.txt", "sort -r a.txt", "tree -L 2", "rg padrao"] {
+            assert!(is_read_only_command(command), "{command} é de leitura");
+        }
+        // A permissão usa o mesmo critério: no modo default, pergunta.
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_in(dir.path());
+        let rules = PermissionRules::default();
+        for command in ["rg --pre ./x.sh padrao", "sort -uo out.txt a.txt"] {
+            assert!(
+                matches!(
+                    bash_permission(command, &ctx, &rules, dir.path()),
+                    PermissionResult::Ask(_)
+                ),
+                "{command} deveria perguntar"
+            );
         }
     }
 
@@ -1580,6 +1685,118 @@ mod tests {
             ),
             other => panic!("esperava deny: {other:?}"),
         }
+    }
+
+    /// `subcommandResults` do `bashToolHasPermission`: o deny, o allow e o
+    /// ask de um comando composto guardam a decisão de cada subcomando, na
+    /// ordem; o ask monta a mensagem pelo `createPermissionRequestMessage`, e
+    /// o motivo não viaja no `can_use_tool` (`serializeDecisionReason`).
+    #[test]
+    fn compound_commands_carry_subcommand_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_in(dir.path());
+        let subcommands = |result: &PermissionResult| -> Vec<(String, &'static str)> {
+            let reason = match result {
+                PermissionResult::Allow {
+                    decision_reason, ..
+                }
+                | PermissionResult::Deny {
+                    decision_reason, ..
+                } => decision_reason.clone(),
+                PermissionResult::Ask(ask) | PermissionResult::Passthrough(ask) => {
+                    ask.decision_reason.clone()
+                }
+            };
+            match reason {
+                Some(DecisionReason::SubcommandResults(reasons)) => reasons
+                    .into_iter()
+                    .map(|(command, decision)| {
+                        let kind = match decision {
+                            PermissionResult::Allow { .. } => "allow",
+                            PermissionResult::Deny { .. } => "deny",
+                            PermissionResult::Ask(_) => "ask",
+                            PermissionResult::Passthrough(_) => "passthrough",
+                        };
+                        (command, kind)
+                    })
+                    .collect(),
+                other => panic!("esperava subcommandResults: {other:?}"),
+            }
+        };
+
+        let denied = bash_permission(
+            "ls && rm -rf x",
+            &ctx,
+            &rules(&[], &["Bash(rm:*)"]),
+            dir.path(),
+        );
+        assert!(matches!(denied, PermissionResult::Deny { .. }));
+        assert_eq!(
+            subcommands(&denied),
+            vec![
+                ("ls".to_string(), "allow"),
+                ("rm -rf x".to_string(), "deny")
+            ]
+        );
+
+        let allowed = bash_permission("ls && pwd", &ctx, &PermissionRules::default(), dir.path());
+        assert!(matches!(allowed, PermissionResult::Allow { .. }));
+        assert_eq!(
+            subcommands(&allowed),
+            vec![("ls".to_string(), "allow"), ("pwd".to_string(), "allow")]
+        );
+
+        let asked = bash_permission(
+            "ls && npm install && make build",
+            &ctx,
+            &PermissionRules::default(),
+            dir.path(),
+        );
+        let PermissionResult::Ask(ask) = &asked else {
+            panic!("esperava ask: {asked:?}");
+        };
+        assert_eq!(
+            ask.message,
+            "This Bash command contains multiple operations. The following parts require approval: npm install, make build"
+        );
+        assert_eq!(
+            subcommands(&asked),
+            vec![
+                ("ls".to_string(), "allow"),
+                ("npm install".to_string(), "ask"),
+                ("make build".to_string(), "ask"),
+            ]
+        );
+        assert_eq!(
+            ask.decision_reason
+                .as_ref()
+                .and_then(DecisionReason::serialize_for_sdk),
+            None
+        );
+
+        // O `subcommandResults` do JS é um `Map`: subcomando repetido entra
+        // uma vez, na posição da primeira ocorrência, e a mensagem não o
+        // repete.
+        let repeated = bash_permission(
+            "npm install && make build && npm install",
+            &ctx,
+            &PermissionRules::default(),
+            dir.path(),
+        );
+        let PermissionResult::Ask(ask) = &repeated else {
+            panic!("esperava ask: {repeated:?}");
+        };
+        assert_eq!(
+            ask.message,
+            "This Bash command contains multiple operations. The following parts require approval: npm install, make build"
+        );
+        assert_eq!(
+            subcommands(&repeated),
+            vec![
+                ("npm install".to_string(), "ask"),
+                ("make build".to_string(), "ask"),
+            ]
+        );
     }
 
     #[test]

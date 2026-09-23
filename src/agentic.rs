@@ -759,6 +759,9 @@ struct BlockEmitter {
     /// `(tool_use.id, uuid do bloco)` de cada `tool_use` entregue na
     /// iteração: o `sourceToolAssistantUUID` dos resultados.
     tool_sources: Vec<(String, String)>,
+    /// `(tool_use.id, input normalizado)` dos blocos já entregues, para a
+    /// mensagem completa reaproveitar a mesma normalização.
+    normalized_inputs: Vec<(String, serde_json::Value)>,
 }
 
 impl BlockEmitter {
@@ -770,6 +773,7 @@ impl BlockEmitter {
         self.usage = empty_usage();
         self.stop_reason = None;
         self.emitted = 0;
+        self.normalized_inputs.clear();
     }
 
     /// Acompanha o evento SSE cru (`message_start` e `message_delta`).
@@ -978,6 +982,19 @@ impl AgenticLoop {
             }
             None => messages.to_vec(),
         };
+        // `normalizeToolInputForAPI` em cada `tool_use` do histórico.
+        let messages: Vec<ApiMessage> = messages
+            .into_iter()
+            .map(|mut message| {
+                for block in &mut message.content {
+                    if let ContentBlock::ToolUse { name, input, .. } = block {
+                        let taken = std::mem::take(input);
+                        *input = self.tool_executor.normalize_tool_input_for_api(name, taken);
+                    }
+                }
+                message
+            })
+            .collect();
         let system = self.system_blocks(&messages);
         CreateMessageRequest {
             model: model.to_string(),
@@ -1485,15 +1502,49 @@ impl AgenticLoop {
                                 // Cada bloco que fecha sai já como mensagem de
                                 // assistente (o `content_block_stop` do
                                 // `queryModel`), antes do `stream_event` dele.
+                                // O `tool_use` sai já normalizado
+                                // (`normalizeContentFromAPI`), e é essa forma
+                                // que o cliente, o transcript, a execução e o
+                                // histórico enxergam.
                                 if let StreamUpdate::ContentBlockComplete { ref block, .. } = update {
-                                    if matches!(block, ContentBlock::ToolUse { .. }) {
-                                        needs_follow_up = true;
-                                    }
-                                    yield Ok(blocks.block_event(block, &current_model, &sid));
+                                    let block = match block {
+                                        ContentBlock::ToolUse { id, name, input } => {
+                                            needs_follow_up = true;
+                                            let normalized = self
+                                                .tool_executor
+                                                .normalize_tool_input(name, input.clone());
+                                            blocks
+                                                .normalized_inputs
+                                                .push((id.clone(), normalized.clone()));
+                                            ContentBlock::ToolUse {
+                                                id: id.clone(),
+                                                name: name.clone(),
+                                                input: normalized,
+                                            }
+                                        }
+                                        other => other.clone(),
+                                    };
+                                    yield Ok(blocks.block_event(&block, &current_model, &sid));
                                 }
 
                                 if let StreamUpdate::MessageComplete { ref message } = update {
-                                    current_assistant_in_stream = Some(message.clone());
+                                    let mut message = message.clone();
+                                    for block in &mut message.content {
+                                        if let ContentBlock::ToolUse { id, name, input } = block {
+                                            let normalized = match blocks
+                                                .normalized_inputs
+                                                .iter()
+                                                .find(|(done, _)| done == id)
+                                            {
+                                                Some((_, value)) => value.clone(),
+                                                None => self
+                                                    .tool_executor
+                                                    .normalize_tool_input(name, input.clone()),
+                                            };
+                                            *input = normalized;
+                                        }
+                                    }
+                                    current_assistant_in_stream = Some(message);
                                 }
 
                                 if let StreamUpdate::RawEvent { ref event } = update {

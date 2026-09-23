@@ -328,7 +328,7 @@ impl Tool for AskUserQuestionTool {
         ask_user_question_schema()
     }
 
-    fn is_concurrency_safe(&self) -> bool {
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         true
     }
 

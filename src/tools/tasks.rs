@@ -98,7 +98,7 @@ impl Tool for TaskGetTool {
     fn is_read_only(&self) -> bool {
         true
     }
-    fn is_concurrency_safe(&self) -> bool {
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         true
     }
     fn input_schema(&self) -> Value {
@@ -146,7 +146,7 @@ impl Tool for TaskListTool {
     fn is_read_only(&self) -> bool {
         true
     }
-    fn is_concurrency_safe(&self) -> bool {
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         true
     }
     fn input_schema(&self) -> Value {
@@ -275,7 +275,7 @@ impl Tool for TaskStopTool {
         })
     }
 
-    fn is_concurrency_safe(&self) -> bool {
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         true
     }
 
@@ -434,6 +434,30 @@ impl Tool for TaskOutputTool {
         "TaskOutput"
     }
 
+    /// `normalizeToolInput` do TaskOutput: os nomes antigos (`agentId`,
+    /// `bash_id`, `wait_up_to` em segundos) viram `task_id`, `block` e
+    /// `timeout`, com os defaults `true` e `30000`.
+    fn normalize_input(&self, input: Value, _context: &ToolContext) -> Value {
+        let present = |key: &str| input.get(key).filter(|v| !v.is_null()).cloned();
+        let task_id = present("task_id")
+            .or_else(|| present("agentId"))
+            .or_else(|| present("bash_id"))
+            .unwrap_or_else(|| json!(""));
+        let timeout = present("timeout")
+            .or_else(|| {
+                input
+                    .get("wait_up_to")
+                    .and_then(Value::as_f64)
+                    .map(|secs| crate::tools::schema_validation::js_number_value(secs * 1000.0))
+            })
+            .unwrap_or_else(|| json!(30000));
+        json!({
+            "task_id": task_id,
+            "block": present("block").unwrap_or(Value::Bool(true)),
+            "timeout": timeout,
+        })
+    }
+
     fn description(&self) -> &str {
         static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
         TEXT.get_or_init(|| crate::tools::agent::with_js_dashes(TASK_OUTPUT_PROMPT))
@@ -466,7 +490,7 @@ impl Tool for TaskOutputTool {
         })
     }
 
-    fn is_concurrency_safe(&self) -> bool {
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         true
     }
 

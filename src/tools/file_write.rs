@@ -73,9 +73,26 @@ impl Tool for FileWriteTool {
         Some(100_000)
     }
 
+    /// `normalizeToolInput` do Write: `file_path` e `content` (sem o espaço
+    /// de fim de linha, salvo em Markdown), nessa ordem.
+    fn normalize_input(&self, input: Value, _ctx: &ToolContext) -> Value {
+        if !crate::tools::schema_validation::validate_input(&input, schema_value()).is_empty() {
+            return input;
+        }
+        let (file_path, content) = normalized(&input);
+        json!({"file_path": file_path, "content": content})
+    }
+
     async fn validate_input(&self, input: &Value, ctx: &ToolContext) -> Result<(), String> {
         let (file_path, _) = normalized(input);
-        let full_path = fs::absolute(&file_path, &ctx.working_directory);
+        let full_path = fs::absolute(&file_path, &ctx.cwd());
+        if crate::tools::permission::path_denied_by_rules(
+            &full_path,
+            ctx,
+            crate::tools::permission::PathRuleKind::Edit,
+        ) {
+            return Err(crate::tools::permission::DENIED_BY_PERMISSION_SETTINGS.to_string());
+        }
         let text = full_path.to_string_lossy();
         if text.starts_with("\\\\") || text.starts_with("//") {
             return Ok(());
@@ -110,7 +127,7 @@ impl Tool for FileWriteTool {
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         let (file_path, content) = normalized(&input);
-        let full_path = fs::absolute(&file_path, &ctx.working_directory);
+        let full_path = fs::absolute(&file_path, &ctx.cwd());
         if let Some(parent) = full_path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 return ToolResult::error(e.to_string());

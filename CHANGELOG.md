@@ -5,6 +5,110 @@ Versões ainda não publicadas ficam em `Unreleased`.
 
 ## [Unreleased]
 
+### Mudado: as últimas lacunas de paridade do transporte nativo com o CLI 2.1.90
+
+Cada item segue o JS de referência e, onde o comportamento importa para o
+consumidor, o que o CLI 2.1.90 real fez contra um servidor local no lugar da
+API (sessão SDK em stream-json).
+
+- **Regras de permissão no `ToolContext`** (`permission_rules`, preenchido
+  por `ToolExecutor::with_permission_rules`). O `validateInput` do Read, do
+  Edit e do Write recusa o caminho coberto por regra deny com a mensagem do
+  CLI (`File is in a directory that is denied by your permission
+  settings.`), antes da permissão e mesmo em `bypassPermissions`
+  (`tools/FileEditTool/FileEditTool.js`, `tools/FileWriteTool/FileWriteTool.js`,
+  `tools/FileReadTool/FileReadTool/init_FileReadTool.js`). O Glob e o Grep
+  escondem o que as regras deny de `Read(...)` cobrem, com o
+  `getFileReadIgnorePatterns` + `normalizePatternsToPath`
+  (`permission::file_read_ignore_patterns`, `utils/glob.js`,
+  `tools/GrepTool/GrepTool.js`). O `rg` passa a rodar no cwd original da
+  sessão, que é o `process.cwd()` do CLI: é nele que o ripgrep ancora os
+  `--glob !/padrão`, e herdar o cwd do processo que embute o SDK deixava o
+  corte sem efeito. API nova: `permission::path_denied_by_rules`,
+  `permission::DENIED_BY_PERMISSION_SETTINGS` e
+  `permission::matching_path_rule_in`.
+- **`Tool::is_concurrency_safe(&self, input)`** recebe o input, como o
+  `isConcurrencySafe(input)` do JS, e o executor particiona como o
+  `partitionToolCalls` (`services/tools/toolOrchestration.js`): input que não
+  passa no schema não é seguro. O Bash é seguro quando o comando é de leitura
+  (`checkReadOnlyConstraints`, `tools/BashTool/BashTool/init_BashTool.js`), e
+  as tools MCP in-process seguem o `readOnlyHint` das anotações. Mudança de
+  assinatura: tools próprias trocam `is_concurrency_safe(&self)` por
+  `is_concurrency_safe(&self, _input: &Value)`.
+- **Bash com o modelo da sessão**: o registro por `BashTool::with_main_model`
+  no `native.rs` agora tem teste de ponta a ponta (a linha
+  `Co-Authored-By` do request sai com o modelo das opções).
+- **`tool_use` normalizado como o CLI** (`normalizeContentFromAPI` e
+  `normalizeToolInput` de `utils/api.js`): cada bloco `tool_use` sai do
+  `content_block_stop` já normalizado, e é essa forma que o cliente recebe, que
+  o `can_use_tool` vê, que executa, que vai ao transcript e que volta à API.
+  Bash sem o `cd <cwd> && ` e com `{command, description, timeout,
+  run_in_background, dangerouslyDisableSandbox}`; Edit
+  `{replace_all, file_path, old_string, new_string}` com o
+  `normalizeFileEditInput`; Write `{file_path, content}` sem o espaço de fim de
+  linha; TaskOutput com os nomes antigos convertidos; ExitPlanMode com `plan` e
+  `planFilePath` do arquivo de plano, que o `normalizeToolInputForAPI` tira de
+  novo no request. Traits novos: `Tool::normalize_input` e
+  `Tool::normalize_input_for_api`. O Edit ganhou o `semanticBoolean` do
+  `replace_all`.
+- **cwd compartilhado** (`ToolContext::cwd_state`, `ToolContext::cwd()`,
+  `ToolContext::set_cwd`): o `cd` do Bash na thread principal vale para todas
+  as tools do turno (Read, Edit, Write, Glob, Grep, NotebookEdit, Skill,
+  EnterWorktree e as checagens de caminho), para os subagentes (que leem mas
+  não mudam o cwd, o `preventCwdChanges`) e para o `cwd` das entradas do
+  transcript, como o `getCwd()` global do CLI; o prompt seguinte volta ao cwd
+  original, como o `setCwd` do `submitMessage`. As raízes das regras e os
+  diretórios de trabalho continuam no cwd original (`getOriginalCwd`).
+- **`DecisionReason::SubcommandResults`**: o deny, o allow e o ask de comando
+  composto do Bash guardam a decisão de cada subcomando
+  (`tools/BashTool/bashPermissions/bashToolHasPermission.js`), e a mensagem do
+  ask sai do `createPermissionRequestMessage` para `subcommandResults`
+  (`utils/permissions/permissions.js`). O motivo não viaja no `can_use_tool`
+  (`serializeDecisionReason` de `cli/structuredIO.js`).
+- **Transcript de subagente**: como o `runAgent` e o `getAgentTranscriptPath`
+  (`tools/AgentTool/runAgent.js`, `utils/sessionStorage/*.js`), cada
+  subagente grava `<sessão>/subagents/agent-<id>.jsonl` (o prompt inicial, e
+  cada mensagem com `isSidechain: true`, `promptId` e `agentId`) e o
+  `agent-<id>.meta.json` (`{agentType, description}`), e o `session_store`
+  recebe as mesmas entradas pelo frame `transcript_mirror`, com o `subpath`
+  `subagents/agent-<id>`. API nova: `session::ChainTarget`,
+  `SessionStorage::append_chain_to`, `SessionStorage::agent_transcript_path`
+  e `SessionStorage::write_agent_metadata`; `EntryContext` ganhou
+  `is_sidechain` e `agent_id`.
+- **Ordem das chaves do input no `can_use_tool`**: `CanUseToolFn` e
+  `PermissionResultAllow::updated_input` passam de `HashMap` para
+  `serde_json::Map`, e o input chega ao callback na ordem do frame. No
+  transporte nativo, as chaves de primeiro nível de uma builtin saem na ordem
+  do schema, como o `parse` do zod devolve (medido no CLI: o WebFetch pedido
+  com `{prompt, url}` chega como `{url, prompt}`); numa tool MCP, na ordem que
+  o modelo mandou. Mudança de assinatura para quem implementa o callback.
+- **`init` com os skills que o nativo executa**: `skills` e `slash_commands`
+  levam os skills do disco que o usuário pode invocar, com o filtro
+  `userInvocable !== false` do `buildSystemInitMessage`
+  (`utils/messages/systemInit.js`); o `SkillCommand` ganhou `user_invocable`
+  (o `user-invocable` do frontmatter, `skills/loadSkillsDir.js`).
+  Divergência deliberada do CLI 2.1.90: o CLI real anuncia também os skills
+  embutidos (`update-config`, `debug`, `simplify`, `batch`, `loop`,
+  `schedule`, `claude-api`) e os comandos embutidos (`compact`, `context`,
+  `cost`, `heapdump`, `init`, `pr-comments`, `release-notes`, `review`,
+  `security-review`, `insights`), mas o nativo não tem o conteúdo desses
+  skills (a tool Skill responde `Unknown skill`) nem processa comando de
+  barra no prompt, e anunciar o que não executa faria o consumidor oferecer
+  ao usuário, e o modelo tentar, algo que falha. A `claude_code_version`
+  `2.1.90` confere com o CLI.
+- **Bash: flags que escrevem ou executam deixam de ser leitura**:
+  `sort` com `-o` agrupado (`-uo arquivo`), `tree -o arquivo` e
+  `rg --pre programa` eram tratados como comando de leitura, o que os
+  aprovava sem perguntar no modo default e agora também os deixaria rodar em
+  paralelo. O JS só aceita as flags da allowlist
+  (`isCommandSafeViaFlagParsing`), e nenhuma destas está nela.
+- **`subcommandResults` sem repetição**: como o `Map` do JS, subcomando
+  repetido entra uma vez, e a mensagem do ask não o lista duas vezes.
+- Testes em `tests/test_native_parity.rs` (regras, concorrência, modelo do
+  Bash, normalização, cwd, ordem das chaves, `init`),
+  `tests/test_native_transcript.rs` (sidechain e espelho) e nos módulos
+  (`subcommandResults`, `file_read_ignore_patterns`).
+
 ## [0.1.1](https://github.com/JoaoHenriqueBarbosa/rust-agent-sdk/compare/v0.1.0...v0.1.1) - 2026-09-23
 
 ### Fixed

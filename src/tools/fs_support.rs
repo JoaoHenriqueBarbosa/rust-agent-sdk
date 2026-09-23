@@ -757,7 +757,19 @@ pub(crate) enum RipgrepOutcome {
 /// `ripGrep(args, target)`: roda com o timeout de 20s do JS, e trata o
 /// código 1 (nada encontrado) como lista vazia. Saída parcial de um erro
 /// (código 2, arquivo ilegível) segue como resultado, como no JS.
-pub(crate) async fn run_ripgrep(rg: &Path, args: &[String], target: &Path) -> RipgrepOutcome {
+///
+/// `process_cwd` é o diretório em que o processo do `rg` roda: o do processo
+/// do CLI, que é o cwd original da sessão (o `cd` do Bash só muda o
+/// `getCwd()` do JS, não o `process.cwd()`). Não é detalhe: o `rg` casa os
+/// `--glob` ancorados (`!/hidden/**`, das regras deny de `Read(...)`)
+/// relativos ao diretório em que roda, e herdar o cwd do processo que
+/// embute o SDK deixaria esses cortes sem efeito.
+pub(crate) async fn run_ripgrep(
+    rg: &Path,
+    args: &[String],
+    target: &Path,
+    process_cwd: &Path,
+) -> RipgrepOutcome {
     let timeout = std::env::var("CLAUDE_CODE_GLOB_TIMEOUT_SECONDS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -765,9 +777,11 @@ pub(crate) async fn run_ripgrep(rg: &Path, args: &[String], target: &Path) -> Ri
         .map(std::time::Duration::from_secs)
         .unwrap_or(std::time::Duration::from_secs(20));
     let mut command = tokio::process::Command::new(rg);
+    command.args(args).arg(target);
+    if process_cwd.is_dir() {
+        command.current_dir(process_cwd);
+    }
     command
-        .args(args)
-        .arg(target)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

@@ -498,8 +498,9 @@ async fn the_read_only_hint_decides_concurrency_and_plan_mode() {
         .iter()
         .find(|t| t.name() == "mcp__bancada__echo")
         .expect("echo");
-    assert!(peek.is_read_only() && peek.is_concurrency_safe());
-    assert!(!echo.is_read_only() && !echo.is_concurrency_safe());
+    let input = serde_json::json!({});
+    assert!(peek.is_read_only() && peek.is_concurrency_safe(&input));
+    assert!(!echo.is_read_only() && !echo.is_concurrency_safe(&input));
 }
 
 // ---------------------------------------------------------------------------

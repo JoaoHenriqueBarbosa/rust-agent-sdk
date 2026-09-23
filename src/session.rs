@@ -56,6 +56,21 @@ pub struct EntryContext<'a> {
     pub entrypoint: Option<&'a str>,
     pub git_branch: Option<&'a str>,
     pub prompt_id: Option<&'a str>,
+    /// `isSidechain`: a entrada é do transcript de um subagente.
+    pub is_sidechain: bool,
+    /// `agentId` do subagente, gravado logo depois do `promptId`.
+    pub agent_id: Option<&'a str>,
+}
+
+/// Onde uma cadeia de mensagens é gravada.
+#[derive(Debug, Clone, Copy)]
+pub enum ChainTarget<'a> {
+    /// O transcript da sessão (`<session_id>.jsonl`).
+    Main,
+    /// O sidechain de um subagente
+    /// (`<session_id>/subagents/agent-<agent_id>.jsonl`), o
+    /// `recordSidechainTranscript` do CLI.
+    Sidechain { agent_id: &'a str },
 }
 
 impl SessionStorage {
@@ -132,23 +147,91 @@ impl SessionStorage {
         starting_parent: Option<&str>,
         prompt_id: Option<&str>,
     ) -> Result<ChainWrite> {
+        self.append_chain_to(
+            ChainTarget::Main,
+            session_id,
+            messages,
+            starting_parent,
+            prompt_id,
+            None,
+        )
+        .await
+    }
+
+    /// O `insertMessageChain` completo: grava no transcript da sessão ou no
+    /// sidechain de um subagente, com o `cwd` corrente (o `getCwd()` do JS
+    /// na hora da escrita, que o `cd` do Bash pode ter mudado; `None` é o
+    /// cwd da sessão).
+    pub async fn append_chain_to(
+        &self,
+        target: ChainTarget<'_>,
+        session_id: &str,
+        messages: &[Value],
+        starting_parent: Option<&str>,
+        prompt_id: Option<&str>,
+        cwd: Option<&str>,
+    ) -> Result<ChainWrite> {
         if messages.is_empty() {
             return Ok(ChainWrite {
                 entries: Vec::new(),
                 last_uuid: starting_parent.map(str::to_string),
             });
         }
-        let branch = git_branch(Path::new(&self.cwd));
+        let cwd = cwd.unwrap_or(&self.cwd);
+        let branch = git_branch(Path::new(cwd));
+        let (is_sidechain, agent_id, path) = match target {
+            ChainTarget::Main => (false, None, self.session_path(session_id)),
+            ChainTarget::Sidechain { agent_id } => (
+                true,
+                Some(agent_id),
+                self.agent_transcript_path(session_id, agent_id),
+            ),
+        };
         let ctx = EntryContext {
             session_id,
-            cwd: &self.cwd,
+            cwd,
             entrypoint: self.entrypoint.as_deref(),
             git_branch: Some(&branch),
             prompt_id,
+            is_sidechain,
+            agent_id,
         };
         let write = build_chain_entries(messages, starting_parent, &ctx);
-        self.append_lines(session_id, &write.entries).await?;
+        self.append_lines_to(&path, &write.entries).await?;
         Ok(write)
+    }
+
+    /// O transcript de um subagente (`getAgentTranscriptPath`):
+    /// `<projeto>/<session_id>/subagents/agent-<agent_id>.jsonl`, que o
+    /// `SessionStore` recebe com o `subpath` `subagents/agent-<agent_id>`.
+    pub fn agent_transcript_path(&self, session_id: &str, agent_id: &str) -> PathBuf {
+        self.project_dir
+            .join(session_id)
+            .join("subagents")
+            .join(format!("agent-{agent_id}.jsonl"))
+    }
+
+    /// `writeAgentMetadata`: o `agent-<agent_id>.meta.json` ao lado do
+    /// transcript do subagente (`{agentType, worktreePath?, description?}`).
+    pub async fn write_agent_metadata(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        metadata: &Value,
+    ) -> Result<()> {
+        let path = self
+            .agent_transcript_path(session_id, agent_id)
+            .with_extension("meta.json");
+        if let Some(dir) = path.parent() {
+            tokio::fs::create_dir_all(dir).await.map_err(|e| {
+                ClaudeSDKError::sdk(format!("Failed to create {}: {e}", dir.display()))
+            })?;
+        }
+        let text = serde_json::to_string(metadata)
+            .map_err(|e| ClaudeSDKError::sdk(format!("Failed to serialize metadata: {e}")))?;
+        tokio::fs::write(&path, text)
+            .await
+            .map_err(|e| ClaudeSDKError::sdk(format!("Failed to write {}: {e}", path.display())))
     }
 
     /// Append the AI generated session title, in the same entry shape the CLI
@@ -165,8 +248,22 @@ impl SessionStorage {
         Ok(entry)
     }
 
-    /// Acrescenta as entradas ao JSONL numa escrita só.
+    /// Acrescenta as entradas ao JSONL da sessão numa escrita só.
     async fn append_lines(&self, session_id: &str, entries: &[Value]) -> Result<()> {
+        self.append_lines_to(&self.session_path(session_id), entries)
+            .await
+    }
+
+    /// Acrescenta as entradas a um JSONL numa escrita só, criando o
+    /// diretório do sidechain quando falta.
+    async fn append_lines_to(&self, path: &Path, entries: &[Value]) -> Result<()> {
+        if let Some(dir) = path.parent() {
+            if !dir.exists() {
+                tokio::fs::create_dir_all(dir).await.map_err(|e| {
+                    ClaudeSDKError::sdk(format!("Failed to create {}: {e}", dir.display()))
+                })?;
+            }
+        }
         let mut buf = String::new();
         for entry in entries {
             let json = serde_json::to_string(entry)
@@ -174,11 +271,10 @@ impl SessionStorage {
             buf.push_str(&json);
             buf.push('\n');
         }
-        let path = self.session_path(session_id);
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path)
+            .open(path)
             .await
             .map_err(|e| ClaudeSDKError::sdk(format!("Failed to open session file: {e}")))?;
         file.write_all(buf.as_bytes())
@@ -240,11 +336,14 @@ pub fn build_chain_entries(
                 parent.clone().map_or(Value::Null, Value::String),
             );
         }
-        entry.insert("isSidechain".into(), json!(false));
+        entry.insert("isSidechain".into(), json!(ctx.is_sidechain));
         if msg_type == "user" {
             if let Some(prompt_id) = ctx.prompt_id {
                 entry.insert("promptId".into(), json!(prompt_id));
             }
+        }
+        if let Some(agent_id) = ctx.agent_id {
+            entry.insert("agentId".into(), json!(agent_id));
         }
         if let Some(obj) = message.as_object() {
             for (k, v) in obj {
@@ -355,6 +454,8 @@ mod tests {
             entrypoint: Some("sdk-rs"),
             git_branch: Some("main"),
             prompt_id,
+            is_sidechain: false,
+            agent_id: None,
         }
     }
 

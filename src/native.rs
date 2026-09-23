@@ -766,6 +766,7 @@ fn title_of_json(text: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// Configuração resolvida das opções + env selado.
+#[derive(Clone)]
 struct EngineConfig {
     api_key: String,
     base_url: Option<String>,
@@ -951,7 +952,38 @@ fn user_context_cache(
 }
 
 /// Os campos do `init` que dependem da sessão e não do loop.
-fn init_info(options: &ClaudeAgentOptions, mcp_status: &Value) -> crate::agentic::InitInfo {
+/// `skills` e `slash_commands` do `init`, como o `buildSystemInitMessage`
+/// monta (`utils/messages/systemInit.js`): os skills lidos das fontes
+/// habilitadas que o usuário pode invocar (`userInvocable !== false`), menos
+/// os condicionais, que só entram quando um arquivo casa.
+///
+/// Divergência deliberada do CLI 2.1.90: o CLI real anuncia também os skills
+/// que traz embutidos (`update-config`, `debug`, `simplify`, `batch`, `loop`,
+/// `schedule`, `claude-api`) e, em `slash_commands`, os comandos embutidos
+/// (`compact`, `context`, `cost`, `heapdump`, `init`, `pr-comments`,
+/// `release-notes`, `review`, `security-review`, `insights`). O transporte
+/// nativo não tem o conteúdo desses skills (a tool Skill só lê `SKILL.md`
+/// do disco e responderia `Unknown skill`) nem processa comando de barra no
+/// prompt (um `/compact` iria ao modelo como texto). Anunciar o que não
+/// executa faria o consumidor oferecer ao usuário, e o modelo tentar, algo
+/// que falha; por isso só entra o que existe de fato.
+fn init_skills_and_commands(options: &ClaudeAgentOptions, cwd: &str) -> (Vec<String>, Vec<String>) {
+    let mut skills: Vec<String> = Vec::new();
+    for skill in crate::tools::skill::load_skills(&skill_directories(options, cwd)) {
+        if !skill.conditional && skill.user_invocable && !skills.contains(&skill.name) {
+            skills.push(skill.name);
+        }
+    }
+    let commands = skills.clone();
+    (skills, commands)
+}
+
+fn init_info(
+    options: &ClaudeAgentOptions,
+    mcp_status: &Value,
+    cwd: &str,
+) -> crate::agentic::InitInfo {
+    let (skills, slash_commands) = init_skills_and_commands(options, cwd);
     let mcp_servers = mcp_status
         .get("mcpServers")
         .and_then(Value::as_array)
@@ -999,6 +1031,8 @@ fn init_info(options: &ClaudeAgentOptions, mcp_status: &Value) -> crate::agentic
         api_key_source: "ANTHROPIC_API_KEY".to_string(),
         betas: (!betas.is_empty()).then_some(betas),
         agents,
+        skills,
+        slash_commands,
         ..crate::agentic::InitInfo::default()
     }
 }
@@ -1496,6 +1530,11 @@ async fn engine_main(
         };
 
         let tool_results_dir = tool_results_dir_for(&options, &storage.session_path(&session_id));
+        // O `submitMessage` do CLI volta o cwd ao original a cada prompt
+        // (`setCwd(cwd)`); dentro do turno, o `cd` do Bash vale para todas as
+        // tools, para os subagentes e para o `cwd` do transcript.
+        let cwd_state: crate::tools::framework::SharedCwd = Arc::new(std::sync::RwLock::new(None));
+        transcript.cwd_state = Some(Arc::clone(&cwd_state));
         let executor = build_executor(
             &options,
             &shared,
@@ -1511,6 +1550,9 @@ async fn engine_main(
                 mcp_tools: remote_tools.clone(),
                 user_context: Arc::clone(&user_context),
                 abort: abort.clone(),
+                storage: storage.clone(),
+                prompt_id: transcript.prompt_id.clone(),
+                cwd_state,
             },
         )
         .await;
@@ -1624,7 +1666,7 @@ async fn engine_main(
             user_context: Some(Arc::clone(&user_context)),
             clear_user_context_on_compact: true,
             system_prefix: Some(system_prefix(&options)),
-            init_info: init_info(&options, &*shared.mcp_status.lock().await),
+            init_info: init_info(&options, &*shared.mcp_status.lock().await, &config.cwd),
             ..AgenticLoopOptions::default()
         };
 
@@ -1976,6 +2018,12 @@ struct TranscriptState {
     pending_assistant: Vec<Value>,
     /// O `message.id` da última mensagem de assistente do histórico.
     history_assistant_id: Option<String>,
+    /// O subagente dono deste transcript: `Some` grava o sidechain dele
+    /// (`recordSidechainTranscript`), `None` o transcript da sessão.
+    agent_id: Option<String>,
+    /// O cwd corrente do turno, gravado em `cwd` como o `getCwd()` que o
+    /// `insertMessageChain` lê na hora da escrita.
+    cwd_state: Option<crate::tools::framework::SharedCwd>,
 }
 
 impl TranscriptState {
@@ -2020,17 +2068,40 @@ impl TranscriptState {
         if messages.is_empty() {
             return Ok(());
         }
+        let cwd = self
+            .cwd_state
+            .as_ref()
+            .and_then(|state| state.read().ok().and_then(|guard| guard.clone()))
+            .map(|path| path.to_string_lossy().to_string());
+        let (target, mirror_path) = match &self.agent_id {
+            None => (
+                crate::session::ChainTarget::Main,
+                transcript_path.to_string(),
+            ),
+            Some(agent_id) => (
+                crate::session::ChainTarget::Sidechain { agent_id },
+                storage
+                    .agent_transcript_path(session_id, agent_id)
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+        };
         let write = storage
-            .append_chain(
+            .append_chain_to(
+                target,
                 session_id,
                 &messages,
                 self.last_uuid.as_deref(),
                 self.prompt_id.as_deref(),
+                cwd.as_deref(),
             )
             .await?;
         self.last_uuid = write.last_uuid;
+        // O sidechain vai ao `SessionStore` pelo caminho dele, que o
+        // `file_path_to_session_key` traduz no `subpath`
+        // `subagents/agent-<id>`.
         if config.mirror {
-            emit_mirror_entries(shared, transcript_path, write.entries);
+            emit_mirror_entries(shared, &mirror_path, write.entries);
         }
         Ok(())
     }
@@ -2453,6 +2524,10 @@ fn subagent_executor(
         skill_directories: parent.skill_directories.clone(),
         abort: parent.abort.clone(),
         non_interactive: parent.non_interactive,
+        // O cwd é o MESMO da thread principal (o `getCwd()` do JS é global):
+        // o subagente resolve caminhos relativos pelo `cd` que o pai fez, e o
+        // Bash dele não muda o cwd (`preventCwdChanges`).
+        cwd_state: Arc::clone(&parent.cwd_state),
         ..ToolContext::default()
     };
     ToolExecutor::new(registry, context).with_permission_rules(permission_rules.clone())
@@ -2489,6 +2564,26 @@ struct ExecutorSetup {
     /// loop, para que as tools abortem no interrupt e para que um deny com
     /// `interrupt: true` encerre o turno.
     abort: CancellationToken,
+    /// O armazenamento da sessão, onde o subagente grava o sidechain.
+    storage: crate::session::SessionStorage,
+    /// O `promptId` do prompt em curso, que as entradas de usuário do
+    /// sidechain também levam (o `getPromptId` do CLI é global).
+    prompt_id: Option<String>,
+    /// O cwd corrente do turno, compartilhado por todas as tools e pelo
+    /// transcript (o `setCwd` do `submitMessage` o zera a cada prompt).
+    cwd_state: crate::tools::framework::SharedCwd,
+}
+
+/// O que o subagente precisa para gravar o próprio transcript (o sidechain)
+/// e espelhá-lo no `SessionStore`, como o `runAgent` do CLI.
+#[derive(Clone)]
+struct SidechainRecording {
+    storage: crate::session::SessionStorage,
+    shared: Arc<Shared>,
+    config: EngineConfig,
+    session_id: String,
+    transcript_path: String,
+    prompt_id: Option<String>,
 }
 
 async fn build_executor(
@@ -2508,7 +2603,18 @@ async fn build_executor(
         mcp_tools,
         user_context,
         abort,
+        storage,
+        prompt_id,
+        cwd_state,
     } = setup;
+    let sidechain = SidechainRecording {
+        storage,
+        shared: Arc::clone(shared),
+        config: config.clone(),
+        session_id: session_id.clone(),
+        transcript_path: transcript_path.clone(),
+        prompt_id,
+    };
     let session_id = session_id.as_str();
     let transcript_path = transcript_path.as_str();
     let permission_rules = crate::tools::permission::PermissionRules::from_lists(
@@ -2553,6 +2659,7 @@ async fn build_executor(
             tool_name: "Agent",
             user_context: Arc::clone(&user_context),
             system_prefix: system_prefix(options),
+            sidechain: Some(sidechain),
         }));
     }
 
@@ -2601,6 +2708,10 @@ async fn build_executor(
                         .get("inputSchema")
                         .cloned()
                         .unwrap_or_else(|| json!({"type": "object"})),
+                    read_only: tool
+                        .pointer("/annotations/readOnlyHint")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                 }));
             }
         }
@@ -2781,6 +2892,7 @@ async fn build_executor(
         agent_id: None,
         skill_directories: skill_directories(options, &config.cwd),
         abort: Some(abort),
+        cwd_state,
         ..ToolContext::default()
     };
     ToolExecutor::new(registry, context).with_permission_rules(permission_rules)
@@ -2977,6 +3089,8 @@ struct NativeAgentTool {
     /// Cabeçalho e prefixo do `system`, que a camada de API do CLI põe em
     /// toda chamada, inclusive nas do subagente.
     system_prefix: crate::agentic::SystemPrefix,
+    /// Onde gravar o sidechain de cada subagente; `None` não grava.
+    sidechain: Option<SidechainRecording>,
 }
 
 #[async_trait::async_trait]
@@ -3051,6 +3165,7 @@ impl Tool for NativeAgentTool {
             &model,
         );
 
+        let agent_id = create_agent_id();
         let executor = subagent_executor(
             registry,
             context,
@@ -3059,7 +3174,7 @@ impl Tool for NativeAgentTool {
             &self.task_store,
             &self.permission_rules,
             &model,
-            create_agent_id(),
+            agent_id.clone(),
         );
 
         let system_prompt = definition
@@ -3083,12 +3198,76 @@ impl Tool for NativeAgentTool {
             ..crate::agentic::AgenticLoopOptions::default()
         };
 
-        let events = crate::agentic::agentic_query_collect(
-            self.client.clone(),
-            &prompt,
-            executor,
-            loop_options,
-        )
+        // O sidechain do subagente, como o `runAgent` do CLI: a mensagem
+        // inicial (o prompt) e o `agent-<id>.meta.json` antes do loop, e cada
+        // mensagem do loop à medida que sai, no
+        // `<sessão>/subagents/agent-<id>.jsonl`, espelhado no `SessionStore`.
+        let mut recorder = self.sidechain.as_ref().map(|sink| {
+            (
+                sink,
+                TranscriptState {
+                    prompt_id: sink.prompt_id.clone(),
+                    agent_id: Some(agent_id.clone()),
+                    cwd_state: Some(Arc::clone(&context.cwd_state)),
+                    ..TranscriptState::default()
+                },
+            )
+        });
+        if let Some((sink, state)) = recorder.as_mut() {
+            let initial = crate::internal::transcript_load::user_message_value(
+                Value::String(prompt.clone()),
+                crate::internal::transcript_load::UserMessageFlags::default(),
+            );
+            let mut metadata = serde_json::Map::new();
+            metadata.insert("agentType".into(), json!(subagent_type));
+            if let Some(description) = input
+                .get("description")
+                .and_then(Value::as_str)
+                .filter(|d| !d.is_empty())
+            {
+                metadata.insert("description".into(), json!(description));
+            }
+            let _ = state
+                .record(
+                    &sink.storage,
+                    &sink.shared,
+                    &sink.config,
+                    &sink.session_id,
+                    &sink.transcript_path,
+                    vec![initial],
+                )
+                .await;
+            let _ = sink
+                .storage
+                .write_agent_metadata(&sink.session_id, &agent_id, &Value::Object(metadata))
+                .await;
+        }
+
+        let events: crate::errors::Result<Vec<AgenticEvent>> = async {
+            use futures::StreamExt as _;
+            let stream =
+                crate::agentic::agentic_query(self.client.clone(), &prompt, executor, loop_options);
+            tokio::pin!(stream);
+            let mut events = Vec::new();
+            while let Some(result) = stream.next().await {
+                let event = result?;
+                if let Some((sink, state)) = recorder.as_mut() {
+                    let _ = state
+                        .persist_event(
+                            &sink.storage,
+                            &sink.shared,
+                            &sink.config,
+                            &sink.session_id,
+                            &sink.transcript_path,
+                            &event,
+                            None,
+                        )
+                        .await;
+                }
+                events.push(event);
+            }
+            Ok(events)
+        }
         .await;
 
         match events {
@@ -3138,12 +3317,23 @@ struct McpBridgeTool {
     tool_name: String,
     description: String,
     schema: Value,
+    /// O `readOnlyHint` das anotações da tool.
+    read_only: bool,
 }
 
 #[async_trait::async_trait]
 impl Tool for McpBridgeTool {
     fn name(&self) -> &str {
         &self.full_name
+    }
+
+    /// `isConcurrencySafe` do MCPTool: o `readOnlyHint` da anotação.
+    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+        self.read_only
+    }
+
+    fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     fn description(&self) -> &str {

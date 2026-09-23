@@ -130,6 +130,28 @@ pub fn locale_compare(a: &str, b: &str) -> std::cmp::Ordering {
     a.len().cmp(&b.len())
 }
 
+/// A ordem das chaves de primeiro nível que o `parse` de um `z.object` do
+/// zod devolve: as do shape (as `properties` do schema), na ordem do shape,
+/// e depois as que o shape não conhece, na ordem em que vieram. Input que
+/// não é objeto, ou schema sem `properties`, fica como está.
+pub fn zod_output_order(input: Value, schema: &Value) -> Value {
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return input;
+    };
+    let mut map = match input {
+        Value::Object(map) => map,
+        other => return other,
+    };
+    let mut ordered = serde_json::Map::with_capacity(map.len());
+    for key in properties.keys() {
+        if let Some(value) = map.shift_remove(key) {
+            ordered.insert(key.clone(), value);
+        }
+    }
+    ordered.extend(map);
+    Value::Object(ordered)
+}
+
 // ---------------------------------------------------------------------------
 // Permissão: pedido e decisão do callback
 // ---------------------------------------------------------------------------
@@ -307,9 +329,49 @@ pub struct ToolContext {
     /// Sessão não interativa (SDK/`-p`), o `isNonInteractiveSession` do JS.
     /// O default é `true`: o SDK nunca tem um terminal para perguntar.
     pub non_interactive: bool,
+    /// As regras de permissão da sessão (o `toolPermissionContext` do
+    /// `getAppState()`). O `validateInput` do Read, do Edit e do Write
+    /// recusa caminho coberto por regra deny, e o Glob e o Grep escondem da
+    /// listagem o que as regras deny de `Read(...)` cobrem. O
+    /// [`ToolExecutor::with_permission_rules`] preenche junto com as regras
+    /// do executor.
+    pub permission_rules: Arc<PermissionRules>,
+    /// O cwd corrente da sessão (o `getCwd()` do JS), compartilhado por
+    /// todas as tools: o `cd` do Bash na thread principal muda o cwd do Read,
+    /// do Glob, do Grep, do Edit e dos subagentes. `None` dentro do
+    /// [`SharedCwd`] é o cwd original ([`ToolContext::working_directory`]).
+    pub cwd_state: SharedCwd,
 }
 
+/// O cwd corrente da sessão, compartilhado entre as tools e os subagentes do
+/// turno (o estado de `setCwd`/`getCwd` do JS). `None` é o cwd original.
+pub type SharedCwd = Arc<std::sync::RwLock<Option<PathBuf>>>;
+
 impl ToolContext {
+    /// O cwd corrente (`getCwd()` do JS): o que o `cd` do Bash deixou, ou o
+    /// original. É a base dos caminhos relativos das tools; o original
+    /// ([`ToolContext::working_directory`], o `getOriginalCwd`) continua
+    /// sendo a raiz das regras e dos diretórios de trabalho.
+    pub fn cwd(&self) -> PathBuf {
+        self.cwd_state
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .unwrap_or_else(|| self.working_directory.clone())
+    }
+
+    /// Troca o cwd corrente (`setCwd` do JS). Voltar ao original guarda
+    /// `None`.
+    pub fn set_cwd(&self, cwd: PathBuf) {
+        if let Ok(mut guard) = self.cwd_state.write() {
+            *guard = if cwd == self.working_directory {
+                None
+            } else {
+                Some(cwd)
+            };
+        }
+    }
+
     /// O modo vigente: o compartilhado quando existe, senão o estático.
     pub fn mode(&self) -> PermissionMode {
         self.permission_mode_shared
@@ -418,6 +480,8 @@ impl Default for ToolContext {
             skill_directories: Vec::new(),
             abort: None,
             non_interactive: true,
+            permission_rules: Arc::new(PermissionRules::default()),
+            cwd_state: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 }
@@ -573,9 +637,28 @@ pub trait Tool: Send + Sync {
     /// JSON Schema for the tool's input parameters.
     fn input_schema(&self) -> Value;
 
-    /// Whether this tool can safely run concurrently with other safe tools.
-    fn is_concurrency_safe(&self) -> bool {
+    /// `isConcurrencySafe(input)` do JS: se esta chamada pode rodar em
+    /// paralelo com as vizinhas seguras. Recebe o input já validado (o
+    /// `parsedInput.data` do `partitionToolCalls`), porque a resposta pode
+    /// depender dele: o Bash de leitura (`ls`, `git status`) é seguro, o que
+    /// escreve não.
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         false
+    }
+
+    /// `normalizeToolInput` do JS (`utils/api.js`): o input como o CLI o
+    /// grava no `tool_use` da mensagem do assistente, antes de executar, de
+    /// mandar ao cliente, de gravar no transcript e de voltar à API no
+    /// histórico. O default é o input como veio.
+    fn normalize_input(&self, input: Value, _context: &ToolContext) -> Value {
+        input
+    }
+
+    /// `normalizeToolInputForAPI` do JS: o que sai do `tool_use` gravado
+    /// quando o histórico volta à API (o ExitPlanMode tira o `plan` e o
+    /// `planFilePath` injetados). O default é o input como está.
+    fn normalize_input_for_api(&self, input: Value) -> Value {
+        input
     }
 
     /// Whether this tool only READS state. É informativo (o `isReadOnly`
@@ -880,17 +963,41 @@ pub struct ToolExecutor {
 }
 
 impl ToolExecutor {
+    /// O executor com as regras que o contexto já carrega.
     pub fn new(registry: ToolRegistry, context: ToolContext) -> Self {
+        let permission_rules = (*context.permission_rules).clone();
         Self {
             registry,
             context,
-            permission_rules: PermissionRules::default(),
+            permission_rules,
         }
     }
 
+    /// As regras de permissão da sessão, no executor e no contexto das tools
+    /// (o `validateInput` e a listagem do Glob/Grep as consultam).
     pub fn with_permission_rules(mut self, rules: PermissionRules) -> Self {
+        self.context.permission_rules = Arc::new(rules.clone());
         self.permission_rules = rules;
         self
+    }
+
+    /// O `tool_use` como o `normalizeContentFromAPI` do CLI o grava: input
+    /// objeto de uma tool registrada passa pelo `normalizeToolInput` dela;
+    /// o resto fica como veio.
+    pub fn normalize_tool_input(&self, name: &str, input: Value) -> Value {
+        match self.registry.get(name) {
+            Some(tool) if input.is_object() => tool.normalize_input(input, &self.context),
+            _ => input,
+        }
+    }
+
+    /// `normalizeToolInputForAPI`: o input do `tool_use` gravado como ele
+    /// volta à API no histórico.
+    pub fn normalize_tool_input_for_api(&self, name: &str, input: Value) -> Value {
+        match self.registry.get(name) {
+            Some(tool) => tool.normalize_input_for_api(input),
+            None => input,
+        }
     }
 
     /// Máximo de tools concorrentes num grupo safe, o mesmo teto do CLI
@@ -908,10 +1015,22 @@ impl ToolExecutor {
     ) -> Vec<(bool, Vec<crate::api::streaming::ToolUseBlock>)> {
         let mut groups: Vec<(bool, Vec<crate::api::streaming::ToolUseBlock>)> = Vec::new();
         for tu in tool_uses {
+            // `partitionToolCalls`: tool inexistente ou input que não passa
+            // no schema (o `safeParse`) não é seguro; o resto pergunta à tool
+            // com o input já preprocessado.
             let safe = self
                 .registry
                 .get(&tu.name)
-                .map(|t| t.is_concurrency_safe())
+                .map(|t| {
+                    let input = t.preprocess_input(tu.input.clone());
+                    let schema = if t.is_mcp() {
+                        serde_json::json!({"type": "object"})
+                    } else {
+                        t.input_schema()
+                    };
+                    crate::tools::schema_validation::validate_input(&input, &schema).is_empty()
+                        && t.is_concurrency_safe(&input)
+                })
                 .unwrap_or(false);
             match groups.last_mut() {
                 Some((last_safe, run)) if *last_safe == safe => run.push(tu),
@@ -1275,6 +1394,14 @@ impl ToolExecutor {
                     &tool_use,
                 )
                 .await;
+        }
+        // O que segue (hooks, `can_use_tool`, execução) recebe o
+        // `parsedInput.data` do zod, cujas chaves de primeiro nível saem na
+        // ordem do schema (medido no CLI 2.1.90: o WebFetch pedido com
+        // `{prompt, url}` chega ao `can_use_tool` como `{url, prompt}`). Tool
+        // MCP é `passthrough` sem shape: a ordem do modelo fica.
+        if !tool.is_mcp() {
+            tool_use.input = zod_output_order(std::mem::take(&mut tool_use.input), &schema);
         }
 
         // ── validateInput da tool.
@@ -1674,7 +1801,7 @@ mod tests {
                 "properties": {},
             })
         }
-        fn is_concurrency_safe(&self) -> bool {
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
             self.concurrent
         }
         async fn execute(&self, _input: Value, _ctx: &ToolContext) -> ToolResult {

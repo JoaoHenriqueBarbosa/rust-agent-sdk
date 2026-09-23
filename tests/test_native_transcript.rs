@@ -149,6 +149,8 @@ struct Spec {
     fork: bool,
     store: Option<Arc<InMemorySessionStore>>,
     tools: bool,
+    /// As builtins da sessão (vazio: nenhuma).
+    builtins: Vec<String>,
 }
 
 struct Fixture {
@@ -224,7 +226,7 @@ fn options(spec: &Spec, api: &MockApi, config_dir: &Path, cwd: &Path) -> ClaudeA
         max_turns: Some(10),
         resume: spec.resume.clone(),
         fork_session: spec.fork,
-        tools: Some(ToolsConfig::List(Vec::new())),
+        tools: Some(ToolsConfig::List(spec.builtins.clone())),
         permission_mode: Some(PermissionMode::BypassPermissions),
         strict_mcp_config: true,
         ..Default::default()
@@ -487,6 +489,167 @@ async fn the_mirror_carries_exactly_the_entries_written_to_disk() {
         .expect("load")
         .expect("entradas espelhadas");
     assert_eq!(mirrored, on_disk);
+}
+
+/// Uma resposta com uma chamada de tool.
+fn sse_tool(message_id: &str, tool_use_id: &str, name: &str, input: &Value) -> String {
+    sse_events(&[
+        json!({"type":"message_start","message":{"id":message_id,"type":"message","role":"assistant","model":"mock-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":1}}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":tool_use_id,"name":name,"input":{}}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":input.to_string()}}),
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":5}}),
+        json!({"type":"message_stop"}),
+    ])
+}
+
+/// Lacuna 7: como o `runAgent` do CLI (medido no 2.1.90), cada subagente
+/// grava o próprio sidechain em `<sessão>/subagents/agent-<id>.jsonl`, com
+/// `isSidechain: true`, o `agentId` depois do `promptId`, o prompt inicial
+/// como string e a cadeia de `parentUuid`; o `agent-<id>.meta.json` leva o
+/// tipo e a descrição; e o `SessionStore` recebe as mesmas entradas no
+/// `subpath` `subagents/agent-<id>`. O transcript principal não recebe nada
+/// do subagente.
+#[tokio::test]
+async fn each_subagent_records_its_sidechain_and_mirrors_it_to_the_store() {
+    let api = MockApi::start(vec![
+        sse_tool(
+            "msg_main_1",
+            "toolu_agent",
+            "Agent",
+            &json!({"description": "desc", "prompt": "faça", "subagent_type": "general-purpose"}),
+        ),
+        sse_tool(
+            "msg_sub_1",
+            "toolu_sub",
+            "Bash",
+            &json!({"command": "echo sub"}),
+        ),
+        sse_text("msg_sub_2", "sub pronto"),
+        sse_text("msg_main_2", "fim"),
+    ])
+    .await;
+    let store = Arc::new(InMemorySessionStore::new());
+    let mut fx = fixture(
+        Spec {
+            store: Some(Arc::clone(&store)),
+            builtins: vec!["Agent".to_string(), "Bash".to_string()],
+            ..Default::default()
+        },
+        &api,
+    );
+    let messages = run(&mut fx, "delegue").await;
+    let session_id = session_id_of(&messages);
+
+    let subagents = fx.project_dir().join(&session_id).join("subagents");
+    let mut files: Vec<String> = std::fs::read_dir(&subagents)
+        .unwrap_or_else(|e| panic!("sem {}: {e}", subagents.display()))
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    files.sort();
+    assert_eq!(files.len(), 2, "{files:?}");
+    let agent_id = files[0]
+        .strip_prefix("agent-")
+        .and_then(|f| f.strip_suffix(".jsonl"))
+        .expect("agent-<id>.jsonl")
+        .to_string();
+    assert_eq!(files[1], format!("agent-{agent_id}.meta.json"));
+    assert!(
+        agent_id.starts_with('a') && agent_id.len() == 17,
+        "o id do createAgentId: {agent_id}"
+    );
+    let meta: Value =
+        serde_json::from_str(&std::fs::read_to_string(subagents.join(&files[1])).expect("meta"))
+            .expect("meta JSON");
+    assert_eq!(
+        meta.to_string(),
+        r#"{"agentType":"general-purpose","description":"desc"}"#
+    );
+
+    let sidechain = read_jsonl(&subagents.join(&files[0]));
+    let types: Vec<&str> = sidechain
+        .iter()
+        .map(|e| e["type"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(types, vec!["user", "assistant", "user", "assistant"]);
+    let main = fx.transcript(&session_id);
+    let prompt_id = of_type(&main, "user")[0]["promptId"].clone();
+    assert!(prompt_id.is_string());
+    let first = &sidechain[0];
+    assert_eq!(
+        keys(first),
+        vec![
+            "parentUuid",
+            "isSidechain",
+            "promptId",
+            "agentId",
+            "type",
+            "message",
+            "uuid",
+            "timestamp",
+            "userType",
+            "entrypoint",
+            "cwd",
+            "sessionId",
+            "version",
+            "gitBranch",
+        ]
+    );
+    assert_eq!(first["parentUuid"], Value::Null);
+    assert_eq!(first["message"]["content"], "faça");
+    assert_eq!(first["promptId"], prompt_id);
+    assert_eq!(first["sessionId"], session_id.as_str());
+    let assistant_keys = keys(&sidechain[1]);
+    assert_eq!(
+        &assistant_keys[..4],
+        &["parentUuid", "isSidechain", "agentId", "message"]
+    );
+    for (i, entry) in sidechain.iter().enumerate() {
+        assert_eq!(entry["isSidechain"], true);
+        assert_eq!(entry["agentId"], agent_id.as_str());
+        if i > 0 {
+            assert_eq!(
+                entry["parentUuid"],
+                sidechain[i - 1]["uuid"],
+                "cadeia na {i}"
+            );
+        }
+    }
+    assert_eq!(sidechain[2]["promptId"], prompt_id);
+    assert_eq!(
+        sidechain[2]["sourceToolAssistantUUID"],
+        sidechain[1]["uuid"]
+    );
+    // O último bloco leva o `stop_reason` do `message_delta`.
+    assert_eq!(sidechain[3]["message"]["stop_reason"], "end_turn");
+
+    // O transcript principal não tem entrada de sidechain.
+    assert!(main.iter().all(|e| e["isSidechain"] != true));
+
+    // O espelho no `SessionStore`: as mesmas entradas no subpath do agente.
+    let project_key = fx
+        .project_dir()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let key = prana::SessionKey {
+        project_key: project_key.clone(),
+        session_id: session_id.clone(),
+        subpath: Some(format!("subagents/agent-{agent_id}")),
+    };
+    let mirrored = store
+        .load(&key)
+        .await
+        .expect("load")
+        .expect("sidechain espelhado");
+    assert_eq!(mirrored, sidechain);
+    let main_mirrored = store
+        .load(&prana::SessionKey::new(project_key, session_id))
+        .await
+        .expect("load")
+        .expect("principal espelhado");
+    assert_eq!(main_mirrored, main);
 }
 
 // ---------------------------------------------------------------------------

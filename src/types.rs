@@ -220,7 +220,8 @@ pub struct ToolPermissionContext {
 pub struct PermissionResultAllow {
     #[serde(default = "default_allow_behavior")]
     pub behavior: String,
-    pub updated_input: Option<HashMap<String, serde_json::Value>>,
+    /// O input reescrito, na ordem de chaves em que foi montado.
+    pub updated_input: Option<serde_json::Map<String, serde_json::Value>>,
     pub updated_permissions: Option<Vec<PermissionUpdate>>,
 }
 
@@ -503,10 +504,15 @@ pub struct HookContext {
 }
 
 /// Can-use-tool permission callback type.
+///
+/// O input chega como `serde_json::Map` (ordenado, com o `preserve_order`),
+/// com as chaves na ordem em que o `can_use_tool` as trouxe: um `HashMap`
+/// embaralhava a ordem, e quem repassa o input adiante (um formulário do
+/// AskUserQuestion no front, por exemplo) recebia as chaves fora de ordem.
 pub type CanUseToolFn = Arc<
     dyn Fn(
             String,
-            HashMap<String, serde_json::Value>,
+            serde_json::Map<String, serde_json::Value>,
             ToolPermissionContext,
         ) -> Pin<Box<dyn Future<Output = PermissionResult> + Send>>
         + Send

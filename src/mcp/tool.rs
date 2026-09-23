@@ -90,7 +90,7 @@ impl Tool for McpTool {
         self.input_schema.clone()
     }
 
-    fn is_concurrency_safe(&self) -> bool {
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         // Port: isConcurrencySafe da MCPTool do CLI é o `readOnlyHint` da
         // anotação; sem anotação, a tool roda em série.
         self.read_only

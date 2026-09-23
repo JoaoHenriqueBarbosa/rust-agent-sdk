@@ -345,7 +345,7 @@ impl Tool for EnterWorktreeTool {
         if store.worktree_session().is_some() {
             return ToolResult::error("Already in a worktree session");
         }
-        let cwd = context.working_directory.clone();
+        let cwd = context.cwd();
         let repo_root = match find_canonical_git_root(&cwd).await {
             Some(root) => root,
             None => {

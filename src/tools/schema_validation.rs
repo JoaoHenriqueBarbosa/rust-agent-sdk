@@ -62,6 +62,12 @@ fn number_value(n: f64) -> Value {
     }
 }
 
+/// Um número do JS como valor JSON: inteiro quando não tem parte
+/// fracionária, como o `JSON.stringify` o escreveria.
+pub fn js_number_value(n: f64) -> Value {
+    number_value(n)
+}
+
 fn too_small(origin: &str, minimum: f64, inclusive: bool, path: &[Value]) -> SchemaIssue {
     let op = if inclusive { ">=" } else { ">" };
     let message = match origin {

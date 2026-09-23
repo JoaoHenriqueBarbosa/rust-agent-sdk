@@ -1107,7 +1107,7 @@ async fn read(input: Value, ctx: &ToolContext) -> ToolResult {
         .to_lowercase()
         .trim_start_matches('.')
         .to_string();
-    let full = expand_path(&file_path, &ctx.working_directory);
+    let full = expand_path(&file_path, &ctx.cwd());
 
     // Releitura do mesmo recorte de um arquivo que não mudou: o stub.
     if let Some(existing) = ctx.file_state.get(&full) {
@@ -1155,7 +1155,7 @@ async fn read(input: Value, ctx: &ToolContext) -> ToolResult {
                     Err(ReadError::NotFound) => {}
                 }
             }
-            let cwd: PathBuf = ctx.working_directory.clone();
+            let cwd: PathBuf = ctx.cwd();
             let mut message = format!(
                 "File does not exist. {FILE_NOT_FOUND_CWD_NOTE} {}.",
                 cwd.to_string_lossy()
@@ -1192,11 +1192,18 @@ fn validate(input: &Value, ctx: &ToolContext) -> Result<(), String> {
             ));
         }
     }
+    if crate::tools::permission::path_denied_by_rules(
+        &expand_path(file_path, &ctx.cwd()),
+        ctx,
+        crate::tools::permission::PathRuleKind::Read,
+    ) {
+        return Err(crate::tools::permission::DENIED_BY_PERMISSION_SETTINGS.to_string());
+    }
     let raw = file_path.trim();
     if raw.starts_with("\\\\") || raw.starts_with("//") {
         return Ok(());
     }
-    let full = expand_path(file_path, &ctx.working_directory)
+    let full = expand_path(file_path, &ctx.cwd())
         .to_string_lossy()
         .to_string();
     let ext = js_extname(&full).to_lowercase();
@@ -1232,7 +1239,7 @@ fn preprocess(mut input: Value) -> Value {
 fn permission_path(input: &Value, ctx: &ToolContext) -> String {
     match input.get("file_path").and_then(Value::as_str) {
         Some(p) if !p.is_empty() => p.to_string(),
-        _ => ctx.working_directory.to_string_lossy().to_string(),
+        _ => ctx.cwd().to_string_lossy().to_string(),
     }
 }
 
@@ -1250,7 +1257,7 @@ impl Tool for FileReadTool {
         input_schema()
     }
 
-    fn is_concurrency_safe(&self) -> bool {
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         true
     }
 
@@ -1299,7 +1306,7 @@ impl Tool for ModelScopedFileReadTool {
         input_schema()
     }
 
-    fn is_concurrency_safe(&self) -> bool {
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         true
     }
 

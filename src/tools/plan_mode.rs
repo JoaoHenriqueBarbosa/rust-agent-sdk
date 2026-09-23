@@ -227,7 +227,7 @@ impl Tool for EnterPlanModeTool {
         })
     }
 
-    fn is_concurrency_safe(&self) -> bool {
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         true
     }
 
@@ -324,6 +324,39 @@ impl Tool for ExitPlanModeTool {
         "ExitPlanMode"
     }
 
+    /// `normalizeToolInput` do ExitPlanMode: com um plano no arquivo de
+    /// plano (`getPlan`), o input ganha `plan` e `planFilePath`.
+    fn normalize_input(&self, input: Value, context: &ToolContext) -> Value {
+        let path = plan_file_path(context);
+        let Ok(plan) = std::fs::read_to_string(&path) else {
+            return input;
+        };
+        let Value::Object(mut map) = input else {
+            return input;
+        };
+        map.insert("plan".into(), Value::String(plan));
+        map.insert(
+            "planFilePath".into(),
+            Value::String(path.to_string_lossy().to_string()),
+        );
+        Value::Object(map)
+    }
+
+    /// `normalizeToolInputForAPI`: o `plan` e o `planFilePath` injetados não
+    /// voltam à API.
+    fn normalize_input_for_api(&self, input: Value) -> Value {
+        match input {
+            Value::Object(mut map)
+                if map.contains_key("plan") || map.contains_key("planFilePath") =>
+            {
+                map.shift_remove("plan");
+                map.shift_remove("planFilePath");
+                Value::Object(map)
+            }
+            other => other,
+        }
+    }
+
     fn description(&self) -> &str {
         EXIT_PLAN_MODE_PROMPT
     }
@@ -332,7 +365,7 @@ impl Tool for ExitPlanModeTool {
         exit_plan_mode_schema()
     }
 
-    fn is_concurrency_safe(&self) -> bool {
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         true
     }
 

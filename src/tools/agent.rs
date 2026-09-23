@@ -1276,7 +1276,7 @@ impl Tool for AgentTool {
         self.schema.clone()
     }
 
-    fn is_concurrency_safe(&self) -> bool {
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         true
     }
 

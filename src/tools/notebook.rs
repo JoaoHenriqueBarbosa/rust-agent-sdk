@@ -52,7 +52,7 @@ fn full_path(raw: &str, ctx: &ToolContext) -> std::path::PathBuf {
     if p.is_absolute() {
         p.to_path_buf()
     } else {
-        crate::tools::file_state::normalize_path(&ctx.working_directory.join(p))
+        crate::tools::file_state::normalize_path(&ctx.cwd().join(p))
     }
 }
 

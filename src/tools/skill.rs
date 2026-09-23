@@ -233,6 +233,9 @@ pub struct SkillCommand {
     pub argument_names: Vec<String>,
     pub model: Option<String>,
     pub disable_model_invocation: bool,
+    /// `user-invocable` do frontmatter (ausente vale `true`): o `init` só
+    /// anuncia em `skills` e `slash_commands` quem não o desliga.
+    pub user_invocable: bool,
     /// `context: fork`: o skill roda num subagente.
     pub fork_context: bool,
     /// O skill tem hooks no frontmatter (propriedade que o JS não considera
@@ -331,6 +334,12 @@ fn load_skill(dir: &Path) -> Option<SkillCommand> {
             .get("disable-model-invocation")
             .and_then(Value::as_str)
             == Some("true"),
+        // `parseBooleanFrontmatter` de `skills/loadSkillsDir.js`: só `true`
+        // ou `"true"` ligam; presente com outro valor, desliga.
+        user_invocable: match frontmatter.get("user-invocable") {
+            None => true,
+            Some(value) => matches!(value, Value::Bool(true)) || value.as_str() == Some("true"),
+        },
         fork_context: frontmatter.get("context").and_then(Value::as_str) == Some("fork"),
         has_hooks: frontmatter
             .get("hooks")
@@ -670,7 +679,7 @@ async fn run_embedded_commands(
         let mut cmd = tokio::process::Command::new("bash");
         cmd.arg("-c")
             .arg(&command)
-            .current_dir(&context.working_directory)
+            .current_dir(context.cwd())
             .stdin(std::process::Stdio::null());
         context.prepare_child_env(&mut cmd);
         let output = cmd.output().await.map_err(|e| format!("[Error]\n{e}"))?;
@@ -930,6 +939,7 @@ mod tests {
             argument_names: vec![],
             model: None,
             disable_model_invocation: false,
+            user_invocable: true,
             fork_context: false,
             has_hooks: false,
             conditional: false,

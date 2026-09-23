@@ -166,7 +166,7 @@ mod test_tool_permission_callbacks {
             }
         });
 
-        let mut updated_input = HashMap::new();
+        let mut updated_input = serde_json::Map::new();
         updated_input.insert("file_path".to_string(), json!("/etc/passwd"));
         updated_input.insert("safe_mode".to_string(), json!(true));
 

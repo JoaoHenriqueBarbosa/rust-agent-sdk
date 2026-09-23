@@ -1004,7 +1004,7 @@ macro_rules! web_fetch_tool_impl {
                 input_schema()
             }
 
-            fn is_concurrency_safe(&self) -> bool {
+            fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
                 true
             }
 

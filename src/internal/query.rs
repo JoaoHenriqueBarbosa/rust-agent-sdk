@@ -655,10 +655,12 @@ impl ControlHandlers {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        let input: HashMap<String, serde_json::Value> = request_data
+                        // `Map` ordenado: as chaves chegam ao callback na
+                        // ordem do `can_use_tool`.
+                        let input: serde_json::Map<String, serde_json::Value> = request_data
                             .get("input")
                             .and_then(|v| v.as_object())
-                            .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                            .cloned()
                             .unwrap_or_default();
                         let original_input =
                             request_data.get("input").cloned().unwrap_or(json!({}));
