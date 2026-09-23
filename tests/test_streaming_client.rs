@@ -638,6 +638,7 @@ async fn test_concurrent_send_receive() {
 
 /// Test query with async iterable of messages.
 #[tokio::test]
+#[ignore = "requires the real claude CLI (>= 2.0.0) on PATH, logged in"]
 async fn test_query_with_async_iterable() {
     // In Python this uses query() with an async iterable and a mocked subprocess.
     // In Rust we test the query function directly.

@@ -541,13 +541,12 @@ impl Tool for TaskOutputTool {
             return ToolResult::error(format!("No task found with ID: {id}"));
         };
         let finished = |s: &BackgroundSnapshot| s.status != "running" && s.status != "pending";
-        let retrieval_status;
-        if !block {
-            retrieval_status = if finished(&snapshot) {
+        let retrieval_status = if !block {
+            if finished(&snapshot) {
                 "success"
             } else {
                 "not_ready"
-            };
+            }
         } else {
             let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
             loop {
@@ -572,12 +571,12 @@ impl Tool for TaskOutputTool {
                     }
                 }
             }
-            retrieval_status = if finished(&snapshot) {
+            if finished(&snapshot) {
                 "success"
             } else {
                 "timeout"
-            };
-        }
+            }
+        };
         let task = task_output_data(&snapshot).await;
         let data = json!({"retrieval_status": retrieval_status, "task": task});
         let mut for_text = data.clone();
