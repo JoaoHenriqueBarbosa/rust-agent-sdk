@@ -1276,6 +1276,15 @@ impl Tool for AgentTool {
         self.schema.clone()
     }
 
+    /// O schema do JS é `z.object` (o `baseInputSchema` de
+    /// `tools/AgentTool/AgentTool/init_AgentTool.js`, não estrito): chaves
+    /// extras somem no parse em vez de recusar a chamada. O schema enviado
+    /// continua com `additionalProperties: false`, como o do CLI.
+    fn preprocess_input(&self, mut input: Value) -> Value {
+        crate::tools::schema_validation::strip_unknown_keys(&mut input, &self.schema);
+        input
+    }
+
     fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         true
     }

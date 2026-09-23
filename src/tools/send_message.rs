@@ -36,6 +36,13 @@ impl Tool for SendMessageTool {
         })
     }
 
+    /// O schema do JS é `z.object` (`tools/SendMessageTool/SendMessageTool.js`,
+    /// não estrito): chaves extras somem no parse.
+    fn preprocess_input(&self, mut input: serde_json::Value) -> serde_json::Value {
+        crate::tools::schema_validation::strip_unknown_keys(&mut input, &self.input_schema());
+        input
+    }
+
     async fn execute(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
         let _input: SendMessageInput = match serde_json::from_value(input) {
             Ok(i) => i,

@@ -130,6 +130,65 @@ pub fn locale_compare(a: &str, b: &str) -> std::cmp::Ordering {
     a.len().cmp(&b.len())
 }
 
+/// Se a chamada pode rodar junto das vizinhas seguras, como o
+/// `partitionToolCalls` de `services/tools/toolOrchestration.js` e o
+/// `addTool` de `services/tools/StreamingToolExecutor.js` decidem: o input
+/// passa pelo `safeParse` do schema da tool (o preprocess, que inclui o
+/// descarte de chaves dos níveis `z.object`, o schema e os refinamentos) e,
+/// só se passar, a tool responde com o `parsedInput.data`. Input inválido
+/// não é seguro.
+pub(crate) fn call_is_concurrency_safe(tool: &dyn Tool, input: &Value) -> bool {
+    let input = tool.preprocess_input(input.clone());
+    // Tool MCP: `z.object({}).passthrough()`, que só exige um objeto.
+    let schema = if tool.is_mcp() {
+        serde_json::json!({"type": "object"})
+    } else {
+        tool.input_schema()
+    };
+    if !crate::tools::schema_validation::validate_input(&input, &schema).is_empty()
+        || !tool.refine_input(&input).is_empty()
+    {
+        return false;
+    }
+    let input = if tool.is_mcp() {
+        input
+    } else {
+        zod_output_order(input, &schema)
+    };
+    tool.is_concurrency_safe(&input)
+}
+
+/// O `parseInt(valor, 10) || 10` do `getMaxToolUseConcurrency`: o inteiro do
+/// começo do texto (espaços antes e sinal aceitos, o resto ignorado), e 10
+/// quando não há número ou ele é zero. Negativo, no JS, faz o `all3` não
+/// começar nenhuma tool do grupo, e os `tool_use` ficariam sem resultado; o
+/// SDK não reproduz isso e usa o default também aí.
+fn max_tool_use_concurrency_from(raw: Option<&str>) -> usize {
+    const DEFAULT: usize = 10;
+    let Some(raw) = raw else {
+        return DEFAULT;
+    };
+    let text = raw.trim_start();
+    let (negative, digits) = match text.as_bytes().first() {
+        Some(b'-') => (true, &text[1..]),
+        Some(b'+') => (false, &text[1..]),
+        _ => (false, text),
+    };
+    let digits: &str = &digits[..digits
+        .bytes()
+        .position(|b| !b.is_ascii_digit())
+        .unwrap_or(digits.len())];
+    if digits.is_empty() || negative {
+        return DEFAULT;
+    }
+    match digits.parse::<usize>() {
+        Ok(0) => DEFAULT,
+        Ok(n) => n,
+        // Mais dígitos do que cabe: na prática, sem teto.
+        Err(_) => usize::MAX,
+    }
+}
+
 /// A ordem das chaves de primeiro nível que o `parse` de um `z.object` do
 /// zod devolve: as do shape (as `properties` do schema), na ordem do shape,
 /// e depois as que o shape não conhece, na ordem em que vieram. Input que
@@ -1000,9 +1059,21 @@ impl ToolExecutor {
         }
     }
 
-    /// Máximo de tools concorrentes num grupo safe, o mesmo teto do CLI
-    /// (CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY default).
-    const MAX_TOOL_CONCURRENCY: usize = 10;
+    /// Máximo de tools concorrentes num grupo safe: o
+    /// `getMaxToolUseConcurrency` de `services/tools/toolOrchestration.js`,
+    /// `parseInt(CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY) || 10`. O env do
+    /// processo do CLI é o `options.env` da sessão, que o executor carrega
+    /// em `extra_env`; sem ele, vale o env do processo que embute o SDK.
+    fn max_tool_use_concurrency(&self) -> usize {
+        const KEY: &str = "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY";
+        let raw = self
+            .context
+            .extra_env
+            .get(KEY)
+            .cloned()
+            .or_else(|| std::env::var(KEY).ok());
+        max_tool_use_concurrency_from(raw.as_deref())
+    }
 
     /// Agrupa os tool_uses em RUNS CONTÍGUAS de mesma classificação,
     /// preservando a ordem que o modelo pediu, como o partitionToolCalls do
@@ -1021,16 +1092,7 @@ impl ToolExecutor {
             let safe = self
                 .registry
                 .get(&tu.name)
-                .map(|t| {
-                    let input = t.preprocess_input(tu.input.clone());
-                    let schema = if t.is_mcp() {
-                        serde_json::json!({"type": "object"})
-                    } else {
-                        t.input_schema()
-                    };
-                    crate::tools::schema_validation::validate_input(&input, &schema).is_empty()
-                        && t.is_concurrency_safe(&input)
-                })
+                .map(|t| call_is_concurrency_safe(t, &tu.input))
                 .unwrap_or(false);
             match groups.last_mut() {
                 Some((last_safe, run)) if *last_safe == safe => run.push(tu),
@@ -1053,7 +1115,7 @@ impl ToolExecutor {
                 // resultados saírem na ordem pedida.
                 let mut stream =
                     futures::stream::iter(run.into_iter().map(|tu| self.execute_one(tu)))
-                        .buffered(Self::MAX_TOOL_CONCURRENCY);
+                        .buffered(self.max_tool_use_concurrency());
                 while let Some(result) = stream.next().await {
                     results.push(result);
                 }
@@ -1079,7 +1141,7 @@ impl ToolExecutor {
             for (safe, run) in self.contiguous_groups(tool_uses) {
                 if safe {
                     let mut stream = futures::stream::iter(run.into_iter().map(|tu| self.execute_one(tu)))
-                        .buffered(Self::MAX_TOOL_CONCURRENCY);
+                        .buffered(self.max_tool_use_concurrency());
                     while let Some(result) = stream.next().await {
                         yield result;
                     }
@@ -2428,5 +2490,88 @@ mod tests {
             .execute_all(vec![tool_use("t1", "Empty", serde_json::json!({}))])
             .await;
         assert_eq!(text_of(&results[0]), "(Empty completed with no output)");
+    }
+
+    /// O `parseInt(CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY, 10) || 10` do
+    /// `getMaxToolUseConcurrency`.
+    #[test]
+    fn max_tool_use_concurrency_parses_like_parse_int() {
+        assert_eq!(max_tool_use_concurrency_from(None), 10);
+        assert_eq!(max_tool_use_concurrency_from(Some("")), 10);
+        assert_eq!(max_tool_use_concurrency_from(Some("abc")), 10);
+        assert_eq!(max_tool_use_concurrency_from(Some("0")), 10);
+        assert_eq!(max_tool_use_concurrency_from(Some("3")), 3);
+        assert_eq!(max_tool_use_concurrency_from(Some("  4x")), 4);
+        assert_eq!(max_tool_use_concurrency_from(Some("+2")), 2);
+        assert_eq!(max_tool_use_concurrency_from(Some("-2")), 10);
+    }
+
+    /// Conta quantas execuções estão em curso ao mesmo tempo.
+    struct OverlapTool {
+        running: Arc<std::sync::atomic::AtomicUsize>,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for OverlapTool {
+        fn name(&self) -> &str {
+            "Overlap"
+        }
+        fn description(&self) -> &str {
+            "mede sobreposição"
+        }
+        fn input_schema(&self) -> Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+            true
+        }
+        async fn execute(&self, _input: Value, _ctx: &ToolContext) -> ToolResult {
+            use std::sync::atomic::Ordering;
+            let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            self.running.fetch_sub(1, Ordering::SeqCst);
+            ToolResult::text("ok")
+        }
+    }
+
+    async fn peak_overlap(env: &[(&str, &str)]) -> usize {
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(OverlapTool {
+            running: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            peak: Arc::clone(&peak),
+        }));
+        let ctx = ToolContext {
+            permission_mode: PermissionMode::BypassPermissions,
+            extra_env: env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..Default::default()
+        };
+        let executor = ToolExecutor::new(reg, ctx);
+        let calls = (0..4)
+            .map(|i| tool_use(&format!("t{i}"), "Overlap", serde_json::json!({})))
+            .collect();
+        let results = executor.execute_all(calls).await;
+        assert_eq!(results.len(), 4);
+        peak.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// O teto do grupo seguro vem do `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY`
+    /// do env da sessão, como o `runToolsConcurrently` o lê do env do CLI.
+    #[tokio::test]
+    async fn safe_group_concurrency_follows_the_session_env() {
+        assert_eq!(peak_overlap(&[]).await, 4);
+        assert_eq!(
+            peak_overlap(&[("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY", "2")]).await,
+            2
+        );
+        assert_eq!(
+            peak_overlap(&[("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY", "1")]).await,
+            1
+        );
     }
 }

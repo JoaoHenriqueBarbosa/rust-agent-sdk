@@ -584,6 +584,144 @@ async fn subagent_permission_requests_carry_its_agent_id() {
     }
 }
 
+/// Resposta com dois `tool_use` do Agent na mesma mensagem.
+fn sse_two_agent_calls(first: &Value, second: &Value) -> String {
+    let mut events = vec![
+        json!({"type":"message_start","message":{"id":"msg_two","model":"mock-model","role":"assistant","usage":{"input_tokens":20,"output_tokens":0}}}),
+    ];
+    for (index, (id, input)) in [("toolu_agent_a", first), ("toolu_agent_b", second)]
+        .into_iter()
+        .enumerate()
+    {
+        events.push(json!({"type":"content_block_start","index":index,"content_block":{"type":"tool_use","id":id,"name":"Agent"}}));
+        events.push(json!({"type":"content_block_delta","index":index,"delta":{"type":"input_json_delta","partial_json":input.to_string()}}));
+        events.push(json!({"type":"content_block_stop","index":index}));
+    }
+    events.push(json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":8}}));
+    events.push(json!({"type":"message_stop"}));
+    sse_events(&events)
+}
+
+/// MockApi que atende cada conexão numa tarefa própria e só responde a um
+/// subagente quando os DOIS já fizeram o pedido: se os subagentes rodassem em
+/// série, o primeiro esperaria em vão e responderia `sozinho`. A thread
+/// principal é reconhecida pelo prompt do usuário.
+async fn start_parallel_agents_api() -> MockApi {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = format!("http://{}", listener.local_addr().expect("addr"));
+    let requests: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&requests);
+    let (arrived_tx, arrived_rx) = tokio::sync::watch::channel(0usize);
+    let arrived_tx = Arc::new(arrived_tx);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let captured = Arc::clone(&captured);
+            let arrived_tx = Arc::clone(&arrived_tx);
+            let mut arrived_rx = arrived_rx.clone();
+            tokio::spawn(async move {
+                let body = read_http_request(&mut socket).await.unwrap_or(Value::Null);
+                captured.lock().await.push(body.clone());
+                let text = body.to_string();
+                let sse = if text.contains("delegue as duas") {
+                    if text.contains("tool_result") {
+                        sse_text("pronto")
+                    } else {
+                        sse_two_agent_calls(
+                            &json!({"description": "parte A", "prompt": "tarefa A", "bogus": 1}),
+                            &json!({"description": "parte B", "prompt": "tarefa B"}),
+                        )
+                    }
+                } else if let Some(label) = ["tarefa A", "tarefa B"]
+                    .into_iter()
+                    .find(|label| text.contains(label))
+                {
+                    arrived_tx.send_modify(|n| *n += 1);
+                    let together = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        arrived_rx.wait_for(|n| *n >= 2),
+                    )
+                    .await
+                    .is_ok();
+                    let suffix = &label[label.len() - 1..];
+                    if together {
+                        sse_text(&format!("feito {suffix}"))
+                    } else {
+                        sse_text(&format!("sozinho {suffix}"))
+                    }
+                } else {
+                    sse_text("ok")
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{sse}"
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+    MockApi { addr, requests }
+}
+
+/// O `isConcurrencySafe` do AgentTool é `true` no JS, e o
+/// `runToolsConcurrently` (`services/tools/toolOrchestration.js`) roda os
+/// subagentes do mesmo turno juntos. O mock só responde quando os dois já
+/// pediram, então só passa com execução concorrente de verdade. De quebra, o
+/// `z.object` do Agent descarta a chave desconhecida: o `can_use_tool` recebe
+/// o input sem ela.
+#[tokio::test]
+async fn subagents_of_the_same_turn_run_concurrently() {
+    let api = start_parallel_agents_api().await;
+    let mut s = session(
+        Spec {
+            tools: Some(vec!["Agent".to_string()]),
+            ..Default::default()
+        },
+        &api,
+    );
+
+    let turn = run_turn(&mut s, "delegue as duas partes", allow).await;
+    assert_eq!(turn.result()["subtype"], "success", "{:?}", turn.frames);
+
+    let results: Vec<(String, String)> = turn
+        .user_frames()
+        .iter()
+        .flat_map(|frame| {
+            frame["message"]["content"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter(|block| block["type"] == "tool_result")
+        .map(|block| {
+            (
+                block["tool_use_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                block["content"].to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert_eq!(results[0].0, "toolu_agent_a");
+    assert!(results[0].1.contains("feito A"), "{results:?}");
+    assert_eq!(results[1].0, "toolu_agent_b");
+    assert!(results[1].1.contains("feito B"), "{results:?}");
+
+    let asked: Vec<&Value> = turn
+        .permission_requests
+        .iter()
+        .filter(|r| r["tool_name"] == "Agent")
+        .collect();
+    assert_eq!(asked.len(), 2, "{:?}", turn.permission_requests);
+    assert!(asked
+        .iter()
+        .all(|r| r["input"].get("bogus").is_none() && r["input"]["prompt"].is_string()));
+}
+
 // ---------------------------------------------------------------------------
 // Chamada de modelo das tools
 // ---------------------------------------------------------------------------

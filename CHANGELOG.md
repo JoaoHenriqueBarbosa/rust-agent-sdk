@@ -5,6 +5,42 @@ Versões ainda não publicadas ficam em `Unreleased`.
 
 ## [Unreleased]
 
+### Mudado: subagentes em paralelo, `StreamingToolExecutor` e chaves desconhecidas
+
+- **Subagentes do mesmo turno rodam juntos.** O `Agent` do transporte nativo
+  passa a ser seguro para concorrência, como o `isConcurrencySafe` do
+  AgentTool do JS (`tools/AgentTool/AgentTool/init_AgentTool.js`), e vários
+  `Agent` seguidos da mesma resposta rodam no grupo concorrente do
+  `runToolsConcurrently` (`services/tools/toolOrchestration.js`). Cada
+  subagente tem o próprio `agent_id`, loop e sidechain; cwd, task store,
+  abort e callback de permissão continuam os do pai. O teto do grupo agora é
+  o `getMaxToolUseConcurrency` do JS: `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY`
+  do `options.env` (ou do env do processo), com o `parseInt(...) || 10`.
+- **`StreamingToolExecutor` fica fora do transporte nativo, como no CLI.** Em
+  `query.js` ele só existe com o gate `streamingToolExecution`, que o
+  `buildQueryConfig` de `query/config.js` fixa em `false`; o tipo continua
+  público e documenta isso. O `add_tool` agora valida o input no schema antes
+  de perguntar `is_concurrency_safe`, como o `addTool` de
+  `services/tools/StreamingToolExecutor.js`: input inválido não é seguro. A
+  mesma regra (com os refinamentos do schema) vale no particionamento do
+  `ToolExecutor`.
+- **Chaves desconhecidas: `z.object` descarta, `strictObject` recusa.** O
+  schema enviado ao modelo não muda nas tools com captura do CLI; muda só a
+  validação do input recebido. Descartam em silêncio, e a permissão e a
+  execução recebem o input sem elas: o `Agent` (o do transporte nativo e o
+  `tools::agent::AgentTool`, `baseInputSchema` em
+  `tools/AgentTool/AgentTool/init_AgentTool.js`), o `SendMessage`
+  (`tools/SendMessageTool/SendMessageTool.js`) e os itens de `allowedPrompts`
+  do `ExitPlanMode` (`allowedPromptSchema` em
+  `tools/ExitPlanModeTool/ExitPlanModeV2Tool.js`; a raiz segue
+  `passthrough`). O Skill, o TodoWrite e o AskUserQuestion já descartavam e
+  ganharam teste. Recusam com `InputValidationError`: o `EnterPlanMode`
+  (`strictObject({})` em `tools/EnterPlanModeTool/EnterPlanModeTool.js`,
+  como já fazia) e as tools de tarefa TaskCreate, TaskGet, TaskList e
+  TaskUpdate (`strictObject` em `tools/Task*Tool/*.js`), que aceitavam
+  qualquer chave e agora levam `additionalProperties: false` no schema. API
+  nova: `schema_validation::strip_unknown_keys`.
+
 ## [0.2.0](https://github.com/JoaoHenriqueBarbosa/rust-agent-sdk/compare/v0.1.1...v0.2.0) - 2026-09-23
 
 ### Added

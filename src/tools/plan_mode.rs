@@ -324,6 +324,21 @@ impl Tool for ExitPlanModeTool {
         "ExitPlanMode"
     }
 
+    /// A raiz é `strictObject(...).passthrough()` e fica com as chaves que
+    /// vieram, mas cada item de `allowedPrompts` é o `allowedPromptSchema`,
+    /// um `z.object` (`tools/ExitPlanModeTool/ExitPlanModeV2Tool.js`): as
+    /// chaves desconhecidas do item somem no parse em vez de recusar.
+    fn preprocess_input(&self, mut input: Value) -> Value {
+        let schema = exit_plan_mode_schema();
+        let item_schema = &schema["properties"]["allowedPrompts"]["items"];
+        if let Some(Value::Array(items)) = input.get_mut("allowedPrompts") {
+            for item in items {
+                crate::tools::schema_validation::strip_unknown_keys(item, item_schema);
+            }
+        }
+        input
+    }
+
     /// `normalizeToolInput` do ExitPlanMode: com um plano no arquivo de
     /// plano (`getPlan`), o input ganha `plan` e `planFilePath`.
     fn normalize_input(&self, input: Value, context: &ToolContext) -> Value {

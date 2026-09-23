@@ -403,6 +403,23 @@ pub fn validate_value(
     }
 }
 
+/// O descarte de chaves desconhecidas do `z.object` do zod, num nível só:
+/// se `value` é objeto e `schema` tem `properties`, sai toda chave que o
+/// shape não conhece. Os objetos aninhados ficam como estão, porque cada
+/// nível do zod tem o próprio modo (um `z.object` pode conter um
+/// `strictObject`); a tool aplica o descarte em cada nível `z.object` no
+/// `preprocess_input` dela. O schema que vai à API não muda: o
+/// `z.toJSONSchema` emite `additionalProperties: false` para os dois modos.
+pub fn strip_unknown_keys(value: &mut Value, schema: &Value) {
+    let (Some(object), Some(properties)) = (
+        value.as_object_mut(),
+        schema.get("properties").and_then(Value::as_object),
+    ) else {
+        return;
+    };
+    object.retain(|key, _| properties.contains_key(key));
+}
+
 /// Valida o input inteiro e devolve os issues (vazio = válido).
 pub fn validate_input(input: &Value, schema: &Value) -> Vec<SchemaIssue> {
     let mut issues = Vec::new();

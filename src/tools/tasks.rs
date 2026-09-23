@@ -51,7 +51,10 @@ impl Tool for TaskCreateTool {
                 "description": { "type": "string", "description": "Detailed description" },
                 "activeForm": { "type": "string", "description": "Present-continuous label shown while in progress" }
             },
-            "required": ["subject", "description"]
+            "required": ["subject", "description"],
+            // `strictObject` no JS (`tools/TaskCreateTool/TaskCreateTool.js`):
+            // chave desconhecida recusa a chamada.
+            "additionalProperties": false
         })
     }
 
@@ -105,7 +108,9 @@ impl Tool for TaskGetTool {
         json!({
             "type": "object",
             "properties": { "taskId": { "type": "string" } },
-            "required": ["taskId"]
+            "required": ["taskId"],
+            // `strictObject` no JS (`tools/TaskGetTool/TaskGetTool.js`).
+            "additionalProperties": false
         })
     }
 
@@ -150,7 +155,9 @@ impl Tool for TaskListTool {
         true
     }
     fn input_schema(&self) -> Value {
-        json!({"type": "object", "properties": {}})
+        // `strictObject({})` no JS (`tools/TaskListTool/TaskListTool.js`):
+        // qualquer chave recusa a chamada.
+        json!({"type": "object", "properties": {}, "additionalProperties": false})
     }
 
     async fn check_permissions(
@@ -194,7 +201,9 @@ impl Tool for TaskUpdateTool {
                 "activeForm": { "type": "string" },
                 "owner": { "type": "string" }
             },
-            "required": ["taskId"]
+            "required": ["taskId"],
+            // `strictObject` no JS (`tools/TaskUpdateTool/TaskUpdateTool.js`).
+            "additionalProperties": false
         })
     }
 

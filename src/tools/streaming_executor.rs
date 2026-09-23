@@ -34,6 +34,16 @@ pub struct ToolResultUpdate {
     pub result: ToolResult,
 }
 
+/// Execução de tools durante o streaming da resposta, o
+/// `StreamingToolExecutor` de `services/tools/StreamingToolExecutor.js`.
+///
+/// O transporte nativo NÃO usa este tipo, porque o CLI 2.1.90 também não o
+/// usa: em `query.js` ele só é criado com `config.gates.streamingToolExecution`,
+/// e o `buildQueryConfig` de `query/config.js` fixa esse gate em `false`. As
+/// tools do turno rodam depois da mensagem completa, pelo `runTools` de
+/// `services/tools/toolOrchestration.js` (no SDK, `ToolExecutor::execute_all_stream`).
+/// O tipo continua público para quem monta o próprio loop, e a decisão de
+/// concorrência segue a do JS: input que não passa no schema não é seguro.
 pub struct StreamingToolExecutor {
     tools: Arc<Mutex<Vec<TrackedTool>>>,
     registry: Arc<Vec<Arc<dyn Tool>>>,
@@ -108,9 +118,12 @@ impl StreamingToolExecutor {
             return;
         }
 
+        // O `addTool` do JS: o input passa pelo `safeParse` do schema antes,
+        // e input inválido não é seguro (roda sozinho, e o erro de validação
+        // sai da execução, como no caminho normal).
         let is_safe = tool_def
             .as_ref()
-            .map(|t| t.is_concurrency_safe(&block.input))
+            .map(|t| crate::tools::framework::call_is_concurrency_safe(t.as_ref(), &block.input))
             .unwrap_or(false);
 
         {
@@ -464,5 +477,70 @@ mod tests {
 
         let results = executor.get_remaining_results().await;
         assert!(results.is_empty());
+    }
+
+    /// Tool que se declara segura mas exige `path` no schema.
+    struct StrictSafeTool;
+
+    #[async_trait]
+    impl Tool for StrictSafeTool {
+        fn name(&self) -> &str {
+            "Strict"
+        }
+        fn description(&self) -> &str {
+            "strict"
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": false
+            })
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        async fn execute(&self, _input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+            ToolResult::text("ok")
+        }
+    }
+
+    /// O `addTool` do JS só pergunta `isConcurrencySafe` a um input que
+    /// passou no `safeParse`: sem o campo obrigatório, ou com chave que o
+    /// `strictObject` recusa, a chamada não é segura.
+    #[tokio::test]
+    async fn invalid_input_is_not_concurrency_safe() {
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(StrictSafeTool)];
+        let executor = StreamingToolExecutor::new(tools, ToolContext::default());
+        for (id, input) in [
+            ("valid", serde_json::json!({"path": "a"})),
+            ("missing", serde_json::json!({})),
+            ("extra", serde_json::json!({"path": "a", "x": 1})),
+        ] {
+            executor
+                .add_tool(ToolUseBlock {
+                    id: id.into(),
+                    name: "Strict".into(),
+                    input,
+                })
+                .await;
+        }
+        let safety: Vec<(String, bool)> = executor
+            .tools
+            .lock()
+            .await
+            .iter()
+            .map(|t| (t.id.clone(), t.is_concurrency_safe))
+            .collect();
+        assert_eq!(
+            safety,
+            vec![
+                ("valid".to_string(), true),
+                ("missing".to_string(), false),
+                ("extra".to_string(), false),
+            ]
+        );
+        let _ = executor.get_remaining_results().await;
     }
 }

@@ -3126,6 +3126,24 @@ impl Tool for NativeAgentTool {
         })
     }
 
+    /// O `isConcurrencySafe` do AgentTool do JS é `true`
+    /// (`tools/AgentTool/AgentTool/init_AgentTool.js`): vários subagentes do
+    /// mesmo turno rodam juntos no `runToolsConcurrently`
+    /// (`services/tools/toolOrchestration.js`). Cada um tem o próprio
+    /// `agent_id`, registry, loop e arquivo de sidechain; o que dividem com o
+    /// pai (cwd, task store, abort, callback de permissão) já é
+    /// compartilhado por referência e seguro entre tarefas.
+    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+        true
+    }
+
+    /// O schema do JS é `z.object` (não estrito): chaves extras somem no
+    /// parse, e a permissão e a execução recebem o input sem elas.
+    fn preprocess_input(&self, mut input: Value) -> Value {
+        crate::tools::schema_validation::strip_unknown_keys(&mut input, &self.input_schema());
+        input
+    }
+
     async fn execute(&self, input: Value, context: &ToolContext) -> ToolResult {
         let prompt = input
             .get("prompt")

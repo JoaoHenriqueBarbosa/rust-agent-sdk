@@ -873,6 +873,198 @@ async fn worktree_enter_and_remove_in_a_real_repo() {
 }
 
 // ---------------------------------------------------------------------------
+// Chaves desconhecidas: `z.object` descarta, `strictObject` recusa
+// ---------------------------------------------------------------------------
+
+fn is_input_validation_error(result: &ToolExecutionResult) -> bool {
+    text_of(result).starts_with("<tool_use_error>InputValidationError:")
+}
+
+/// O `z.object` do Agent (`baseInputSchema` de
+/// `tools/AgentTool/AgentTool/init_AgentTool.js`) descarta a chave que não
+/// conhece: a chamada roda. O schema enviado segue com
+/// `additionalProperties: false`, como o do CLI.
+#[tokio::test]
+async fn agent_drops_unknown_keys_like_z_object() {
+    let tool = AgentTool::new(
+        builtin_agents(&BuiltinAgentOptions {
+            disabled: false,
+            explore_plan_enabled: true,
+        }),
+        PermissionRules::default(),
+        completing_runner("a0000000000000001"),
+    );
+    use prana::tools::framework::Tool;
+    assert_eq!(tool.input_schema()["additionalProperties"], json!(false));
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(tool));
+    let executor = ToolExecutor::new(registry, ToolContext::default());
+    let results = executor
+        .execute_all(vec![tool_use(
+            "t1",
+            "Agent",
+            json!({"description": "d", "prompt": "faça", "bogus": 1}),
+        )])
+        .await;
+    assert!(!results[0].result.is_error, "{}", text_of(&results[0]));
+    assert!(text_of(&results[0]).starts_with("ok\nagentId: a0000000000000001"));
+}
+
+/// O `z.object` do SendMessage (`tools/SendMessageTool/SendMessageTool.js`):
+/// a chave extra some antes da permissão, e a chamada segue.
+#[tokio::test]
+async fn send_message_drops_unknown_keys_like_z_object() {
+    let (cb, seen) = callback(PermissionOutcome::Deny {
+        message: "não".into(),
+    });
+    let ctx = ToolContext {
+        permission_callback: Some(cb),
+        ..Default::default()
+    };
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(prana::tools::send_message::SendMessageTool));
+    let executor = ToolExecutor::new(registry, ctx);
+    let results = executor
+        .execute_all(vec![tool_use(
+            "t1",
+            "SendMessage",
+            json!({"to": "x", "message": "oi", "bogus": 1}),
+        )])
+        .await;
+    assert!(
+        !is_input_validation_error(&results[0]),
+        "{}",
+        text_of(&results[0])
+    );
+    let requests = seen.lock().unwrap();
+    assert_eq!(requests[0].input, json!({"to": "x", "message": "oi"}));
+}
+
+/// O ExitPlanMode é `strictObject(...).passthrough()` na raiz (a chave extra
+/// fica) e `z.object` em cada item de `allowedPrompts` (a chave extra do
+/// item some), em `tools/ExitPlanModeTool/ExitPlanModeV2Tool.js`.
+#[tokio::test]
+async fn exit_plan_mode_drops_unknown_keys_of_allowed_prompts() {
+    isolate_config_home();
+    let shared = Arc::new(std::sync::RwLock::new(PermissionMode::Plan));
+    let (cb, seen) = callback(PermissionOutcome::Deny {
+        message: "não".into(),
+    });
+    let ctx = ToolContext {
+        permission_mode_shared: Some(Arc::clone(&shared)),
+        permission_callback: Some(cb),
+        ..Default::default()
+    };
+    let executor = ToolExecutor::new(registry_with(&["ExitPlanMode"]), ctx);
+    let results = executor
+        .execute_all(vec![tool_use(
+            "t1",
+            "ExitPlanMode",
+            json!({
+                "allowedPrompts": [{"tool": "Bash", "prompt": "rodar testes", "bogus": 1}],
+                "extra": true
+            }),
+        )])
+        .await;
+    assert!(
+        !is_input_validation_error(&results[0]),
+        "{}",
+        text_of(&results[0])
+    );
+    let requests = seen.lock().unwrap();
+    assert_eq!(
+        requests[0].input,
+        json!({
+            "allowedPrompts": [{"tool": "Bash", "prompt": "rodar testes"}],
+            "extra": true
+        })
+    );
+}
+
+/// As tools cujo zod é `z.object` em algum nível e que já descartavam as
+/// chaves no preprocess (Skill, TodoWrite, AskUserQuestion) continuam
+/// descartando: nenhuma vira `InputValidationError` por chave extra.
+#[tokio::test]
+async fn skill_and_todo_write_drop_unknown_keys_like_z_object() {
+    let ctx = ToolContext {
+        todo_store: Some(Arc::new(std::sync::Mutex::new(Value::Null))),
+        ..Default::default()
+    };
+    let executor = ToolExecutor::new(registry_with(&["Skill", "TodoWrite"]), ctx);
+    let results = executor
+        .execute_all(vec![
+            tool_use("t1", "Skill", json!({"skill": "nenhuma", "bogus": 1})),
+            tool_use(
+                "t2",
+                "TodoWrite",
+                json!({"todos": [{"content": "X", "status": "pending", "activeForm": "Xing", "bogus": 1}]}),
+            ),
+        ])
+        .await;
+    // O Skill passa no schema e para no `validateInput` (skill inexistente).
+    assert_eq!(
+        text_of(&results[0]),
+        "<tool_use_error>Unknown skill: nenhuma</tool_use_error>"
+    );
+    assert!(!results[1].result.is_error, "{}", text_of(&results[1]));
+    assert_eq!(
+        results[1].result.tool_use_result.as_ref().unwrap()["newTodos"],
+        json!([{"content": "X", "status": "pending", "activeForm": "Xing"}])
+    );
+}
+
+/// `strictObject` no JS recusa a chave desconhecida com o
+/// `InputValidationError` (`unrecognized_keys`): EnterPlanMode
+/// (`tools/EnterPlanModeTool/EnterPlanModeTool.js`) e as tools de tarefa
+/// TaskCreate, TaskGet, TaskList e TaskUpdate (`tools/Task*Tool/*.js`).
+#[tokio::test]
+async fn strict_object_tools_refuse_unknown_keys() {
+    let ctx = ToolContext {
+        permission_mode: PermissionMode::BypassPermissions,
+        task_store: Some(Arc::new(TaskStore::new())),
+        ..Default::default()
+    };
+    let executor = ToolExecutor::new(
+        registry_with(&[
+            "EnterPlanMode",
+            "TaskCreate",
+            "TaskGet",
+            "TaskList",
+            "TaskUpdate",
+        ]),
+        ctx,
+    );
+    let calls = [
+        ("EnterPlanMode", json!({"bogus": 1})),
+        (
+            "TaskCreate",
+            json!({"subject": "s", "description": "d", "bogus": 1}),
+        ),
+        ("TaskGet", json!({"taskId": "1", "bogus": 1})),
+        ("TaskList", json!({"bogus": 1})),
+        ("TaskUpdate", json!({"taskId": "1", "bogus": 1})),
+    ];
+    let results = executor
+        .execute_all(
+            calls
+                .iter()
+                .enumerate()
+                .map(|(i, (name, input))| tool_use(&format!("t{i}"), name, input.clone()))
+                .collect(),
+        )
+        .await;
+    for ((name, _), result) in calls.iter().zip(&results) {
+        assert_eq!(
+            text_of(result),
+            format!(
+                "<tool_use_error>InputValidationError: {name} failed due to the following issue:\nAn unexpected parameter `bogus` was provided</tool_use_error>"
+            ),
+            "{name}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MCP
 // ---------------------------------------------------------------------------
 
