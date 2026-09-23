@@ -12,15 +12,15 @@ use serde_json::json;
 use serial_test::serial;
 use tempfile::TempDir;
 
-use rust_agent_sdk::errors::ClaudeSDKError;
-use rust_agent_sdk::internal::session_resume::{
+use prana::errors::ClaudeSDKError;
+use prana::internal::session_resume::{
     apply_materialized_options, build_mirror_batcher, materialize_resume_session,
     MaterializedResume,
 };
-use rust_agent_sdk::internal::session_store::InMemorySessionStore;
-use rust_agent_sdk::internal::transcript_mirror::OnErrorCallback;
-use rust_agent_sdk::project_key_for_directory;
-use rust_agent_sdk::types::{
+use prana::internal::session_store::InMemorySessionStore;
+use prana::internal::transcript_mirror::OnErrorCallback;
+use prana::project_key_for_directory;
+use prana::types::{
     ClaudeAgentOptions, SessionKey, SessionListSubkeysKey, SessionStore, SessionStoreEntry,
     SessionStoreFlushMode, SessionStoreListEntry,
 };

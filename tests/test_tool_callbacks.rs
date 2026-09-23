@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use rust_agent_sdk::internal::client::InternalClient;
-use rust_agent_sdk::internal::query::Query;
-use rust_agent_sdk::internal::transport::Transport;
-use rust_agent_sdk::types::{
+use prana::internal::client::InternalClient;
+use prana::internal::query::Query;
+use prana::internal::transport::Transport;
+use prana::types::{
     ClaudeAgentOptions, HookCallbackFn, HookEvent, HookJSONOutput, HookMatcher, HookSpecificOutput,
     PermissionResultAllow, PermissionResultDeny, ToolPermissionContext,
 };
@@ -30,22 +30,22 @@ impl MockTransport {
 
 #[async_trait::async_trait]
 impl Transport for MockTransport {
-    async fn connect(&mut self) -> rust_agent_sdk::errors::Result<()> {
+    async fn connect(&mut self) -> prana::errors::Result<()> {
         self.connected = true;
         Ok(())
     }
 
-    async fn close(&mut self) -> rust_agent_sdk::errors::Result<()> {
+    async fn close(&mut self) -> prana::errors::Result<()> {
         self.connected = false;
         Ok(())
     }
 
-    async fn write(&mut self, data: &str) -> rust_agent_sdk::errors::Result<()> {
+    async fn write(&mut self, data: &str) -> prana::errors::Result<()> {
         self.written_messages.lock().unwrap().push(data.to_string());
         Ok(())
     }
 
-    async fn end_input(&mut self) -> rust_agent_sdk::errors::Result<()> {
+    async fn end_input(&mut self) -> prana::errors::Result<()> {
         Ok(())
     }
 

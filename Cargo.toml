@@ -1,9 +1,22 @@
 [package]
-name = "rust-agent-sdk"
+name = "prana"
 version = "0.1.0"
 edition = "2021"
-description = "Rust SDK for Claude Code Agent"
+# O maior piso das dependências é o do sqlx 0.9 (backend Postgres opcional).
+rust-version = "1.94"
+description = "Rust SDK for Claude agents: speaks the Claude Code CLI protocol and ships a native transport that runs the agent loop in-process"
 license = "MIT"
+repository = "https://github.com/JoaoHenriqueBarbosa/rust-agent-sdk"
+homepage = "https://github.com/JoaoHenriqueBarbosa/rust-agent-sdk"
+readme = "README.md"
+authors = ["João Henrique Barbosa <joaohenriquebarbosa21@gmail.com>"]
+keywords = ["claude", "agent", "llm", "anthropic", "sdk"]
+categories = ["api-bindings", "asynchronous", "development-tools"]
+exclude = [".github/", "release-plz.toml", "docs/", "target-*/"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

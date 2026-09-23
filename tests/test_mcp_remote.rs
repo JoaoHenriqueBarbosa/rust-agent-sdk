@@ -14,11 +14,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::StreamExt;
-use rust_agent_sdk::mcp::{
+use prana::mcp::{
     connect_mcp_servers, McpClient, McpServerConfig, McpTimeouts, LATEST_PROTOCOL_VERSION,
 };
-use rust_agent_sdk::tools::framework::{ToolContext, ToolResultContent};
-use rust_agent_sdk::{
+use prana::tools::framework::{ToolContext, ToolResultContent};
+use prana::{
     ClaudeAgentOptions, ClaudeSDKClient, ContentBlock, McpServersConfig, Message,
     NativeApiTransport, PermissionMode, ToolsConfig,
 };
@@ -667,7 +667,7 @@ async fn the_native_transport_hands_the_remote_tools_to_the_model_and_runs_them(
     let settled = client.get_mcp_status().await.expect("mcp_status");
     assert_eq!(
         settled.mcp_servers[0].status,
-        rust_agent_sdk::McpServerConnectionStatus::Connected,
+        prana::McpServerConnectionStatus::Connected,
         "{settled:?}"
     );
     let listed = settled.mcp_servers[0].tools.clone().unwrap_or_default();

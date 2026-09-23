@@ -13,7 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-use rust_agent_sdk::{
+use prana::{
     project_key_for_directory, ClaudeAgentOptions, ClaudeSDKClient, InMemorySessionStore, Message,
     PermissionResult, PermissionResultAllow, SessionKey, SessionStore, ToolsConfig,
 };
@@ -200,7 +200,7 @@ async fn control_requests_are_answered_while_a_permission_callback_waits() {
     let asked = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let (asked_cb, release_cb) = (Arc::clone(&asked), Arc::clone(&release));
-    let callback: rust_agent_sdk::CanUseToolFn = Arc::new(move |_name, _input, _ctx| {
+    let callback: prana::CanUseToolFn = Arc::new(move |_name, _input, _ctx| {
         let (asked, release) = (Arc::clone(&asked_cb), Arc::clone(&release_cb));
         Box::pin(async move {
             asked.notify_one();

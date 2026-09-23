@@ -10,8 +10,8 @@
 use serde_json::json;
 use uuid::Uuid;
 
-use rust_agent_sdk::internal::session_summary::summary_entry_to_sdk_info;
-use rust_agent_sdk::{
+use prana::internal::session_summary::summary_entry_to_sdk_info;
+use prana::{
     fold_session_summary, list_sessions_from_store, project_key_for_directory,
     InMemorySessionStore, SDKSessionInfo, SessionKey, SessionStore, SessionStoreEntry,
     SessionSummaryEntry,

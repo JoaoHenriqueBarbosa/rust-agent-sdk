@@ -12,7 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-use rust_agent_sdk::{
+use prana::{
     ClaudeAgentOptions, ClaudeSDKClient, HookEvent, HookJSONOutput, HookMatcher,
     HookSpecificOutput, Message, NativeApiTransport, PermissionMode, PermissionResult, ToolsConfig,
 };
@@ -138,7 +138,7 @@ struct Fixture {
 struct Spec {
     tools: Option<Vec<String>>,
     permission_mode: Option<PermissionMode>,
-    can_use_tool: Option<rust_agent_sdk::CanUseToolFn>,
+    can_use_tool: Option<prana::CanUseToolFn>,
     hooks: Option<HashMap<HookEvent, Vec<HookMatcher>>>,
     allowed_tools: Vec<String>,
     disallowed_tools: Vec<String>,
@@ -168,7 +168,7 @@ async fn fixture(spec: Spec, api: &MockApi) -> Fixture {
         system_prompt: spec
             .system_prompt
             .clone()
-            .map(rust_agent_sdk::SystemPromptConfig::String),
+            .map(prana::SystemPromptConfig::String),
         strict_mcp_config: true,
         ..Default::default()
     };
@@ -188,7 +188,7 @@ async fn fixture(spec: Spec, api: &MockApi) -> Fixture {
     }
 }
 
-fn result_of(messages: &[Message]) -> Option<rust_agent_sdk::ResultMessage> {
+fn result_of(messages: &[Message]) -> Option<prana::ResultMessage> {
     messages.iter().find_map(|m| match m {
         Message::Result(r) => Some(r.clone()),
         _ => None,
@@ -258,11 +258,11 @@ async fn plan_mode_sends_mutating_tools_to_can_use_tool() {
     .await;
     let asked: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let asked_cb = Arc::clone(&asked);
-    let deny_in_plan: rust_agent_sdk::CanUseToolFn = Arc::new(move |name, _input, _ctx| {
+    let deny_in_plan: prana::CanUseToolFn = Arc::new(move |name, _input, _ctx| {
         let asked = Arc::clone(&asked_cb);
         Box::pin(async move {
             asked.lock().await.push(name);
-            PermissionResult::Deny(rust_agent_sdk::PermissionResultDeny {
+            PermissionResult::Deny(prana::PermissionResultDeny {
                 behavior: "deny".to_string(),
                 message: "Apresente o plano com ExitPlanMode antes de escrever.".to_string(),
                 interrupt: false,
@@ -375,7 +375,7 @@ async fn pre_tool_use_hook_deny_blocks_the_tool_and_steers_the_model() {
         sse_text("cancelado"),
     ])
     .await;
-    let hook: rust_agent_sdk::HookCallbackFn = Arc::new(|_input, _id, _ctx| {
+    let hook: prana::HookCallbackFn = Arc::new(|_input, _id, _ctx| {
         Box::pin(async {
             sync_output(
                 Some(HookSpecificOutput::PreToolUse {
@@ -424,7 +424,7 @@ async fn pre_tool_use_hook_deny_blocks_the_tool_and_steers_the_model() {
 #[tokio::test]
 async fn user_prompt_submit_context_reaches_the_request() {
     let api = MockApi::start(vec![sse_text("com contexto")]).await;
-    let hook: rust_agent_sdk::HookCallbackFn = Arc::new(|_input, _id, _ctx| {
+    let hook: prana::HookCallbackFn = Arc::new(|_input, _id, _ctx| {
         Box::pin(async {
             sync_output(
                 Some(HookSpecificOutput::UserPromptSubmit {
@@ -464,7 +464,7 @@ async fn stop_hook_block_reinjects_the_reason_and_loops() {
     let api = MockApi::start(vec![sse_text("tentativa um"), sse_text("tentativa dois")]).await;
     let fired = Arc::new(AtomicU32::new(0));
     let counter = Arc::clone(&fired);
-    let hook: rust_agent_sdk::HookCallbackFn = Arc::new(move |_input, _id, _ctx| {
+    let hook: prana::HookCallbackFn = Arc::new(move |_input, _id, _ctx| {
         let n = counter.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
             if n == 0 {
@@ -615,8 +615,8 @@ async fn system_prompt_preset_reaches_the_request_with_append() {
         env: env.clone(),
         cwd: Some(cwd.path().to_path_buf()),
         tools: Some(ToolsConfig::List(Vec::new())),
-        system_prompt: Some(rust_agent_sdk::SystemPromptConfig::Structured(
-            rust_agent_sdk::SystemPrompt::Preset {
+        system_prompt: Some(prana::SystemPromptConfig::Structured(
+            prana::SystemPrompt::Preset {
                 preset: "claude_code".to_string(),
                 append: Some("Fale sempre em pt-BR.".to_string()),
                 exclude_dynamic_sections: None,
@@ -931,7 +931,7 @@ async fn adaptive_thinking_becomes_a_real_budget_in_the_request() {
         env: env.clone(),
         cwd: Some(cwd.path().to_path_buf()),
         tools: Some(ToolsConfig::List(Vec::new())),
-        thinking: Some(rust_agent_sdk::types::ThinkingConfig::Adaptive { display: None }),
+        thinking: Some(prana::types::ThinkingConfig::Adaptive { display: None }),
         max_thinking_tokens: Some(4096),
         strict_mcp_config: true,
         ..Default::default()

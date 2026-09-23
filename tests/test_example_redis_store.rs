@@ -8,7 +8,7 @@
 //! normalization, fakeredis internals) are adapted to test the equivalent
 //! trait-level behavior.
 
-use rust_agent_sdk::{
+use prana::{
     InMemorySessionStore, SessionKey, SessionListSubkeysKey, SessionStore, SessionStoreEntry,
 };
 

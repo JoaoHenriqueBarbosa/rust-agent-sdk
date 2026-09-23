@@ -13,9 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-use rust_agent_sdk::{
-    ClaudeAgentOptions, NativeApiTransport, PermissionMode, ToolsConfig, Transport,
-};
+use prana::{ClaudeAgentOptions, NativeApiTransport, PermissionMode, ToolsConfig, Transport};
 
 // ---------------------------------------------------------------------------
 // MockApi (o padrão de tests/test_native_parity.rs)

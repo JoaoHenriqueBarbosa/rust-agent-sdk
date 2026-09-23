@@ -14,13 +14,13 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use rust_agent_sdk::tools::file_state::FileState;
-use rust_agent_sdk::tools::framework::{
+use prana::tools::file_state::FileState;
+use prana::tools::framework::{
     PermissionCallbackFn, PermissionOutcome, ToolContext, ToolExecutor, ToolPermissionRequest,
     ToolRegistry,
 };
-use rust_agent_sdk::tools::permission::PermissionRules;
-use rust_agent_sdk::types::PermissionMode;
+use prana::tools::permission::PermissionRules;
+use prana::types::PermissionMode;
 
 fn sha(text: &str) -> String {
     let mut hasher = Sha256::new();
@@ -32,8 +32,8 @@ fn sha(text: &str) -> String {
         .collect()
 }
 
-fn tool_use(id: &str, name: &str, input: Value) -> rust_agent_sdk::api::streaming::ToolUseBlock {
-    rust_agent_sdk::api::streaming::ToolUseBlock {
+fn tool_use(id: &str, name: &str, input: Value) -> prana::api::streaming::ToolUseBlock {
+    prana::api::streaming::ToolUseBlock {
         id: id.to_string(),
         name: name.to_string(),
         input,

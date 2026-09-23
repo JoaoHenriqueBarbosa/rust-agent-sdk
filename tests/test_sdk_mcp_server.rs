@@ -9,12 +9,12 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use rust_agent_sdk::internal::query::Query;
-use rust_agent_sdk::internal::transport::Transport;
-use rust_agent_sdk::sdk_mcp::{
+use prana::internal::query::Query;
+use prana::internal::transport::Transport;
+use prana::sdk_mcp::{
     PropertySchema, SdkMcpRegistry, SdkMcpServer, ToolError, ToolInputSchema, ToolOutput,
 };
-use rust_agent_sdk::types::McpServerConfig;
+use prana::types::McpServerConfig;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -44,23 +44,23 @@ impl ScriptedTransport {
 
 #[async_trait::async_trait]
 impl Transport for ScriptedTransport {
-    async fn connect(&mut self) -> rust_agent_sdk::errors::Result<()> {
+    async fn connect(&mut self) -> prana::errors::Result<()> {
         self.connected = true;
         Ok(())
     }
 
-    async fn close(&mut self) -> rust_agent_sdk::errors::Result<()> {
+    async fn close(&mut self) -> prana::errors::Result<()> {
         self.connected = false;
         Ok(())
     }
 
-    async fn write(&mut self, data: &str) -> rust_agent_sdk::errors::Result<()> {
+    async fn write(&mut self, data: &str) -> prana::errors::Result<()> {
         let parsed: Value = serde_json::from_str(data.trim()).expect("o SDK escreve JSON válido");
         self.written.lock().unwrap().push(parsed);
         Ok(())
     }
 
-    async fn end_input(&mut self) -> rust_agent_sdk::errors::Result<()> {
+    async fn end_input(&mut self) -> prana::errors::Result<()> {
         Ok(())
     }
 
@@ -68,7 +68,7 @@ impl Transport for ScriptedTransport {
         self.connected
     }
 
-    async fn read_message(&mut self) -> rust_agent_sdk::errors::Result<Option<Value>> {
+    async fn read_message(&mut self) -> prana::errors::Result<Option<Value>> {
         Ok(self.inbound.pop_front())
     }
 }
@@ -560,7 +560,7 @@ async fn declaring_a_server_yields_the_config_and_keeps_the_handle_in_the_option
         )
         .build();
 
-    let mut options = rust_agent_sdk::types::ClaudeAgentOptions::default();
+    let mut options = prana::types::ClaudeAgentOptions::default();
     let config = options.add_sdk_mcp_server(server);
 
     // Contrato: o que sai de `add_sdk_mcp_server` é a declaração `sdk` que o
@@ -575,7 +575,7 @@ async fn declaring_a_server_yields_the_config_and_keeps_the_handle_in_the_option
 
     // Contrato: a mesma chamada põe a declaração em `mcp_servers`, keyed pelo
     // nome — que é o `server_name` que o CLI vai mandar de volta.
-    let rust_agent_sdk::types::McpServersConfig::Dict(ref declared) = options.mcp_servers else {
+    let prana::types::McpServersConfig::Dict(ref declared) = options.mcp_servers else {
         panic!("mcp_servers precisa continuar sendo um dicionário");
     };
     assert_eq!(
@@ -663,13 +663,12 @@ async fn the_options_registry_holds_only_what_was_declared_by_handle() {
         )
         .build();
 
-    let mut options =
-        rust_agent_sdk::types::ClaudeAgentOptions::default().with_sdk_mcp_server(declared);
+    let mut options = prana::types::ClaudeAgentOptions::default().with_sdk_mcp_server(declared);
 
     // Entradas escritas na mão no dicionário: um `sdk` sem handle e um stdio.
     // Nenhuma das duas pode virar servidor servível — declarar o NOME nunca
     // bastou, e agora o tipo diz isso.
-    let rust_agent_sdk::types::McpServersConfig::Dict(ref mut servers) = options.mcp_servers else {
+    let prana::types::McpServersConfig::Dict(ref mut servers) = options.mcp_servers else {
         panic!("mcp_servers precisa continuar sendo um dicionário");
     };
     servers.insert(
@@ -802,7 +801,7 @@ async fn tool_output_helpers_build_the_expected_content() {
     let output = ToolOutput::json(&Payload { ok: true }).expect("serialização");
     assert_eq!(
         output.content(),
-        &[rust_agent_sdk::sdk_mcp::ToolContent::Text(
+        &[prana::sdk_mcp::ToolContent::Text(
             "{\"ok\":true}".to_string()
         )],
         "ToolOutput::json vira um bloco de texto com o JSON"
@@ -812,8 +811,8 @@ async fn tool_output_helpers_build_the_expected_content() {
     assert_eq!(
         two.content(),
         &[
-            rust_agent_sdk::sdk_mcp::ToolContent::Text("um".to_string()),
-            rust_agent_sdk::sdk_mcp::ToolContent::Text("dois".to_string()),
+            prana::sdk_mcp::ToolContent::Text("um".to_string()),
+            prana::sdk_mcp::ToolContent::Text("dois".to_string()),
         ],
         "push_text preserva a ordem dos blocos"
     );

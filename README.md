@@ -1,28 +1,39 @@
-# rust-agent-sdk
+# prana
 
-**An unofficial Rust port of Anthropic's [`claude-agent-sdk`](https://github.com/anthropics/claude-agent-sdk-python), for driving the `claude` CLI as an agent from Rust.**
+**An unofficial Rust port of Anthropic's [`claude-agent-sdk`](https://github.com/anthropics/claude-agent-sdk-python), for running Claude agents from Rust: drive the `claude` CLI, or run the agent loop natively, in-process.**
 
+*Prāṇa*, in Vedānta, is the vital breath that animates the body from within. The crate's
+native transport is exactly that: the agent loop breathing inside your own process.
+
+[![Crates.io](https://img.shields.io/crates/v/prana.svg)](https://crates.io/crates/prana)
+[![Docs.rs](https://docs.rs/prana/badge.svg)](https://docs.rs/prana)
+[![CI](https://github.com/JoaoHenriqueBarbosa/rust-agent-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/JoaoHenriqueBarbosa/rust-agent-sdk/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-edition%202021-orange.svg)](https://www.rust-lang.org)
 [![Tests](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/JoaoHenriqueBarbosa/rust-agent-sdk/badges/tests.json)](https://github.com/JoaoHenriqueBarbosa/rust-agent-sdk/actions)
 [![Lines of code](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/JoaoHenriqueBarbosa/rust-agent-sdk/badges/loc.json)](#architecture)
 
-> **Status — exploratory spike.** This is a from-scratch reimplementation, in Rust, of
-> the Python `claude-agent-sdk`. It is not an official Anthropic SDK and is not affiliated
-> with Anthropic. The core is functional and heavily tested, but the crate is `0.1.0`,
-> unpublished, and the public API may still shift. See [Scope & honesty](#scope--honesty).
+> **Status: young but used in production.** This is a from-scratch reimplementation, in
+> Rust, of the Python `claude-agent-sdk`. It is not an official Anthropic SDK and is not
+> affiliated with Anthropic. It is heavily tested and runs a production chat service, but
+> the crate is `0.x` and the public API may still shift. See [Scope & honesty](#scope--honesty).
 
 ## What it is
 
-`rust-agent-sdk` lets a Rust program *drive* Claude Code the same way the official Python
-SDK does: it does **not** talk to the Anthropic HTTP API directly. Instead it spawns the
-`claude` command-line binary as a child process and speaks its `--input-format stream-json`
-/ `--output-format stream-json` control protocol over stdin/stdout — sending prompts and
-control requests, and parsing the streamed events back into typed Rust values.
+`prana` lets a Rust program run Claude agents, with two interchangeable transports behind
+the same typed API:
 
-If you have the `claude` CLI installed and want to build an agentic tool, batch job, or
-service in Rust that delegates to it, this crate gives you a typed, `async`/`tokio`-native
-surface over that protocol.
+- **Subprocess** (`SubprocessCLITransport`): spawns the `claude` command-line binary and
+  speaks its `--input-format stream-json` / `--output-format stream-json` control protocol
+  over stdin/stdout, exactly like the official Python SDK.
+- **Native** (`NativeApiTransport`): no `claude` binary at all. The agent loop, the builtin
+  tools, permissions, hooks, memories (`CLAUDE.md`), transcripts and sessions run inside
+  your process and talk to the Anthropic Messages API directly (or to any compatible
+  endpoint via `ANTHROPIC_BASE_URL`). It is kept in parity with the Claude Code CLI 2.1.90,
+  down to the tool descriptions, the transcript format and the retry behavior.
+
+Either way you get the same `Message` stream, the same `ClaudeAgentOptions` and the same
+`ClaudeSDKClient`, so you can switch transports without touching the rest of your code.
 
 ## Highlights
 
@@ -57,26 +68,29 @@ surface over that protocol.
 
 ## Requirements
 
-- **Rust** (stable) with `edition = "2021"`.
-- The **`claude` CLI** (`>= 2.0.0`) on your `PATH` for anything that actually talks to
-  Claude. The library itself compiles and its unit-level logic is testable without it.
+- **Rust 1.94 or newer.**
+- For the subprocess transport: the **`claude` CLI** (`>= 2.0.0`) on your `PATH`.
+- For the native transport: an `ANTHROPIC_API_KEY`, and `poppler-utils` installed if your
+  agent reads PDFs with the `Read` tool (it is what renders and extracts their text).
 
 ## Install
 
-This crate is **not published to crates.io**. Depend on it by Git:
+Add it to your project with one command:
 
-```toml
-[dependencies]
-rust-agent-sdk = { git = "https://github.com/JoaoHenriqueBarbosa/rust-agent-sdk" }
-tokio = { version = "1", features = ["full"] }
+```sh
+cargo add prana
+cargo add tokio --features full
 ```
+
+Optional session-store backends are opt-in features: `--features postgres` for Postgres,
+`--features redis-store` for Redis.
 
 ## Usage
 
 ### One-shot query
 
 ```rust
-use rust_agent_sdk::{query_collect, Message, ContentBlock};
+use prana::{query_collect, Message, ContentBlock};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -111,7 +125,7 @@ with `futures::StreamExt` instead of collecting eagerly.
 ### A persistent session
 
 ```rust
-use rust_agent_sdk::{ClaudeSDKClient, ClaudeAgentOptions, PermissionMode};
+use prana::{ClaudeSDKClient, ClaudeAgentOptions, PermissionMode};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -154,7 +168,7 @@ let client = ClaudeSDKClient::new(options).with_transport(my_transport);
   your Rust program
         │  query() / ClaudeSDKClient
         ▼
-  rust-agent-sdk
+  prana
         │  ClaudeAgentOptions ─▶ CLI args
         │  Message  ◀─ parse ── stream-json
         ▼
@@ -165,9 +179,10 @@ let client = ClaudeSDKClient::new(options).with_transport(my_transport);
   `claude` CLI  ──▶  Claude / Anthropic
 ```
 
-The crate never opens an HTTP connection to Anthropic itself. All model access,
-authentication, tool execution, and MCP orchestration happen inside the `claude` process;
-this library is a typed driver for that process's control protocol. Message parsing is
+That is the subprocess transport: all model access, authentication, tool execution, and MCP
+orchestration happen inside the `claude` process, and the library is a typed driver for its
+control protocol. With the native transport, the same `Message` stream is produced by the
+agent loop running in-process, which calls the Messages API itself. Message parsing is
 resilient to unknown fields, session path resolution normalizes Unicode (NFC/NFKC) so keys
 stay stable across platforms, and the transport layer handles line-buffered stream-json
 framing (including large tool outputs).
@@ -191,7 +206,7 @@ above are refreshed by CI so the counts stay honest as the code evolves.
 ## Architecture
 
 ```text
-rust-agent-sdk/
+prana/
 ├── src/
 │   ├── lib.rs            # crate root, public re-exports
 │   ├── query.rs          # query() / query_collect()

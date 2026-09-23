@@ -3,8 +3,8 @@
 //! Ported from Python: tests/test_session_mutations.py
 //! All tests will FAIL because the underlying functions are `todo!()`.
 
-use rust_agent_sdk::internal::sessions::sanitize_path;
-use rust_agent_sdk::{
+use prana::internal::sessions::sanitize_path;
+use prana::{
     delete_session,
     // Store-backed (async)
     delete_session_via_store,
@@ -1364,7 +1364,7 @@ mod test_rename_session_via_store {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
         let key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &sid,
         );
         store
@@ -1393,7 +1393,7 @@ mod test_rename_session_via_store {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
         let key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &sid,
         );
         store
@@ -1418,7 +1418,7 @@ mod test_rename_session_via_store {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
         let key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &sid,
         );
         store
@@ -1441,7 +1441,7 @@ mod test_rename_session_via_store {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
         let key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &sid,
         );
         store
@@ -1487,7 +1487,7 @@ mod test_tag_session_via_store {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
         let key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &sid,
         );
         store
@@ -1516,7 +1516,7 @@ mod test_tag_session_via_store {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
         let key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &sid,
         );
         store
@@ -1541,7 +1541,7 @@ mod test_tag_session_via_store {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
         let key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &sid,
         );
         store
@@ -1569,7 +1569,7 @@ mod test_tag_session_via_store {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
         let key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &sid,
         );
         store
@@ -1593,7 +1593,7 @@ mod test_tag_session_via_store {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
         let key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &sid,
         );
         store
@@ -1641,7 +1641,7 @@ mod test_delete_session_via_store {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
         let key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &sid,
         );
         store
@@ -1718,7 +1718,7 @@ mod test_fork_session_via_store {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
         let key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &sid,
         );
         let (entries, _) = store_transcript_entries(&sid, 2);
@@ -1730,7 +1730,7 @@ mod test_fork_session_via_store {
         assert_ne!(result.session_id, sid);
 
         let fork_key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &result.session_id,
         );
         let fork_entries = store.load(&fork_key).await.unwrap();
@@ -1744,7 +1744,7 @@ mod test_fork_session_via_store {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
         let key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &sid,
         );
         let (entries, original_uuids) = store_transcript_entries(&sid, 2);
@@ -1754,7 +1754,7 @@ mod test_fork_session_via_store {
             .await
             .unwrap();
         let fork_key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &result.session_id,
         );
         let fork_entries = store.load(&fork_key).await.unwrap().unwrap();
@@ -1777,7 +1777,7 @@ mod test_fork_session_via_store {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
         let key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &sid,
         );
         let (entries, _) = store_transcript_entries(&sid, 3);
@@ -1794,7 +1794,7 @@ mod test_fork_session_via_store {
             .await
             .unwrap();
         let fork_key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &result.session_id,
         );
         let fork_entries = store.load(&fork_key).await.unwrap().unwrap();
@@ -1815,7 +1815,7 @@ mod test_fork_session_via_store {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
         let key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &sid,
         );
         let (entries, uuids) = store_transcript_entries(&sid, 3);
@@ -1827,7 +1827,7 @@ mod test_fork_session_via_store {
             .unwrap();
 
         let fork_key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &result.session_id,
         );
         let fork_entries = store.load(&fork_key).await.unwrap().unwrap();
@@ -1848,7 +1848,7 @@ mod test_fork_session_via_store {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
         let key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &sid,
         );
         let (entries, _) = store_transcript_entries(&sid, 2);
@@ -1870,7 +1870,7 @@ mod test_fork_session_via_store {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
         let key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &sid,
         );
         let (entries, _) = store_transcript_entries(&sid, 2);
@@ -1881,7 +1881,7 @@ mod test_fork_session_via_store {
             .unwrap();
 
         let fork_key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &result.session_id,
         );
         let fork_entries = store.load(&fork_key).await.unwrap().unwrap();
@@ -1898,7 +1898,7 @@ mod test_fork_session_via_store {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
         let key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &sid,
         );
         let (entries, _) = store_transcript_entries(&sid, 2);
@@ -1909,7 +1909,7 @@ mod test_fork_session_via_store {
             .unwrap();
 
         let fork_key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &result.session_id,
         );
         let fork_entries = store.load(&fork_key).await.unwrap().unwrap();
@@ -1930,7 +1930,7 @@ mod test_fork_session_via_store {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
         let key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &sid,
         );
         let (entries, _) = store_transcript_entries(&sid, 2);
@@ -1941,7 +1941,7 @@ mod test_fork_session_via_store {
             .unwrap();
 
         let fork_key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &result.session_id,
         );
         let fork_entries = store.load(&fork_key).await.unwrap().unwrap();
@@ -1960,7 +1960,7 @@ mod test_fork_session_via_store {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
         let key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &sid,
         );
         let (entries, _) = store_transcript_entries(&sid, 2);
@@ -1971,7 +1971,7 @@ mod test_fork_session_via_store {
             .unwrap();
 
         let fork_key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &result.session_id,
         );
         let fork_entries = store.load(&fork_key).await.unwrap().unwrap();
@@ -1993,7 +1993,7 @@ mod test_fork_session_via_store {
         let store = InMemorySessionStore::new();
         let sid = uuid::Uuid::new_v4().to_string();
         let key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &sid,
         );
         let entry = json!({
@@ -2014,7 +2014,7 @@ mod test_fork_session_via_store {
             .unwrap();
 
         let fork_key = SessionKey::new(
-            rust_agent_sdk::project_key_for_directory(Some("/proj")).unwrap(),
+            prana::project_key_for_directory(Some("/proj")).unwrap(),
             &result.session_id,
         );
         let fork_entries = store.load(&fork_key).await.unwrap().unwrap();

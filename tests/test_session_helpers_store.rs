@@ -8,7 +8,7 @@
 use serde_json::json;
 use uuid::Uuid;
 
-use rust_agent_sdk::{
+use prana::{
     delete_session_via_store, fork_session_via_store, get_session_info_from_store,
     get_session_messages_from_store, get_subagent_messages_from_store, list_sessions_from_store,
     list_subagents_from_store, project_key_for_directory, rename_session_via_store,
@@ -100,7 +100,7 @@ impl SessionStore for MinimalStore {
         &self,
         key: &SessionKey,
         entries: &[SessionStoreEntry],
-    ) -> Result<(), rust_agent_sdk::ClaudeSDKError> {
+    ) -> Result<(), prana::ClaudeSDKError> {
         let k = Self::key_str(key);
         let mut data = self.data.lock().unwrap();
         data.entry(k).or_default().extend(entries.iter().cloned());
@@ -110,7 +110,7 @@ impl SessionStore for MinimalStore {
     async fn load(
         &self,
         key: &SessionKey,
-    ) -> Result<Option<Vec<SessionStoreEntry>>, rust_agent_sdk::ClaudeSDKError> {
+    ) -> Result<Option<Vec<SessionStoreEntry>>, prana::ClaudeSDKError> {
         let k = Self::key_str(key);
         let data = self.data.lock().unwrap();
         Ok(data.get(&k).cloned())

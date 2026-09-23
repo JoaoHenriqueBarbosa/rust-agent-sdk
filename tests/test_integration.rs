@@ -8,10 +8,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use rust_agent_sdk::errors::ClaudeSDKError;
-use rust_agent_sdk::internal::transport::Transport;
-use rust_agent_sdk::query::query_collect as query;
-use rust_agent_sdk::types::{ClaudeAgentOptions, ContentBlock, Message};
+use prana::errors::ClaudeSDKError;
+use prana::internal::transport::Transport;
+use prana::query::query_collect as query;
+use prana::types::{ClaudeAgentOptions, ContentBlock, Message};
 use serde_json::json;
 
 // ---------------------------------------------------------------------------
@@ -40,25 +40,25 @@ impl MockTransport {
 
 #[async_trait::async_trait]
 impl Transport for MockTransport {
-    async fn connect(&mut self) -> rust_agent_sdk::errors::Result<()> {
+    async fn connect(&mut self) -> prana::errors::Result<()> {
         self.connected = true;
         Ok(())
     }
-    async fn close(&mut self) -> rust_agent_sdk::errors::Result<()> {
+    async fn close(&mut self) -> prana::errors::Result<()> {
         self.connected = false;
         Ok(())
     }
-    async fn write(&mut self, data: &str) -> rust_agent_sdk::errors::Result<()> {
+    async fn write(&mut self, data: &str) -> prana::errors::Result<()> {
         self.written.lock().unwrap().push(data.to_string());
         Ok(())
     }
-    async fn end_input(&mut self) -> rust_agent_sdk::errors::Result<()> {
+    async fn end_input(&mut self) -> prana::errors::Result<()> {
         Ok(())
     }
     fn is_ready(&self) -> bool {
         self.connected
     }
-    async fn read_message(&mut self) -> rust_agent_sdk::errors::Result<Option<serde_json::Value>> {
+    async fn read_message(&mut self) -> prana::errors::Result<Option<serde_json::Value>> {
         if !self.init_responded {
             let written = self.written.lock().unwrap();
             for w in written.iter().rev() {

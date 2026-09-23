@@ -14,8 +14,8 @@
 //! O consumidor declara tools como funções Rust tipadas:
 //!
 //! ```no_run
-//! use rust_agent_sdk::sdk_mcp::{PropertySchema, SdkMcpServer, ToolInputSchema, ToolOutput};
-//! use rust_agent_sdk::ClaudeAgentOptions;
+//! use prana::sdk_mcp::{PropertySchema, SdkMcpServer, ToolInputSchema, ToolOutput};
+//! use prana::ClaudeAgentOptions;
 //! use serde::Deserialize;
 //!
 //! #[derive(Deserialize)]
@@ -43,7 +43,8 @@
 //! `mcp_message`, e o mesmo nome está no `--mcp-config`. Por isso o registry é
 //! indexado por nome — mas o registry é **da sessão**, não do processo.
 //!
-//! [`ClaudeAgentOptions::sdk_mcp_servers`] é um [`SdkMcpRegistry`] por valor:
+//! [`ClaudeAgentOptions::sdk_mcp_servers`](crate::ClaudeAgentOptions::sdk_mcp_servers)
+//! é um [`SdkMcpRegistry`] por valor:
 //! as opções carregam o `Arc<SdkMcpServer>` em si, não uma referência simbólica
 //! a um depósito compartilhado. No `connect` o cliente clona esse registry para
 //! dentro do `Query`, e é ele a ÚNICA fonte consultada em runtime.

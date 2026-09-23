@@ -3,8 +3,8 @@
 //! Each backend lives behind a Cargo feature so the default build stays free of
 //! heavy transport dependencies:
 //!
-//! - `postgres` → [`postgres::PostgresSessionStore`]
-//! - `redis-store` → [`redis::RedisSessionStore`]
+//! - `postgres` → [`PostgresSessionStore`](crate::PostgresSessionStore)
+//! - `redis-store` → [`RedisSessionStore`](crate::RedisSessionStore)
 //!
 //! Both are faithful ports of the Python SDK's `examples/session_stores/`
 //! adapters and pass the same conformance contracts. An S3 backend is on the

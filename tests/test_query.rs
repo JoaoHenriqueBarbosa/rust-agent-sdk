@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
-use rust_agent_sdk::internal::query::Query;
-use rust_agent_sdk::internal::transport::Transport;
-use rust_agent_sdk::{ClaudeAgentOptions, HookEvent, HookMatcher, Message};
+use prana::internal::query::Query;
+use prana::internal::transport::Transport;
+use prana::{ClaudeAgentOptions, HookEvent, HookMatcher, Message};
 use serde_json::json;
 
 // ---------------------------------------------------------------------------
@@ -41,22 +41,22 @@ impl MockTransport {
 
 #[async_trait::async_trait]
 impl Transport for MockTransport {
-    async fn connect(&mut self) -> rust_agent_sdk::errors::Result<()> {
+    async fn connect(&mut self) -> prana::errors::Result<()> {
         self.connected = true;
         Ok(())
     }
 
-    async fn close(&mut self) -> rust_agent_sdk::errors::Result<()> {
+    async fn close(&mut self) -> prana::errors::Result<()> {
         self.connected = false;
         Ok(())
     }
 
-    async fn write(&mut self, data: &str) -> rust_agent_sdk::errors::Result<()> {
+    async fn write(&mut self, data: &str) -> prana::errors::Result<()> {
         self.written_messages.lock().unwrap().push(data.to_string());
         Ok(())
     }
 
-    async fn end_input(&mut self) -> rust_agent_sdk::errors::Result<()> {
+    async fn end_input(&mut self) -> prana::errors::Result<()> {
         *self.end_input_called.lock().unwrap() = true;
         Ok(())
     }
@@ -65,7 +65,7 @@ impl Transport for MockTransport {
         self.connected
     }
 
-    async fn read_message(&mut self) -> rust_agent_sdk::errors::Result<Option<serde_json::Value>> {
+    async fn read_message(&mut self) -> prana::errors::Result<Option<serde_json::Value>> {
         if self.read_index < self.messages_to_read.len() {
             let msg = self.messages_to_read[self.read_index].clone();
             self.read_index += 1;
@@ -230,26 +230,24 @@ mod test_string_prompt_with_sdk_mcp_servers {
 
     #[async_trait::async_trait]
     impl Transport for InitMockTransport {
-        async fn connect(&mut self) -> rust_agent_sdk::errors::Result<()> {
+        async fn connect(&mut self) -> prana::errors::Result<()> {
             Ok(())
         }
-        async fn close(&mut self) -> rust_agent_sdk::errors::Result<()> {
+        async fn close(&mut self) -> prana::errors::Result<()> {
             Ok(())
         }
-        async fn write(&mut self, data: &str) -> rust_agent_sdk::errors::Result<()> {
+        async fn write(&mut self, data: &str) -> prana::errors::Result<()> {
             self.written.lock().unwrap().push(data.to_string());
             Ok(())
         }
-        async fn end_input(&mut self) -> rust_agent_sdk::errors::Result<()> {
+        async fn end_input(&mut self) -> prana::errors::Result<()> {
             *self.end_input_called.lock().unwrap() = true;
             Ok(())
         }
         fn is_ready(&self) -> bool {
             true
         }
-        async fn read_message(
-            &mut self,
-        ) -> rust_agent_sdk::errors::Result<Option<serde_json::Value>> {
+        async fn read_message(&mut self) -> prana::errors::Result<Option<serde_json::Value>> {
             if !self.init_responded {
                 let written = self.written.lock().unwrap();
                 for w in written.iter().rev() {
@@ -287,8 +285,7 @@ mod test_string_prompt_with_sdk_mcp_servers {
     #[tokio::test]
     async fn test_string_prompt_waits_for_result_with_sdk_mcp_servers() {
         let transport = InitMockTransport::new(assistant_and_result());
-        let messages =
-            rust_agent_sdk::query_collect("Hello", None, Some(Box::new(transport))).await;
+        let messages = prana::query_collect("Hello", None, Some(Box::new(transport))).await;
         assert!(messages.is_ok());
         let msgs = messages.unwrap();
         assert_eq!(msgs.len(), 2);
@@ -301,8 +298,7 @@ mod test_string_prompt_with_sdk_mcp_servers {
     #[tokio::test]
     async fn test_string_prompt_without_mcp_servers_closes_immediately() {
         let transport = InitMockTransport::new(assistant_and_result());
-        let messages =
-            rust_agent_sdk::query_collect("Hello", None, Some(Box::new(transport))).await;
+        let messages = prana::query_collect("Hello", None, Some(Box::new(transport))).await;
         assert!(messages.is_ok());
         let msgs = messages.unwrap();
         assert_eq!(msgs.len(), 2);
@@ -316,8 +312,7 @@ mod test_string_prompt_with_sdk_mcp_servers {
         all_messages.extend(assistant_and_result());
         let transport = InitMockTransport::new(all_messages);
 
-        let messages =
-            rust_agent_sdk::query_collect("Greet Alice", None, Some(Box::new(transport))).await;
+        let messages = prana::query_collect("Greet Alice", None, Some(Box::new(transport))).await;
         assert!(messages.is_ok());
         let msgs = messages.unwrap();
         assert_eq!(msgs.len(), 2);
@@ -329,20 +324,19 @@ mod test_string_prompt_with_sdk_mcp_servers {
     /// even without SDK MCP servers.
     #[tokio::test]
     async fn test_string_prompt_with_hooks_waits_for_result() {
-        let noop_hook: rust_agent_sdk::types::HookCallbackFn =
-            Arc::new(|_input, _tool_use_id, _context| {
-                Box::pin(async move {
-                    rust_agent_sdk::HookJSONOutput::Sync {
-                        continue_: Some(true),
-                        suppress_output: None,
-                        stop_reason: None,
-                        decision: None,
-                        system_message: None,
-                        reason: None,
-                        hook_specific_output: None,
-                    }
-                })
-            });
+        let noop_hook: prana::types::HookCallbackFn = Arc::new(|_input, _tool_use_id, _context| {
+            Box::pin(async move {
+                prana::HookJSONOutput::Sync {
+                    continue_: Some(true),
+                    suppress_output: None,
+                    stop_reason: None,
+                    decision: None,
+                    system_message: None,
+                    reason: None,
+                    hook_specific_output: None,
+                }
+            })
+        });
 
         let mut hooks_map = std::collections::HashMap::new();
         hooks_map.insert(
@@ -361,8 +355,7 @@ mod test_string_prompt_with_sdk_mcp_servers {
 
         let transport = InitMockTransport::new(assistant_and_result());
         let messages =
-            rust_agent_sdk::query_collect("Do something", Some(options), Some(Box::new(transport)))
-                .await;
+            prana::query_collect("Do something", Some(options), Some(Box::new(transport))).await;
         assert!(messages.is_ok());
         let msgs = messages.unwrap();
         assert_eq!(msgs.len(), 2);
@@ -396,25 +389,23 @@ mod test_async_iterable_prompt_with_sdk_mcp_servers {
 
     #[async_trait::async_trait]
     impl Transport for InitMockTransport {
-        async fn connect(&mut self) -> rust_agent_sdk::errors::Result<()> {
+        async fn connect(&mut self) -> prana::errors::Result<()> {
             Ok(())
         }
-        async fn close(&mut self) -> rust_agent_sdk::errors::Result<()> {
+        async fn close(&mut self) -> prana::errors::Result<()> {
             Ok(())
         }
-        async fn write(&mut self, data: &str) -> rust_agent_sdk::errors::Result<()> {
+        async fn write(&mut self, data: &str) -> prana::errors::Result<()> {
             self.written.lock().unwrap().push(data.to_string());
             Ok(())
         }
-        async fn end_input(&mut self) -> rust_agent_sdk::errors::Result<()> {
+        async fn end_input(&mut self) -> prana::errors::Result<()> {
             Ok(())
         }
         fn is_ready(&self) -> bool {
             true
         }
-        async fn read_message(
-            &mut self,
-        ) -> rust_agent_sdk::errors::Result<Option<serde_json::Value>> {
+        async fn read_message(&mut self) -> prana::errors::Result<Option<serde_json::Value>> {
             if !self.init_responded {
                 let written = self.written.lock().unwrap();
                 for w in written.iter().rev() {
@@ -452,8 +443,7 @@ mod test_async_iterable_prompt_with_sdk_mcp_servers {
     #[tokio::test]
     async fn test_async_iterable_with_sdk_mcp_servers() {
         let transport = InitMockTransport::new(assistant_and_result());
-        let messages =
-            rust_agent_sdk::query_collect("Hello", None, Some(Box::new(transport))).await;
+        let messages = prana::query_collect("Hello", None, Some(Box::new(transport))).await;
         assert!(messages.is_ok());
         let msgs = messages.unwrap();
         assert_eq!(msgs.len(), 2);
@@ -469,8 +459,7 @@ mod test_async_iterable_prompt_with_sdk_mcp_servers {
         all_messages.extend(assistant_and_result());
         let transport = InitMockTransport::new(all_messages);
 
-        let messages =
-            rust_agent_sdk::query_collect("Greet Alice", None, Some(Box::new(transport))).await;
+        let messages = prana::query_collect("Greet Alice", None, Some(Box::new(transport))).await;
         assert!(messages.is_ok());
         let msgs = messages.unwrap();
         assert_eq!(msgs.len(), 2);

@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use rust_agent_sdk::{
+use prana::{
     AgentDefinition, ClaudeAgentOptions, McpServerConfig, McpServersConfig, PermissionMode,
     SandboxNetworkConfig, SandboxSettings, SettingSource, SubprocessCLITransport, SystemPrompt,
     SystemPromptConfig, TaskBudget, ThinkingConfig, ThinkingDisplay, ToolsConfig,
@@ -648,7 +648,7 @@ mod test_command_building {
         let transport = SubprocessCLITransport::new(
             "test",
             make_options(|o| {
-                o.tools = Some(ToolsConfig::Preset(rust_agent_sdk::ToolsPreset {
+                o.tools = Some(ToolsConfig::Preset(prana::ToolsPreset {
                     type_: "preset".into(),
                     preset: "claude_code".into(),
                 }));
@@ -1161,7 +1161,7 @@ mod test_transport_lifecycle {
     fn test_connect_close() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use rust_agent_sdk::Transport;
+            use prana::Transport;
             let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
@@ -1172,7 +1172,7 @@ mod test_transport_lifecycle {
     fn test_connect_with_nonexistent_cwd() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use rust_agent_sdk::Transport;
+            use prana::Transport;
             let mut transport = SubprocessCLITransport::new(
                 "test",
                 spawnable_options(|o| {
@@ -1191,7 +1191,7 @@ mod test_transport_lifecycle {
     fn test_close_terminates_after_grace_period_timeout() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use rust_agent_sdk::Transport;
+            use prana::Transport;
             let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
             transport.close().await.unwrap();
@@ -1203,7 +1203,7 @@ mod test_transport_lifecycle {
     fn test_close_sigterm_succeeds_no_sigkill() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use rust_agent_sdk::Transport;
+            use prana::Transport;
             let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
             transport.close().await.unwrap();
@@ -1215,7 +1215,7 @@ mod test_transport_lifecycle {
     fn test_close_skips_wait_when_already_exited() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use rust_agent_sdk::Transport;
+            use prana::Transport;
             let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
             transport.close().await.unwrap();
@@ -1227,7 +1227,7 @@ mod test_transport_lifecycle {
     fn test_concurrent_writes_are_serialized() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use rust_agent_sdk::Transport;
+            use prana::Transport;
             let mut transport = SubprocessCLITransport::new(
                 "test",
                 ClaudeAgentOptions {
@@ -1245,7 +1245,7 @@ mod test_transport_lifecycle {
     fn test_concurrent_writes_fail_without_lock() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use rust_agent_sdk::Transport;
+            use prana::Transport;
             let mut transport = SubprocessCLITransport::new(
                 "test",
                 ClaudeAgentOptions {
@@ -1270,7 +1270,7 @@ mod test_env_vars {
     fn test_env_vars_passed_to_subprocess() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use rust_agent_sdk::Transport;
+            use prana::Transport;
             let mut env = HashMap::new();
             env.insert("MY_TEST_VAR".into(), "test-value".into());
             let mut transport = SubprocessCLITransport::new(
@@ -1288,7 +1288,7 @@ mod test_env_vars {
     fn test_caller_can_override_entrypoint() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use rust_agent_sdk::Transport;
+            use prana::Transport;
             let mut env = HashMap::new();
             env.insert("CLAUDE_CODE_ENTRYPOINT".into(), "custom-caller".into());
             let mut transport = SubprocessCLITransport::new(
@@ -1306,7 +1306,7 @@ mod test_env_vars {
     fn test_otel_trace_context_propagated_to_subprocess() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use rust_agent_sdk::Transport;
+            use prana::Transport;
             let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
@@ -1317,7 +1317,7 @@ mod test_env_vars {
     fn test_otel_trace_context_does_not_override_user_env() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use rust_agent_sdk::Transport;
+            use prana::Transport;
             let mut env = HashMap::new();
             env.insert("TRACEPARENT".into(), "custom".into());
             let mut transport = SubprocessCLITransport::new(
@@ -1335,7 +1335,7 @@ mod test_env_vars {
     fn test_otel_trace_context_noop_without_opentelemetry() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use rust_agent_sdk::Transport;
+            use prana::Transport;
             let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
@@ -1346,7 +1346,7 @@ mod test_env_vars {
     fn test_otel_trace_context_overwrites_inherited_env() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use rust_agent_sdk::Transport;
+            use prana::Transport;
             let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
@@ -1357,7 +1357,7 @@ mod test_env_vars {
     fn test_otel_no_active_span_preserves_inherited_env() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use rust_agent_sdk::Transport;
+            use prana::Transport;
             let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
@@ -1368,7 +1368,7 @@ mod test_env_vars {
     fn test_otel_baggage_only_carrier_preserves_inherited_env() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use rust_agent_sdk::Transport;
+            use prana::Transport;
             let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
@@ -1379,7 +1379,7 @@ mod test_env_vars {
     fn test_otel_propagator_error_does_not_break_connect() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use rust_agent_sdk::Transport;
+            use prana::Transport;
             let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
@@ -1390,7 +1390,7 @@ mod test_env_vars {
     fn test_claudecode_env_var_not_inherited() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use rust_agent_sdk::Transport;
+            use prana::Transport;
             let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
@@ -1401,7 +1401,7 @@ mod test_env_vars {
     fn test_claudecode_can_be_set_via_options_env() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use rust_agent_sdk::Transport;
+            use prana::Transport;
             let mut env = HashMap::new();
             env.insert("CLAUDECODE".into(), "1".into());
             let mut transport = SubprocessCLITransport::new(
@@ -1419,7 +1419,7 @@ mod test_env_vars {
     fn test_connect_as_different_user() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use rust_agent_sdk::Transport;
+            use prana::Transport;
             let mut transport = SubprocessCLITransport::new(
                 "test",
                 spawnable_options(|o| {
@@ -1443,7 +1443,7 @@ mod test_version_checks {
     fn test_version_warning_includes_cli_path() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use rust_agent_sdk::Transport;
+            use prana::Transport;
             let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             // connect() triggers version check, which is todo!()
             transport.connect().await.unwrap();
@@ -1455,7 +1455,7 @@ mod test_version_checks {
     fn test_version_warning_not_emitted_for_current_version() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use rust_agent_sdk::Transport;
+            use prana::Transport;
             let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
         });
@@ -1491,7 +1491,7 @@ mod test_atexit_child_cleanup {
     fn test_kill_active_children_terminates_process() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use rust_agent_sdk::Transport;
+            use prana::Transport;
             let mut transport = SubprocessCLITransport::new("test", spawnable_options(|_| {}));
             transport.connect().await.unwrap();
             // Would test child process cleanup here once implemented

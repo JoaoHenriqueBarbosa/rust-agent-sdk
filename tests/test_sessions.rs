@@ -11,11 +11,11 @@ use serial_test::serial;
 use tempfile::TempDir;
 use uuid::Uuid;
 
-use rust_agent_sdk::internal::sessions::{
+use prana::internal::sessions::{
     extract_json_string_field, extract_last_json_string_field, sanitize_path, simple_hash,
     validate_uuid,
 };
-use rust_agent_sdk::{
+use prana::{
     get_session_info, get_session_messages, get_subagent_messages, list_sessions, list_subagents,
     SDKSessionInfo, SessionMessage,
 };
@@ -1623,7 +1623,7 @@ mod test_session_message_type {
     #[serial]
     fn test_creation() {
         let msg = SessionMessage {
-            type_: rust_agent_sdk::types::SessionMessageType::User,
+            type_: prana::types::SessionMessageType::User,
             uuid: "abc".to_string(),
             session_id: "sess".to_string(),
             message: json!({"role": "user", "content": "hi"}),

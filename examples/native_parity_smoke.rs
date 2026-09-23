@@ -5,20 +5,20 @@
 
 use std::sync::Arc;
 
-use rust_agent_sdk::{
+use prana::{
     ClaudeAgentOptions, ClaudeSDKClient, ContentBlock, Message, NativeApiTransport,
     PermissionResult, PermissionResultAllow,
 };
 
 #[tokio::main]
 async fn main() {
-    let allow: rust_agent_sdk::CanUseToolFn = Arc::new(|name, _input, _ctx| {
+    let allow: prana::CanUseToolFn = Arc::new(|name, _input, _ctx| {
         println!("[can_use_tool] {name} -> allow");
         Box::pin(async { PermissionResult::Allow(PermissionResultAllow::default()) })
     });
     let options = || ClaudeAgentOptions {
         max_turns: Some(6),
-        tools: Some(rust_agent_sdk::types::ToolsConfig::List(vec![
+        tools: Some(prana::types::ToolsConfig::List(vec![
             "Bash".to_string(),
             "Read".to_string(),
             "WebSearch".to_string(),

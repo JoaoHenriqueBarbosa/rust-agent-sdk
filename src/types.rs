@@ -1568,7 +1568,7 @@ pub struct ClaudeAgentOptions {
     /// Comparação por prefixo, sensível a maiúsculas: `["ANTHROPIC_"]` tira
     /// toda a família de uma vez.
     pub tool_env_denylist: Vec<String>,
-    /// Tools NATIVAS desta sessão: implementações de [`Tool`] do chamador,
+    /// Tools NATIVAS desta sessão: implementações de [`Tool`](crate::tools::Tool) do chamador,
     /// executadas no processo como se fossem builtins.
     ///
     /// Existe porque os dois pontos de extensão anteriores não cobriam o caso

@@ -15,7 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-use rust_agent_sdk::{
+use prana::{
     ClaudeAgentOptions, ClaudeSDKClient, HookEvent, HookJSONOutput, HookMatcher,
     HookSpecificOutput, Message, NativeApiTransport, PermissionMode, PermissionResult,
     PermissionResultAllow, SettingSource, SystemPromptConfig, ToolsConfig,
@@ -498,7 +498,7 @@ async fn init_frame_carries_the_cli_fields_once_per_query() {
 async fn can_use_tool_through_with_native_transport_is_not_an_unsupported_option() {
     let api = MockApi::start(vec![sse_text("ok")]).await;
     let fx = fixture(&api);
-    let allow: rust_agent_sdk::CanUseToolFn = Arc::new(|_name, _input, _ctx| {
+    let allow: prana::CanUseToolFn = Arc::new(|_name, _input, _ctx| {
         Box::pin(async { PermissionResult::Allow(PermissionResultAllow::default()) })
     });
     let mut options = fx.options();
@@ -550,7 +550,7 @@ async fn can_use_tool_waits_past_ten_minutes_without_a_ceiling() {
     let fx = fixture(&api);
     let target = fx.cwd.path().join("tarde.txt");
     let api = MockApi::start(vec![sse_write_call(&target), sse_text("feito")]).await;
-    let slow: rust_agent_sdk::CanUseToolFn = Arc::new(|_name, _input, _ctx| {
+    let slow: prana::CanUseToolFn = Arc::new(|_name, _input, _ctx| {
         Box::pin(async {
             tokio::time::sleep(std::time::Duration::from_secs(11 * 60)).await;
             PermissionResult::Allow(PermissionResultAllow::default())
@@ -590,7 +590,7 @@ async fn interrupt_cancels_a_pending_can_use_tool_with_the_cli_denial() {
     let api = MockApi::start(vec![sse_write_call(&target), sse_text("parei")]).await;
     let asked = Arc::new(tokio::sync::Notify::new());
     let asked_in_callback = Arc::clone(&asked);
-    let never: rust_agent_sdk::CanUseToolFn = Arc::new(move |_name, _input, _ctx| {
+    let never: prana::CanUseToolFn = Arc::new(move |_name, _input, _ctx| {
         let asked = Arc::clone(&asked_in_callback);
         Box::pin(async move {
             asked.notify_one();
@@ -639,7 +639,7 @@ async fn hook_callback_past_its_matcher_timeout_is_a_no_op() {
     let fx = fixture(&api);
     let target = fx.cwd.path().join("liberado.txt");
     let api = MockApi::start(vec![sse_write_call(&target), sse_text("feito")]).await;
-    let late_deny: rust_agent_sdk::HookCallbackFn = Arc::new(|_input, _id, _ctx| {
+    let late_deny: prana::HookCallbackFn = Arc::new(|_input, _id, _ctx| {
         Box::pin(async {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             HookJSONOutput::Sync {

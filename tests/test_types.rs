@@ -1,4 +1,4 @@
-use rust_agent_sdk::{
+use prana::{
     AgentDefinition, AssistantMessage, ClaudeAgentOptions, ContentBlock, HookInput,
     HookSpecificOutput, McpServerConfig, McpServerConnectionStatus, McpServerInfo, McpServerStatus,
     McpStatusResponse, McpToolAnnotations, McpToolInfo, MessageContent, PermissionMode,
@@ -181,7 +181,7 @@ mod test_options {
     fn test_claude_code_options_with_system_prompt_preset() {
         let options = ClaudeAgentOptions {
             system_prompt: Some(SystemPromptConfig::Structured(
-                rust_agent_sdk::SystemPrompt::Preset {
+                prana::SystemPrompt::Preset {
                     preset: "claude_code".into(),
                     append: None,
                     exclude_dynamic_sections: None,
@@ -197,7 +197,7 @@ mod test_options {
     fn test_claude_code_options_with_system_prompt_preset_and_append() {
         let options = ClaudeAgentOptions {
             system_prompt: Some(SystemPromptConfig::Structured(
-                rust_agent_sdk::SystemPrompt::Preset {
+                prana::SystemPrompt::Preset {
                     preset: "claude_code".into(),
                     append: Some("Be concise.".into()),
                     exclude_dynamic_sections: None,
@@ -216,7 +216,7 @@ mod test_options {
     fn test_claude_code_options_with_system_prompt_preset_exclude_dynamic_sections() {
         let options = ClaudeAgentOptions {
             system_prompt: Some(SystemPromptConfig::Structured(
-                rust_agent_sdk::SystemPrompt::Preset {
+                prana::SystemPrompt::Preset {
                     preset: "claude_code".into(),
                     append: None,
                     exclude_dynamic_sections: Some(true),
@@ -234,11 +234,9 @@ mod test_options {
     #[test]
     fn test_claude_code_options_with_system_prompt_file() {
         let options = ClaudeAgentOptions {
-            system_prompt: Some(SystemPromptConfig::Structured(
-                rust_agent_sdk::SystemPrompt::File {
-                    path: "/path/to/prompt.md".into(),
-                },
-            )),
+            system_prompt: Some(SystemPromptConfig::Structured(prana::SystemPrompt::File {
+                path: "/path/to/prompt.md".into(),
+            })),
             ..Default::default()
         };
         let json_val = serde_json::to_value(&options.system_prompt).unwrap();

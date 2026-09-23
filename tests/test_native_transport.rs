@@ -15,8 +15,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-use rust_agent_sdk::sdk_mcp::{PropertySchema, SdkMcpServer, ToolInputSchema, ToolOutput};
-use rust_agent_sdk::{
+use prana::sdk_mcp::{PropertySchema, SdkMcpServer, ToolInputSchema, ToolOutput};
+use prana::{
     ClaudeAgentOptions, ClaudeSDKClient, ContentBlock, HookEvent, HookJSONOutput, HookMatcher,
     HookSpecificOutput, InMemorySessionStore, Message, NativeApiTransport, PermissionResult,
     PermissionResultAllow, PermissionResultDeny, SessionStore, ToolsConfig,
@@ -149,8 +149,8 @@ struct Fixture {
 
 struct FixtureSpec {
     mcp_server: Option<Arc<SdkMcpServer>>,
-    can_use_tool: Option<rust_agent_sdk::CanUseToolFn>,
-    post_tool_use: Option<rust_agent_sdk::HookCallbackFn>,
+    can_use_tool: Option<prana::CanUseToolFn>,
+    post_tool_use: Option<prana::HookCallbackFn>,
     session_store: bool,
     resume: Option<String>,
     max_turns: Option<i64>,
@@ -266,7 +266,7 @@ fn mcp_server_with_log() -> (Arc<SdkMcpServer>, Arc<Mutex<Vec<Value>>>) {
     (server, calls)
 }
 
-fn drive(messages: &[Message]) -> (Vec<String>, Option<rust_agent_sdk::ResultMessage>) {
+fn drive(messages: &[Message]) -> (Vec<String>, Option<prana::ResultMessage>) {
     let mut texts = Vec::new();
     let mut result = None;
     for message in messages {
@@ -323,7 +323,7 @@ async fn a_tool_cycle_runs_the_mcp_tool_and_the_second_request_carries_the_resul
         sse_text("gravado com sucesso"),
     ])
     .await;
-    let allow: rust_agent_sdk::CanUseToolFn = Arc::new(|_name, _input, _ctx| {
+    let allow: prana::CanUseToolFn = Arc::new(|_name, _input, _ctx| {
         Box::pin(async { PermissionResult::Allow(PermissionResultAllow::default()) })
     });
     let mut fx = fixture(
@@ -374,7 +374,7 @@ async fn can_use_tool_deny_reaches_the_model_and_the_result_counts_the_denial() 
         sse_text("entendi, vou commitar"),
     ])
     .await;
-    let deny: rust_agent_sdk::CanUseToolFn = Arc::new(|_name, _input, _ctx| {
+    let deny: prana::CanUseToolFn = Arc::new(|_name, _input, _ctx| {
         Box::pin(async {
             PermissionResult::Deny(PermissionResultDeny {
                 behavior: "deny".to_string(),
@@ -427,10 +427,10 @@ async fn post_tool_use_hook_context_reaches_the_model() {
         sse_text("ok"),
     ])
     .await;
-    let allow: rust_agent_sdk::CanUseToolFn = Arc::new(|_name, _input, _ctx| {
+    let allow: prana::CanUseToolFn = Arc::new(|_name, _input, _ctx| {
         Box::pin(async { PermissionResult::Allow(PermissionResultAllow::default()) })
     });
-    let hook: rust_agent_sdk::HookCallbackFn = Arc::new(|_input, _tool_use_id, _ctx| {
+    let hook: prana::HookCallbackFn = Arc::new(|_input, _tool_use_id, _ctx| {
         Box::pin(async {
             HookJSONOutput::Sync {
                 continue_: None,
@@ -496,10 +496,9 @@ async fn the_session_store_mirrors_the_transcript() {
     // sob a MESMA chave (project_key, session_id) que o subprocess usaria.
     let (_, result) = drive(&messages);
     let session_id = result.expect("result").session_id;
-    let project_key =
-        rust_agent_sdk::project_key_for_directory(Some(&fx.cwd.path().display().to_string()))
-            .expect("project key");
-    let key = rust_agent_sdk::SessionKey::new(project_key, session_id);
+    let project_key = prana::project_key_for_directory(Some(&fx.cwd.path().display().to_string()))
+        .expect("project key");
+    let key = prana::SessionKey::new(project_key, session_id);
     let entries = store
         .load(&key)
         .await
@@ -638,9 +637,9 @@ async fn dropping_the_client_mid_turn_aborts_the_engine() {
     // bypassPermissions: a tool roda sem round-trip pelo cliente, então o
     // que segura o engine é só o handler lento, não uma permissão pendente.
     let mut transport_options = base_options(&spec, &api.addr, &cfg, &cwd_path);
-    transport_options.permission_mode = Some(rust_agent_sdk::PermissionMode::BypassPermissions);
+    transport_options.permission_mode = Some(prana::PermissionMode::BypassPermissions);
     let mut client_options = base_options(&spec, &api.addr, &cfg, &cwd_path);
-    client_options.permission_mode = Some(rust_agent_sdk::PermissionMode::BypassPermissions);
+    client_options.permission_mode = Some(prana::PermissionMode::BypassPermissions);
     let transport = NativeApiTransport::new(transport_options);
     let mut client = ClaudeSDKClient::new(client_options).with_transport(Box::new(transport));
 

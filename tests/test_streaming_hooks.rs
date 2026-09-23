@@ -18,11 +18,11 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rust_agent_sdk::types::{
+use prana::types::{
     ClaudeAgentOptions, HookCallbackFn, HookEvent, HookInput, HookJSONOutput, HookMatcher,
     HookSpecificOutput,
 };
-use rust_agent_sdk::{ClaudeSDKClient, Transport};
+use prana::{ClaudeSDKClient, Transport};
 use serde_json::{json, Value};
 
 /// Sessão pendurada é falha, não espera.
@@ -41,20 +41,20 @@ struct ScriptedTransport {
 
 #[async_trait::async_trait]
 impl Transport for ScriptedTransport {
-    async fn connect(&mut self) -> rust_agent_sdk::errors::Result<()> {
+    async fn connect(&mut self) -> prana::errors::Result<()> {
         self.connected = true;
         Ok(())
     }
 
-    async fn close(&mut self) -> rust_agent_sdk::errors::Result<()> {
+    async fn close(&mut self) -> prana::errors::Result<()> {
         self.connected = false;
         Ok(())
     }
 
-    async fn write(&mut self, data: &str) -> rust_agent_sdk::errors::Result<()> {
+    async fn write(&mut self, data: &str) -> prana::errors::Result<()> {
         for line in data.lines().filter(|l| !l.trim().is_empty()) {
             let value: Value = serde_json::from_str(line.trim()).map_err(|e| {
-                rust_agent_sdk::ClaudeSDKError::sdk(format!("json inválido do cliente: {e}"))
+                prana::ClaudeSDKError::sdk(format!("json inválido do cliente: {e}"))
             })?;
             // O handshake do `initialize` é um control_request do CLIENTE e
             // precisa de resposta, senão o connect pendura.
@@ -81,7 +81,7 @@ impl Transport for ScriptedTransport {
         Ok(())
     }
 
-    async fn end_input(&mut self) -> rust_agent_sdk::errors::Result<()> {
+    async fn end_input(&mut self) -> prana::errors::Result<()> {
         Ok(())
     }
 
@@ -89,7 +89,7 @@ impl Transport for ScriptedTransport {
         self.connected
     }
 
-    async fn read_message(&mut self) -> rust_agent_sdk::errors::Result<Option<Value>> {
+    async fn read_message(&mut self) -> prana::errors::Result<Option<Value>> {
         loop {
             if let Some(msg) = self.script.lock().unwrap().outgoing.pop_front() {
                 return Ok(Some(msg));

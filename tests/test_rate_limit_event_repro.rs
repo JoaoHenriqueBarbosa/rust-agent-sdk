@@ -8,8 +8,8 @@
 ///
 /// Ported from Python: tests/test_rate_limit_event_repro.py (5 tests)
 /// ALL tests call `todo!()` methods and will panic — that's expected and correct.
-use rust_agent_sdk::parse_message;
-use rust_agent_sdk::types::*;
+use prana::parse_message;
+use prana::types::*;
 use serde_json::json;
 
 #[cfg(test)]

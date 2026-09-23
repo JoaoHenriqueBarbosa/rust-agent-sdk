@@ -14,10 +14,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-use rust_agent_sdk::internal::sessions::{bun_hash_base36, cli_config_home_dir, cli_sanitize_path};
-use rust_agent_sdk::sdk_mcp::{PropertySchema, SdkMcpServer, ToolInputSchema, ToolOutput};
-use rust_agent_sdk::session::SessionStorage;
-use rust_agent_sdk::{
+use prana::internal::sessions::{bun_hash_base36, cli_config_home_dir, cli_sanitize_path};
+use prana::sdk_mcp::{PropertySchema, SdkMcpServer, ToolInputSchema, ToolOutput};
+use prana::session::SessionStorage;
+use prana::{
     ClaudeAgentOptions, ClaudeSDKClient, InMemorySessionStore, Message, NativeApiTransport,
     PermissionMode, SessionStore, ToolsConfig,
 };
@@ -322,7 +322,7 @@ async fn each_content_block_is_one_assistant_message_and_one_chained_transcript_
 
     // Contrato do `queryModel`: um AssistantMessage por bloco, todos com o id
     // da resposta, sem `stop_reason` (o `message_delta` ainda não chegou).
-    let assistants: Vec<&rust_agent_sdk::AssistantMessage> = messages
+    let assistants: Vec<&prana::AssistantMessage> = messages
         .iter()
         .filter_map(|m| match m {
             Message::Assistant(a) => Some(a),
@@ -370,7 +370,7 @@ async fn each_content_block_is_one_assistant_message_and_one_chained_transcript_
     );
     assert_eq!(prompt["entrypoint"], "sdk-rs");
     assert_eq!(prompt["userType"], "external");
-    assert_eq!(prompt["version"], rust_agent_sdk::session::CLI_VERSION);
+    assert_eq!(prompt["version"], prana::session::CLI_VERSION);
     assert_eq!(prompt["gitBranch"], "HEAD");
     assert_eq!(prompt["sessionId"], session_id.as_str());
     assert_eq!(
@@ -482,7 +482,7 @@ async fn the_mirror_carries_exactly_the_entries_written_to_disk() {
         .to_string_lossy()
         .to_string();
     let mirrored = store
-        .load(&rust_agent_sdk::SessionKey::new(project_key, session_id))
+        .load(&prana::SessionKey::new(project_key, session_id))
         .await
         .expect("load")
         .expect("entradas espelhadas");
@@ -620,10 +620,9 @@ async fn a_native_transcript_is_read_back_by_the_cli_rules() {
     let session_id = session_id_of(&messages);
     let path = fx.project_dir().join(format!("{session_id}.jsonl"));
     let content = std::fs::read_to_string(&path).unwrap();
-    let loaded = rust_agent_sdk::internal::transcript_load::load_conversation_from_str(&content)
-        .expect("conversa");
-    let api_messages =
-        rust_agent_sdk::internal::transcript_load::messages_for_api(&loaded.messages);
+    let loaded =
+        prana::internal::transcript_load::load_conversation_from_str(&content).expect("conversa");
+    let api_messages = prana::internal::transcript_load::messages_for_api(&loaded.messages);
     let roles: Vec<_> = api_messages
         .iter()
         .map(|m| format!("{:?}", m.role))

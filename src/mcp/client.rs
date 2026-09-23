@@ -346,7 +346,7 @@ async fn handshake(transport: &dyn McpTransport) -> std::result::Result<Session,
                 "protocolVersion": LATEST_PROTOCOL_VERSION,
                 "capabilities": {},
                 "clientInfo": {
-                    "name": "rust-agent-sdk",
+                    "name": env!("CARGO_PKG_NAME"),
                     "version": env!("CARGO_PKG_VERSION")
                 }
             })),

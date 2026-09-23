@@ -12,8 +12,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use rust_agent_sdk::internal::client::InternalClient;
-use rust_agent_sdk::types::*;
+use prana::internal::client::InternalClient;
+use prana::types::*;
 use serde_json::json;
 
 // ---------------------------------------------------------------------------

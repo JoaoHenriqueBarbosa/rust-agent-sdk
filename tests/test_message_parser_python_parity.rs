@@ -2,7 +2,7 @@
 //! 0.2.93: `deferred_tool_use` e `api_error_status` no `ResultMessage`, e os
 //! eventos de hook (`hook_started`/`hook_response`) como `HookEventMessage`.
 
-use rust_agent_sdk::{parse_message, DeferredToolUse, Message};
+use prana::{parse_message, DeferredToolUse, Message};
 use serde_json::json;
 
 fn result_frame(extra: serde_json::Value) -> serde_json::Value {

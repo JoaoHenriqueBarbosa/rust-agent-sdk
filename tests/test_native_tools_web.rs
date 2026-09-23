@@ -11,19 +11,19 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
-use rust_agent_sdk::api::streaming::ToolUseBlock;
-use rust_agent_sdk::api::types::{ApiResponse, ContentBlock, Role, Usage};
-use rust_agent_sdk::tools::framework::{
+use prana::api::streaming::ToolUseBlock;
+use prana::api::types::{ApiResponse, ContentBlock, Role, Usage};
+use prana::tools::framework::{
     ModelCallFn, PermissionCallbackFn, PermissionOutcome, Tool, ToolContext, ToolExecutor,
     ToolPermissionRequest, ToolRegistry,
 };
-use rust_agent_sdk::tools::html_to_markdown::turndown;
-use rust_agent_sdk::tools::permission::{PermissionResult, PermissionRules};
-use rust_agent_sdk::tools::web_fetch::{
+use prana::tools::html_to_markdown::turndown;
+use prana::tools::permission::{PermissionResult, PermissionRules};
+use prana::tools::web_fetch::{
     make_secondary_model_prompt, ConfiguredWebFetchTool, WebFetchConfig, WebFetchTool,
 };
-use rust_agent_sdk::tools::web_search::WebSearchTool;
-use rust_agent_sdk::PermissionMode;
+use prana::tools::web_search::WebSearchTool;
+use prana::PermissionMode;
 
 // ---------------------------------------------------------------------------
 // Fixtures capturadas do CLI
@@ -850,7 +850,7 @@ async fn web_search_asks_with_the_cli_suggestion() {
 #[test]
 fn web_search_definition_is_the_cli_one() {
     let tool = WebSearchTool::default();
-    let month = rust_agent_sdk::tools::web_search::local_month_year();
+    let month = prana::tools::web_search::local_month_year();
     assert!(tool.description().contains(&format!(
         "  - The current month is {month}. You MUST use this year"
     )));

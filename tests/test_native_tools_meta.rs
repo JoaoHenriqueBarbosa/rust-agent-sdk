@@ -15,18 +15,18 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use rust_agent_sdk::tools::agent::{
+use prana::tools::agent::{
     active_agents_from_map, builtin_agents, subagent_system_prompt, AgentDescriptor,
     AgentPromptOptions, AgentRunFn, AgentRunOutcome, AgentSource, AgentTool, BuiltinAgentOptions,
     SubagentCompletion, SubagentEnvironment,
 };
-use rust_agent_sdk::tools::framework::{
+use prana::tools::framework::{
     PermissionCallbackFn, PermissionOutcome, ToolContext, ToolExecutionResult, ToolExecutor,
     ToolPermissionRequest, ToolRegistry,
 };
-use rust_agent_sdk::tools::permission::PermissionRules;
-use rust_agent_sdk::tools::task_store::TaskStore;
-use rust_agent_sdk::types::PermissionMode;
+use prana::tools::permission::PermissionRules;
+use prana::tools::task_store::TaskStore;
+use prana::types::PermissionMode;
 
 fn sha(text: &str) -> String {
     let mut hasher = Sha256::new();
@@ -38,8 +38,8 @@ fn sha(text: &str) -> String {
         .collect()
 }
 
-fn tool_use(id: &str, name: &str, input: Value) -> rust_agent_sdk::api::streaming::ToolUseBlock {
-    rust_agent_sdk::api::streaming::ToolUseBlock {
+fn tool_use(id: &str, name: &str, input: Value) -> prana::api::streaming::ToolUseBlock {
+    prana::api::streaming::ToolUseBlock {
         id: id.to_string(),
         name: name.to_string(),
         input,
@@ -162,7 +162,7 @@ fn noop_runner() -> AgentRunFn {
 
 #[test]
 fn agent_description_and_schema_match_the_cli_in_sdk_mode() {
-    use rust_agent_sdk::tools::framework::Tool;
+    use prana::tools::framework::Tool;
     let tool = AgentTool::with_prompt_options(
         builtin_agents(&BuiltinAgentOptions {
             disabled: false,
@@ -188,7 +188,7 @@ fn agent_description_and_schema_match_the_cli_in_sdk_mode() {
 
 #[test]
 fn agent_listing_with_an_extra_agent_matches_the_cli_outside_sdk() {
-    use rust_agent_sdk::tools::framework::Tool;
+    use prana::tools::framework::Tool;
     // Fora do SDK o CLI lista também o claude-code-guide; com ele como
     // agente extra, a descrição fica idêntica à captura do CLI.
     let mut agents = builtin_agents(&BuiltinAgentOptions {
@@ -377,7 +377,7 @@ async fn denied_agent_type_disappears_and_errors_like_the_cli() {
         rules.clone(),
         completing_runner("x"),
     );
-    use rust_agent_sdk::tools::framework::Tool;
+    use prana::tools::framework::Tool;
     assert!(!tool.description().contains("- Explore:"));
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(tool));
@@ -878,7 +878,7 @@ async fn worktree_enter_and_remove_in_a_real_repo() {
 
 #[test]
 fn mcp_result_conversion_follows_the_cli() {
-    use rust_agent_sdk::tools::mcp_result::mcp_call_result_to_tool_result;
+    use prana::tools::mcp_result::mcp_call_result_to_tool_result;
     let out = mcp_call_result_to_tool_result(&json!({"content": []}), "srv", "t", None);
     assert!(out.content.is_empty());
     let out = mcp_call_result_to_tool_result(

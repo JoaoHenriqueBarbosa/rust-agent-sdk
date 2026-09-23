@@ -14,7 +14,7 @@
 
 #![cfg(any(feature = "postgres", feature = "redis-store"))]
 
-use rust_agent_sdk::{SessionKey, SessionListSubkeysKey, SessionStore, SessionStoreEntry};
+use prana::{SessionKey, SessionListSubkeysKey, SessionStore, SessionStoreEntry};
 
 fn e(n: i64) -> SessionStoreEntry {
     serde_json::json!({ "type": "x", "n": n })
@@ -124,7 +124,7 @@ async fn run_contracts(store: &dyn SessionStore, proj: &str) {
 #[tokio::test]
 #[ignore = "requires a live Postgres (set RUST_AGENT_SDK_TEST_PG)"]
 async fn postgres_conformance() {
-    use rust_agent_sdk::PostgresSessionStore;
+    use prana::PostgresSessionStore;
     let url = std::env::var("RUST_AGENT_SDK_TEST_PG")
         .expect("set RUST_AGENT_SDK_TEST_PG to a Postgres connection string");
     let store = PostgresSessionStore::connect(&url, None)
@@ -137,7 +137,7 @@ async fn postgres_conformance() {
 #[tokio::test]
 #[ignore = "requires a live Redis (set RUST_AGENT_SDK_TEST_REDIS)"]
 async fn redis_conformance() {
-    use rust_agent_sdk::RedisSessionStore;
+    use prana::RedisSessionStore;
     let url = std::env::var("RUST_AGENT_SDK_TEST_REDIS")
         .expect("set RUST_AGENT_SDK_TEST_REDIS to a Redis URL");
     let store = RedisSessionStore::connect(&url, Some("test")).expect("open redis");

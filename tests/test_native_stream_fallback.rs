@@ -15,7 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-use rust_agent_sdk::{
+use prana::{
     ClaudeAgentOptions, ClaudeSDKClient, Message, NativeApiTransport, ResultMessage, ToolsConfig,
 };
 

@@ -1,15 +1,13 @@
 //! Smoke do transporte nativo contra um endpoint real: um turno de texto.
 //! Uso: ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY/ANTHROPIC_MODEL no ambiente.
 
-use rust_agent_sdk::{
-    ClaudeAgentOptions, ClaudeSDKClient, ContentBlock, Message, NativeApiTransport,
-};
+use prana::{ClaudeAgentOptions, ClaudeSDKClient, ContentBlock, Message, NativeApiTransport};
 
 #[tokio::main]
 async fn main() {
     let options = || ClaudeAgentOptions {
         max_turns: Some(2),
-        tools: Some(rust_agent_sdk::types::ToolsConfig::List(Vec::new())),
+        tools: Some(prana::types::ToolsConfig::List(Vec::new())),
         ..Default::default()
     };
     let transport = NativeApiTransport::new(options());

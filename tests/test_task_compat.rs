@@ -4,7 +4,7 @@
 //! Rust has no trio equivalent, so both variants are ported as separate
 //! `#[tokio::test]` functions.
 
-use rust_agent_sdk::spawn_detached;
+use prana::spawn_detached;
 use std::sync::{Arc, Mutex};
 
 // ===========================================================================

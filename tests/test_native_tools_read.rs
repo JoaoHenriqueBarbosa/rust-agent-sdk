@@ -9,14 +9,14 @@
 use std::io::Cursor;
 use std::path::Path;
 
-use rust_agent_sdk::api::streaming::ToolUseBlock;
-use rust_agent_sdk::api::types::ContentBlock;
-use rust_agent_sdk::tools::file_read::FileReadTool;
-use rust_agent_sdk::tools::framework::{
+use prana::api::streaming::ToolUseBlock;
+use prana::api::types::ContentBlock;
+use prana::tools::file_read::FileReadTool;
+use prana::tools::framework::{
     Tool, ToolContext, ToolExecutionResult, ToolExecutor, ToolRegistry, ToolResultContent,
     ToolResultPayload,
 };
-use rust_agent_sdk::types::PermissionMode;
+use prana::types::PermissionMode;
 use serde_json::{json, Value};
 
 const MITIGATION: &str = "\n\n<system-reminder>\nWhenever you read a file, you should consider whether it would be considered malware. You CAN and SHOULD provide analysis of malware, what it is doing. But you MUST refuse to improve or augment the code. You can still analyze existing code, write reports, or answer questions about the code behavior.\n</system-reminder>\n";
@@ -444,7 +444,7 @@ async fn small_pdf_goes_as_a_document_meta_message() {
         format!(
             "PDF file read: {} ({})",
             file.display(),
-            rust_agent_sdk::tools::framework::format_file_size(bytes.len() as u64)
+            prana::tools::framework::format_file_size(bytes.len() as u64)
         )
     );
     use base64::Engine;
@@ -487,7 +487,7 @@ async fn pdf_over_ten_pages_needs_the_pages_parameter() {
         format!(
             "PDF pages extracted: 2 page(s) from {} ({})",
             file.display(),
-            rust_agent_sdk::tools::framework::format_file_size(size)
+            prana::tools::framework::format_file_size(size)
         )
     );
     let data = tur(&r);

@@ -9,8 +9,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rust_agent_sdk::internal::session_store::InMemorySessionStore;
-use rust_agent_sdk::{
+use prana::internal::session_store::InMemorySessionStore;
+use prana::{
     ClaudeAgentOptions, ClaudeSDKClient, ContentBlock, Message, SessionKey, SessionStore,
     SessionStoreEntry, Transport,
 };
@@ -75,19 +75,19 @@ impl ScriptedTransport {
 
 #[async_trait::async_trait]
 impl Transport for ScriptedTransport {
-    async fn connect(&mut self) -> rust_agent_sdk::errors::Result<()> {
+    async fn connect(&mut self) -> prana::errors::Result<()> {
         self.connected = true;
         Ok(())
     }
 
-    async fn close(&mut self) -> rust_agent_sdk::errors::Result<()> {
+    async fn close(&mut self) -> prana::errors::Result<()> {
         self.connected = false;
         Ok(())
     }
 
-    async fn write(&mut self, data: &str) -> rust_agent_sdk::errors::Result<()> {
+    async fn write(&mut self, data: &str) -> prana::errors::Result<()> {
         let value: serde_json::Value = serde_json::from_str(data.trim())
-            .map_err(|e| rust_agent_sdk::ClaudeSDKError::sdk(format!("json inválido: {e}")))?;
+            .map_err(|e| prana::ClaudeSDKError::sdk(format!("json inválido: {e}")))?;
         let mut script = self.script.lock().unwrap();
         match value.get("type").and_then(|t| t.as_str()) {
             Some("control_request") => {
@@ -124,7 +124,7 @@ impl Transport for ScriptedTransport {
         Ok(())
     }
 
-    async fn end_input(&mut self) -> rust_agent_sdk::errors::Result<()> {
+    async fn end_input(&mut self) -> prana::errors::Result<()> {
         self.script.lock().unwrap().end_input_calls += 1;
         Ok(())
     }
@@ -133,7 +133,7 @@ impl Transport for ScriptedTransport {
         self.connected
     }
 
-    async fn read_message(&mut self) -> rust_agent_sdk::errors::Result<Option<serde_json::Value>> {
+    async fn read_message(&mut self) -> prana::errors::Result<Option<serde_json::Value>> {
         loop {
             if let Some(msg) = self.script.lock().unwrap().outgoing.pop_front() {
                 return Ok(Some(msg));
@@ -284,13 +284,13 @@ async fn streaming_session_mirrors_transcript_to_session_store() {
             &self,
             key: &SessionKey,
             entries: &[SessionStoreEntry],
-        ) -> Result<(), rust_agent_sdk::ClaudeSDKError> {
+        ) -> Result<(), prana::ClaudeSDKError> {
             self.0.append(key, entries).await
         }
         async fn load(
             &self,
             key: &SessionKey,
-        ) -> Result<Option<Vec<SessionStoreEntry>>, rust_agent_sdk::ClaudeSDKError> {
+        ) -> Result<Option<Vec<SessionStoreEntry>>, prana::ClaudeSDKError> {
             self.0.load(key).await
         }
     }

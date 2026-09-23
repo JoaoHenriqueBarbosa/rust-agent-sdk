@@ -10,8 +10,8 @@ use serde_json::json;
 use serial_test::serial;
 use tempfile::TempDir;
 
-use rust_agent_sdk::internal::session_import::MAX_PENDING_ENTRIES;
-use rust_agent_sdk::{
+use prana::internal::session_import::MAX_PENDING_ENTRIES;
+use prana::{
     import_session_to_store, project_key_for_directory, InMemorySessionStore, SessionKey,
     SessionListSubkeysKey, SessionStore, SessionStoreEntry,
 };
@@ -385,7 +385,7 @@ async fn test_session_not_found_raises() {
 #[tokio::test]
 #[serial]
 async fn test_subpath_matches_file_path_to_session_key() {
-    use rust_agent_sdk::internal::session_store::file_path_to_session_key;
+    use prana::internal::session_store::file_path_to_session_key;
 
     let (_tmp, project_dir, cwd, _pk) = setup_env();
     write_jsonl(

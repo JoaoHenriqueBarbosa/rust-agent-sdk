@@ -1,6 +1,6 @@
-use rust_agent_sdk::errors::ClaudeSDKError;
-use rust_agent_sdk::parse_message;
-use rust_agent_sdk::types::*;
+use prana::errors::ClaudeSDKError;
+use prana::parse_message;
+use prana::types::*;
 use serde_json::json;
 
 #[cfg(test)]

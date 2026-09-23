@@ -6,12 +6,12 @@
 //! Live conformance tests for the Postgres and Redis backends live in
 //! `tests/test_stores_live.rs` (feature-gated, `#[ignore]`d).
 
-use rust_agent_sdk::{
+use prana::{
     project_key_for_directory, ClaudeAgentOptions, ClaudeSDKError, InMemorySessionStore,
     SessionKey, SessionListSubkeysKey, SessionStore, SessionStoreEntry,
 };
 
-use rust_agent_sdk::internal::session_store_validation::validate_session_store_options;
+use prana::internal::session_store_validation::validate_session_store_options;
 
 fn make_key() -> SessionKey {
     SessionKey::new("proj", "sess")
@@ -512,7 +512,7 @@ mod test_project_key_for_directory {
 
     #[test]
     fn test_relative_dir_resolved_to_absolute_before_hashing() {
-        use rust_agent_sdk::internal::sessions::sanitize_path;
+        use prana::internal::sessions::sanitize_path;
 
         let key = project_key_for_directory(Some(".")).unwrap();
         let abs = std::env::current_dir()
@@ -544,7 +544,7 @@ mod test_project_key_for_directory {
 
     #[test]
     fn test_long_path_uses_portable_djb2_suffix() {
-        use rust_agent_sdk::internal::sessions::simple_hash;
+        use prana::internal::sessions::simple_hash;
 
         let long_segment = "a".repeat(300);
         let long_dir = format!("/{long_segment}");

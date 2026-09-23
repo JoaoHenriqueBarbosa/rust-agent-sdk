@@ -1,4 +1,4 @@
-use rust_agent_sdk::ClaudeSDKError;
+use prana::ClaudeSDKError;
 
 mod test_error_types {
     use super::*;

@@ -12,12 +12,12 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use rust_agent_sdk::api::streaming::ToolUseBlock;
-use rust_agent_sdk::tools::framework::{
+use prana::api::streaming::ToolUseBlock;
+use prana::tools::framework::{
     PermissionCallbackFn, PermissionOutcome, Tool, ToolContext, ToolExecutor,
     ToolPermissionRequest, ToolRegistry, ToolResult, DEFAULT_TOOL_NAMES,
 };
-use rust_agent_sdk::tools::permission::PermissionRules;
+use prana::tools::permission::PermissionRules;
 
 fn fixture(name: &str) -> Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -100,7 +100,7 @@ fn builtin_definitions_match_the_cli_capture() {
 
 #[test]
 fn agent_definition_matches_the_cli_capture_without_custom_agents() {
-    use rust_agent_sdk::tools::agent::{
+    use prana::tools::agent::{
         active_agents_from_map, agent_tool_input_schema, agent_tool_prompt, AgentPromptOptions,
         BuiltinAgentOptions,
     };

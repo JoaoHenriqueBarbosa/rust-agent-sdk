@@ -5,7 +5,7 @@
 //! queues one full turn (assistant → user echo → assistant → result). That is
 //! what the Python suite got from mocking the subprocess.
 
-use rust_agent_sdk::{
+use prana::{
     ClaudeAgentOptions, ClaudeSDKClient, ClaudeSDKError, ContentBlock, ContextUsageResponse,
     McpStatusResponse, Message, Transport,
 };
@@ -171,23 +171,23 @@ impl MockTransport {
 
 #[async_trait::async_trait]
 impl Transport for MockTransport {
-    async fn connect(&mut self) -> rust_agent_sdk::errors::Result<()> {
+    async fn connect(&mut self) -> prana::errors::Result<()> {
         self.connected = true;
         Ok(())
     }
 
-    async fn close(&mut self) -> rust_agent_sdk::errors::Result<()> {
+    async fn close(&mut self) -> prana::errors::Result<()> {
         self.connected = false;
         Ok(())
     }
 
-    async fn write(&mut self, data: &str) -> rust_agent_sdk::errors::Result<()> {
+    async fn write(&mut self, data: &str) -> prana::errors::Result<()> {
         self.written.lock().unwrap().push(data.to_string());
         self.handle_written(data);
         Ok(())
     }
 
-    async fn end_input(&mut self) -> rust_agent_sdk::errors::Result<()> {
+    async fn end_input(&mut self) -> prana::errors::Result<()> {
         Ok(())
     }
 
@@ -195,7 +195,7 @@ impl Transport for MockTransport {
         self.connected
     }
 
-    async fn read_message(&mut self) -> rust_agent_sdk::errors::Result<Option<serde_json::Value>> {
+    async fn read_message(&mut self) -> prana::errors::Result<Option<serde_json::Value>> {
         Ok(self.outgoing.pop_front())
     }
 }
@@ -285,7 +285,7 @@ async fn test_query() {
     // Check that we got a user-related response with the correct content
     let has_content = messages.iter().any(|msg| match msg {
         Message::User(u) => {
-            matches!(&u.content, rust_agent_sdk::MessageContent::Text(t) if t == "Test message")
+            matches!(&u.content, prana::MessageContent::Text(t) if t == "Test message")
         }
         _ => false,
     });
@@ -601,9 +601,7 @@ async fn test_client_with_options() {
     let options = ClaudeAgentOptions {
         cwd: Some(PathBuf::from("/custom/path")),
         allowed_tools: vec!["Read".to_string(), "Write".to_string()],
-        system_prompt: Some(rust_agent_sdk::SystemPromptConfig::String(
-            "Be helpful".to_string(),
-        )),
+        system_prompt: Some(prana::SystemPromptConfig::String("Be helpful".to_string())),
         ..Default::default()
     };
 
@@ -643,10 +641,9 @@ async fn test_concurrent_send_receive() {
 async fn test_query_with_async_iterable() {
     // In Python this uses query() with an async iterable and a mocked subprocess.
     // In Rust we test the query function directly.
-    let messages =
-        rust_agent_sdk::query_collect("First message", Some(ClaudeAgentOptions::default()), None)
-            .await
-            .unwrap();
+    let messages = prana::query_collect("First message", Some(ClaudeAgentOptions::default()), None)
+        .await
+        .unwrap();
 
     // Should get at least a ResultMessage
     let has_result = messages.iter().any(|m| matches!(m, Message::Result(_)));

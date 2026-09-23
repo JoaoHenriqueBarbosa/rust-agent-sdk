@@ -9,10 +9,8 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use rust_agent_sdk::internal::transport::{
-    SubprocessCLITransport, Transport, DEFAULT_MAX_BUFFER_SIZE,
-};
-use rust_agent_sdk::types::ClaudeAgentOptions;
+use prana::internal::transport::{SubprocessCLITransport, Transport, DEFAULT_MAX_BUFFER_SIZE};
+use prana::types::ClaudeAgentOptions;
 
 // -------------------------------------------------------------------------
 // Helpers

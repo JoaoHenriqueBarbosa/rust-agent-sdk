@@ -11,13 +11,11 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 
-use rust_agent_sdk::internal::session_store::file_path_to_session_key;
-use rust_agent_sdk::internal::transcript_mirror::{
+use prana::internal::session_store::file_path_to_session_key;
+use prana::internal::transcript_mirror::{
     OnErrorCallback, TranscriptMirrorBatcher, MAX_PENDING_BYTES, MAX_PENDING_ENTRIES,
 };
-use rust_agent_sdk::{
-    ClaudeSDKError, InMemorySessionStore, SessionKey, SessionStore, SessionStoreEntry,
-};
+use prana::{ClaudeSDKError, InMemorySessionStore, SessionKey, SessionStore, SessionStoreEntry};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -787,8 +785,8 @@ mod test_transcript_mirror_batcher {
 
 mod test_build_mirror_batcher_flush_mode {
     use super::*;
-    use rust_agent_sdk::internal::session_resume::build_mirror_batcher;
-    use rust_agent_sdk::SessionStoreFlushMode;
+    use prana::internal::session_resume::build_mirror_batcher;
+    use prana::SessionStoreFlushMode;
     use std::collections::HashMap;
     use std::path::Path;
 
@@ -877,7 +875,7 @@ mod test_build_mirror_batcher_flush_mode {
 
     #[test]
     fn test_options_default_is_batched() {
-        let opts = rust_agent_sdk::ClaudeAgentOptions::default();
+        let opts = prana::ClaudeAgentOptions::default();
         assert_eq!(opts.session_store_flush, SessionStoreFlushMode::Batched);
     }
 }
@@ -888,7 +886,7 @@ mod test_build_mirror_batcher_flush_mode {
 
 mod test_session_mirror_flag {
     use super::*;
-    use rust_agent_sdk::{ClaudeAgentOptions, SubprocessCLITransport};
+    use prana::{ClaudeAgentOptions, SubprocessCLITransport};
 
     #[test]
     fn test_flag_present_when_session_store_set() {

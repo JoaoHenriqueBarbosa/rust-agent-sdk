@@ -16,9 +16,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use rust_agent_sdk::parse_message;
-use rust_agent_sdk::types::*;
-use rust_agent_sdk::SubprocessCLITransport;
+use prana::parse_message;
+use prana::types::*;
+use prana::SubprocessCLITransport;
 use serde_json::json;
 
 const DEFAULT_CLI_PATH: &str = "/usr/bin/claude";

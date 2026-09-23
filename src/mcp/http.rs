@@ -351,7 +351,11 @@ impl StreamableHttpTransport {
         reconnection: Reconnection,
     ) -> Result<Self, McpError> {
         let client = reqwest::Client::builder()
-            .user_agent(format!("rust-agent-sdk/{}", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!(
+                env!("CARGO_PKG_NAME"),
+                "/",
+                env!("CARGO_PKG_VERSION")
+            ))
             .build()
             .map_err(McpError::transport)?;
         Ok(Self {

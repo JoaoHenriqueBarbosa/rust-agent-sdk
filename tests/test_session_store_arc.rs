@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use rust_agent_sdk::{
+use prana::{
     project_key_for_directory, InMemorySessionStore, SessionKey, SessionStore, SessionStoreEntry,
 };
 use serde_json::json;
