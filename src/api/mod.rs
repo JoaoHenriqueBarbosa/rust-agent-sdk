@@ -1,3 +1,4 @@
+pub mod cache_breakpoints;
 pub mod client;
 pub mod cost;
 pub mod error_classifier;

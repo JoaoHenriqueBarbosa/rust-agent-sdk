@@ -6,9 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::stream::Stream;
 
-use crate::api::types::{
-    CacheControl, ContentBlock, ToolDefinition, ToolResultContent as ApiToolResultContent,
-};
+use crate::api::types::{ContentBlock, ToolDefinition, ToolResultContent as ApiToolResultContent};
 use crate::tools::permission::{PermissionDecision, PermissionRules};
 use crate::types::PermissionMode;
 
@@ -396,28 +394,19 @@ impl ToolRegistry {
     }
 
     /// Generate API tool definitions for all registered tools.
-    /// Only the last tool gets cache_control to stay within the API limit
-    /// of 4 cache_control blocks per request.
+    /// O breakpoint de cache da última tool é posto no envio, pelo
+    /// `api::cache_breakpoints`, junto com os demais.
     pub fn api_definitions(&self) -> Vec<ToolDefinition> {
-        let all: Vec<&dyn Tool> = self.all_tools().collect();
-        let len = all.len();
-        all.into_iter()
-            .enumerate()
-            .map(|(i, tool)| {
-                let mut def = tool.api_definition().unwrap_or_else(|| ToolDefinition {
+        self.all_tools()
+            .map(|tool| {
+                tool.api_definition().unwrap_or_else(|| ToolDefinition {
                     r#type: None,
                     max_uses: None,
                     name: tool.name().to_string(),
                     description: Some(tool.description().to_string()),
                     input_schema: tool.input_schema(),
                     cache_control: None,
-                });
-                // Server tools NÃO aceitam cache_control — só a última tool
-                // cliente leva o breakpoint.
-                if i == len - 1 && def.r#type.is_none() {
-                    def.cache_control = Some(CacheControl::ephemeral());
-                }
-                def
+                })
             })
             .collect()
     }
@@ -1125,8 +1114,6 @@ mod tests {
         assert_eq!(defs.len(), 2);
         assert_eq!(defs[0].name, "bash");
         assert_eq!(defs[1].name, "read");
-        assert!(defs[0].cache_control.is_none()); // Only last tool gets cache_control
-        assert!(defs[1].cache_control.is_some());
     }
 
     #[test]

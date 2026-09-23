@@ -5,6 +5,28 @@ Versões ainda não publicadas ficam em `Unreleased`.
 
 ## [Unreleased]
 
+### Mudado: breakpoints de prompt cache no transporte nativo seguem a regra do jai
+
+O transporte nativo marcava três pontos, todos com TTL de 5 minutos: a última
+tool, o último bloco de system e o último bloco da última mensagem. Agora o
+`AnthropicClient` redistribui os breakpoints no corpo de toda chamada a
+`/v1/messages` (loop principal, subagentes, compactação, título) com o mesmo
+layout do `cache_opt` do jai, validado ao vivo numa request real de 308k tokens:
+
+- limpa todo `cache_control` que vier no request;
+- âncoras com TTL de 1h em `tools[-1]` e `system[-1]`, que seguram o prefixo
+  grande nas pausas de uma sessão de código;
+- cauda com TTL de 5m em `messages[-2]` e `messages[-1]`: a última cacheia a
+  conversa inteira, a penúltima o prefixo que o próximo turno vai ler;
+- nunca mais de 4, e sempre 1h antes de 5m na ordem do prefixo (a API devolve
+  400 no contrário).
+
+O beta `extended-cache-ttl-2025-04-11`, exigido pelo TTL de 1h, entrou nos
+betas default do cliente. Como no jai, marcações de cache feitas à mão
+(`ContentBlock::text_cached`, `SystemBlock::text_cached`) são descartadas no
+envio. `messages::inject_cache_control` foi removida: a marcação que ela fazia
+era apagada pela redistribuição.
+
 ### Adicionado: `JsonLineFramer` público
 
 O enquadramento dos frames stream-json (uma linha, um objeto; objeto partido

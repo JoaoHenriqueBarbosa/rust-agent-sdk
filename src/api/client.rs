@@ -51,6 +51,7 @@ impl AnthropicClient {
             beta_features: vec![
                 "interleaved-thinking-2025-05-14".to_string(),
                 "prompt-caching-2024-07-31".to_string(),
+                crate::api::cache_breakpoints::EXTENDED_CACHE_TTL_BETA.to_string(),
             ],
             default_model: DEFAULT_MODEL.to_string(),
             default_max_tokens: DEFAULT_MAX_TOKENS,
@@ -155,8 +156,7 @@ impl AnthropicClient {
 
         let url = format!("{}/v1/messages", self.base_url);
         let headers = self.build_headers();
-        let mut body = serde_json::to_string(&request)
-            .map_err(|e| ClaudeSDKError::sdk(format!("Failed to serialize request: {e}")))?;
+        let mut body = request_body(&request)?;
 
         let mut attempt = 0u32;
         let mut consecutive_529s = 0u32;
@@ -211,9 +211,7 @@ impl AnthropicClient {
                         if request.max_tokens > adjusted && attempt < self.retry_config.max_retries
                         {
                             request.max_tokens = adjusted;
-                            body = serde_json::to_string(&request).map_err(|e| {
-                                ClaudeSDKError::sdk(format!("Failed to serialize request: {e}"))
-                            })?;
+                            body = request_body(&request)?;
                             attempt += 1;
                             continue;
                         }
@@ -327,8 +325,7 @@ impl AnthropicClient {
         headers: &HeaderMap,
         request: &mut CreateMessageRequest,
     ) -> Result<reqwest::Response> {
-        let mut body = serde_json::to_string(request)
-            .map_err(|e| ClaudeSDKError::sdk(format!("Failed to serialize request: {e}")))?;
+        let mut body = request_body(request)?;
         let mut attempt = 0u32;
         let mut consecutive_529s = 0u32;
 
@@ -377,9 +374,7 @@ impl AnthropicClient {
                         if request.max_tokens > adjusted && attempt < self.retry_config.max_retries
                         {
                             request.max_tokens = adjusted;
-                            body = serde_json::to_string(&request).map_err(|e| {
-                                ClaudeSDKError::sdk(format!("Failed to serialize request: {e}"))
-                            })?;
+                            body = request_body(request)?;
                             attempt += 1;
                             continue;
                         }
@@ -429,6 +424,17 @@ impl AnthropicClient {
             }
         }
     }
+}
+
+/// Serializa o request com os breakpoints de cache redistribuídos: toda
+/// chamada a `/v1/messages` sai por aqui, então a regra vale para o loop
+/// principal, subagentes, compactação e título, como vale no proxy do jai.
+fn request_body(request: &CreateMessageRequest) -> Result<String> {
+    let mut value = serde_json::to_value(request)
+        .map_err(|e| ClaudeSDKError::sdk(format!("Failed to serialize request: {e}")))?;
+    crate::api::cache_breakpoints::optimize_cache_breakpoints(&mut value);
+    serde_json::to_string(&value)
+        .map_err(|e| ClaudeSDKError::sdk(format!("Failed to serialize request: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -665,6 +671,6 @@ mod tests {
         assert_eq!(client.base_url, "http://localhost:8080");
         assert_eq!(client.default_model, "claude-opus-4-20250514");
         assert_eq!(client.default_max_tokens, 4096);
-        assert_eq!(client.beta_features.len(), 3); // 2 defaults + 1
+        assert_eq!(client.beta_features.len(), 4); // 3 defaults + 1
     }
 }

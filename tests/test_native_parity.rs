@@ -143,6 +143,7 @@ struct Spec {
     hooks: Option<HashMap<HookEvent, Vec<HookMatcher>>>,
     allowed_tools: Vec<String>,
     disallowed_tools: Vec<String>,
+    system_prompt: Option<String>,
 }
 
 async fn fixture(spec: Spec, api: &MockApi) -> Fixture {
@@ -165,6 +166,10 @@ async fn fixture(spec: Spec, api: &MockApi) -> Fixture {
         permission_mode: spec.permission_mode,
         allowed_tools: spec.allowed_tools.clone(),
         disallowed_tools: spec.disallowed_tools.clone(),
+        system_prompt: spec
+            .system_prompt
+            .clone()
+            .map(rust_agent_sdk::SystemPromptConfig::String),
         strict_mcp_config: true,
         ..Default::default()
     };
@@ -682,6 +687,93 @@ async fn web_search_is_declared_as_a_server_tool_and_never_executed_locally() {
     assert_eq!(result.subtype, "success");
     assert!(!result.is_error);
     assert_eq!(result.result.as_deref(), Some("O bitcoin está caro."));
+}
+
+// ---------------------------------------------------------------------------
+// Breakpoints de prompt cache (a regra do cache_opt do jai)
+// ---------------------------------------------------------------------------
+
+fn cache_ttl(block: &Value) -> Option<&str> {
+    block["cache_control"]["ttl"].as_str()
+}
+
+fn count_breakpoints(value: &Value) -> usize {
+    match value {
+        Value::Object(map) => {
+            usize::from(map.contains_key("cache_control"))
+                + map.values().map(count_breakpoints).sum::<usize>()
+        }
+        Value::Array(items) => items.iter().map(count_breakpoints).sum(),
+        _ => 0,
+    }
+}
+
+#[tokio::test]
+async fn cache_breakpoints_follow_the_anchor_and_tail_layout_on_the_wire() {
+    let api = MockApi::start(vec![
+        sse_tool_call("Bash", &json!({"command": "echo cache"})),
+        sse_text("feito"),
+    ])
+    .await;
+    let mut fx = fixture(
+        Spec {
+            tools: Some(vec!["Bash".to_string(), "WebSearch".to_string()]),
+            permission_mode: Some(PermissionMode::BypassPermissions),
+            system_prompt: Some("Você é um agente de teste.".to_string()),
+            ..Default::default()
+        },
+        &api,
+    )
+    .await;
+    let _ = run_one(&mut fx, "rode echo").await;
+    let requests = api.requests().await;
+    assert_eq!(requests.len(), 2);
+
+    for request in &requests {
+        // Âncora 1h na última tool CLIENTE; server tool nunca leva breakpoint.
+        let tools = request["tools"].as_array().expect("tools");
+        let marked: Vec<&Value> = tools
+            .iter()
+            .filter(|t| t.get("cache_control").is_some())
+            .collect();
+        assert_eq!(marked.len(), 1, "uma âncora de tools: {tools:?}");
+        let last_client = tools
+            .iter()
+            .rev()
+            .find(|t| t.get("type").is_none())
+            .expect("tool cliente");
+        assert_eq!(cache_ttl(last_client), Some("1h"));
+
+        // Âncora 1h no último bloco de system, e só nele.
+        let system = request["system"].as_array().expect("system");
+        assert_eq!(cache_ttl(system.last().expect("system")), Some("1h"));
+        assert!(system[..system.len() - 1]
+            .iter()
+            .all(|b| b.get("cache_control").is_none()));
+    }
+
+    // Primeiro request: uma mensagem só, então a cauda é um breakpoint.
+    let first = &requests[0];
+    assert_eq!(count_breakpoints(first), 3, "{first}");
+    let first_tail = first["messages"][0]["content"]
+        .as_array()
+        .and_then(|c| c.last())
+        .expect("bloco");
+    assert_eq!(cache_ttl(first_tail), Some("5m"));
+
+    // Segundo request: cauda 5m no último bloco de messages[-2] (o tool_use)
+    // e de messages[-1] (o tool_result), e o teto de 4 no total.
+    let second = &requests[1];
+    let messages = second["messages"].as_array().expect("messages");
+    let n = messages.len();
+    let tail_of = |i: usize| messages[i]["content"].as_array().and_then(|c| c.last());
+    let penultimate = tail_of(n - 2).expect("messages[-2]");
+    assert_eq!(penultimate["type"], "tool_use");
+    assert_eq!(cache_ttl(penultimate), Some("5m"));
+    let last = tail_of(n - 1).expect("messages[-1]");
+    assert_eq!(last["type"], "tool_result");
+    assert_eq!(cache_ttl(last), Some("5m"));
+    assert_eq!(count_breakpoints(second), 4, "{second}");
 }
 
 #[tokio::test]

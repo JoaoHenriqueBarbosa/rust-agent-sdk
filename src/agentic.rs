@@ -21,7 +21,6 @@ use crate::compact::auto_compact::AutoCompactConfig;
 use crate::compact::compact::CompactionEngine;
 use crate::compact::file_tracker::{ReadFileTracker, POST_COMPACT_MAX_LINES_PER_FILE};
 use crate::errors::Result;
-use crate::messages::api_format::inject_cache_control;
 use crate::messages::normalize::{
     apply_tool_result_budget_default_persisting, ensure_tool_result_pairing,
     normalize_messages_for_api,
@@ -756,8 +755,8 @@ impl AgenticLoop {
                 messages_for_query = normalize_messages_for_api(&messages_for_query);
                 ensure_tool_result_pairing(&mut messages_for_query);
 
-                // ─── Inject cache_control ─────────────────────────────
-                inject_cache_control(&mut messages_for_query, &mut self.options.system_prompt);
+                // Os breakpoints de cache não são postos aqui: o AnthropicClient
+                // os redistribui no corpo que sai (api::cache_breakpoints).
 
                 // ─── Per-turn tracking ────────────────────────────────
                 // Port: let assistantMessages = [], toolResults = [], toolUseBlocks = [],
