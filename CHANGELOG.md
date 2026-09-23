@@ -5,6 +5,12 @@ Versões ainda não publicadas ficam em `Unreleased`.
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/JoaoHenriqueBarbosa/rust-agent-sdk/compare/v0.1.1...v0.2.0) - 2026-09-23
+
+### Added
+
+- [**breaking**] últimas lacunas de paridade do transporte nativo com o CLI 2.1.90
+
 ### Mudado: as últimas lacunas de paridade do transporte nativo com o CLI 2.1.90
 
 Cada item segue o JS de referência e, onde o comportamento importa para o
