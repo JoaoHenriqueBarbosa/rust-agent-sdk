@@ -1,6 +1,6 @@
 [package]
 name = "prana"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 # O maior piso das dependências é o do sqlx 0.9 (backend Postgres opcional).
 rust-version = "1.94"

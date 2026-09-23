@@ -5,6 +5,12 @@ Versões ainda não publicadas ficam em `Unreleased`.
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/JoaoHenriqueBarbosa/rust-agent-sdk/compare/v0.1.0...v0.1.1) - 2026-09-23
+
+### Fixed
+
+- *(ci)* clippy do Rust 1.98 e teste que depende do CLI real
+
 ### Adicionado: `ClaudeSDKClient::with_native_transport()`
 
 Monta o `NativeApiTransport` dentro do `connect`, a partir das mesmas opções
