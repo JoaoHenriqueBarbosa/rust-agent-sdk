@@ -5,6 +5,12 @@ Versões ainda não publicadas ficam em `Unreleased`.
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/JoaoHenriqueBarbosa/rust-agent-sdk/compare/v0.2.0...v0.3.0) - 2026-09-23
+
+### Added
+
+- *(native)* subagentes em paralelo e validação de input como o CLI 2.1.90
+
 ### Mudado: subagentes em paralelo, `StreamingToolExecutor` e chaves desconhecidas
 
 - **Subagentes do mesmo turno rodam juntos.** O `Agent` do transporte nativo
