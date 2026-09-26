@@ -62,7 +62,7 @@ html5ever = "0.38"
 markup5ever_rcdom = "0.38"
 
 # Retry
-rand = "0.8"
+rand = "0.10"
 
 # Optional session-store backends. Each is gated behind a feature so the
 # default build (and the published core) stays free of heavy transport deps.
