@@ -58,7 +58,7 @@ color_quant = "1.1"
 # mesmo algoritmo do domino que o turndown do CLI usa) para o port do
 # turndown em src/tools/html_to_markdown.rs.
 url = "2"
-html5ever = "0.38"
+html5ever = "0.40"
 markup5ever_rcdom = "0.38"
 
 # Retry
